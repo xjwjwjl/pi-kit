@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.cache/
+.DS_Store
+
+# Local scratch/output areas
+work/*
+outputs/*
+!work/.gitkeep
+!outputs/.gitkeep
+
+# Test and coverage output
+coverage/
+.vitest/
