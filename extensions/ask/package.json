@@ -1,0 +1,24 @@
+{
+  "name": "pi-ask-user",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A lightweight structured ask-user tool for pi. Supports free text, single choice, multiple choice, and custom answers in a tabbed multi-question dialog.",
+  "keywords": [
+    "pi-package",
+    "pi-extension"
+  ],
+  "type": "module",
+  "license": "MIT",
+  "author": "",
+  "pi": {
+    "extensions": [
+      "./ask_user.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "name": "clickhouse-client",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "smoke:run-query": "node --experimental-strip-types ./tests/run-query-smoke.ts"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "dependencies": {
+    "@clickhouse/client": "^1.18.3",
+    "@sinclair/typebox": "^0.34.41"
+  }
+}

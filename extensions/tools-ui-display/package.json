@@ -1,0 +1,45 @@
+{
+  "name": "tools-ui-display",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Compact TUI renderers for pi built-in read, write, bash, and edit tools.",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "tools-ui"
+  ],
+  "main": "./index.ts",
+  "files": [
+    "README.md",
+    "commands/",
+    "components/",
+    "core-utils.ts",
+    "docs/",
+    "format/",
+    "index.ts",
+    "renderers/",
+    "settings/",
+    "style.ts",
+    "tui-utils.ts"
+  ],
+  "scripts": {
+    "test": "node --experimental-strip-types --import ./test/register-ts-loader.mjs --test test/**/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.79.10",
+    "@earendil-works/pi-tui": "0.79.10",
+    "@types/node": "^24.3.0",
+    "typescript": "^5.7.3"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}

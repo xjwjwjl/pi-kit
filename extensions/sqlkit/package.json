@@ -1,0 +1,29 @@
+{
+  "name": "sqlkit",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test:v1": "node --import tsx ./scripts/test-v1.ts",
+    "verify:extension": "node --import tsx ./scripts/verify-extension.ts",
+    "verify:pi-load": "node --import tsx ./scripts/verify-pi-load.ts",
+    "verify:pi-print": "node --import tsx ./scripts/verify-pi-print.ts",
+    "verify:pi-write-blocks": "node --import tsx ./scripts/verify-pi-write-blocks.ts",
+    "verify:pi-agent-scenarios": "node --import tsx ./scripts/verify-pi-agent-scenarios.ts",
+    "verify:all": "npm run check && npm run test:v1 && npm run verify:extension && npm run verify:pi-load && npm run verify:pi-print && npm run verify:pi-write-blocks",
+    "verify:all:local": "npm run verify:all && npm run smoke:local && npm run verify:pi-agent-scenarios",
+    "smoke:local": "node --import tsx ./scripts/smoke-local.ts"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "dependencies": {
+    "@clickhouse/client": "^1.18.3",
+    "@sinclair/typebox": "^0.34.41",
+    "tsx": "^4.20.6",
+    "mysql2": "^3.14.1"
+  }
+}

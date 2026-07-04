@@ -1,0 +1,57 @@
+{
+  "sources": [
+    {
+      "name": "mysql_local",
+      "dialect": "mysql",
+      "read_only": true,
+      "allow_apply": false,
+      "access": {
+        "databases": {
+          "allow": ["app_db"],
+          "deny": ["mysql", "sys", "performance_schema", "information_schema"]
+        },
+        "tables": [
+          {
+            "database": "app_db",
+            "allow": ["users", "orders", "order_*"],
+            "deny": ["audit_log", "payments_secret"]
+          }
+        ]
+      },
+      "options": {
+        "host": "127.0.0.1",
+        "port": 3306,
+        "user": "readonly_user",
+        "password_env": "SQLKIT_MYSQL_PASSWORD",
+        "database": "app_db",
+        "query_timeout_ms": 30000,
+        "pool_size": 5
+      }
+    },
+    {
+      "name": "clickhouse_local",
+      "dialect": "clickhouse",
+      "read_only": true,
+      "allow_apply": false,
+      "access": {
+        "databases": {
+          "allow": ["default", "analytics"]
+        },
+        "tables": [
+          {
+            "database": "analytics",
+            "allow": ["events_*", "daily_*"],
+            "deny": ["raw_secrets"]
+          }
+        ]
+      },
+      "options": {
+        "url": "http://127.0.0.1:8123",
+        "username": "default",
+        "password": "",
+        "database": "default",
+        "request_timeout_ms": 30000
+      }
+    }
+  ]
+}
