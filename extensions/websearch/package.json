@@ -1,0 +1,24 @@
+{
+  "name": "deepseek-websearch",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "files": [
+    "index.ts",
+    "runtime.ts",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --experimental-strip-types --import ./test/register-ts-loader.mjs --test test/**/*.test.ts",
+    "smoke": "node --experimental-strip-types ./scripts/smoke.ts"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

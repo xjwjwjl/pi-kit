@@ -7,8 +7,9 @@ Personal Pi extension and skill workspace.
 ```text
 extensions/
   my-extension/
+    package.json
     index.ts
-    README.md
+    node_modules/
     src/
 skills/
   my-skill/
@@ -16,60 +17,41 @@ skills/
     scripts/
     references/
     assets/
-shared/
-tests/
-fixtures/
 docs/
-work/
-outputs/
 ```
+
+Each extension is an independent Pi package. Extensions are registered individually in `~/.pi/agent/settings.json` under the `extensions` array.
 
 ## Add an extension
 
-Create a directory under `extensions/` with an `index.ts` entry file:
+Create a directory under `extensions/` with `package.json` and `index.ts`:
 
-```text
-extensions/my-extension/index.ts
+```json
+// extensions/my-extension/package.json
+{
+  "name": "my-extension",
+  "private": true,
+  "type": "module",
+  "pi": { "extensions": ["./index.ts"] }
+}
 ```
 
-The root `package.json` loads `extensions/*/index.ts` and excludes underscore-prefixed groups such as `extensions/_experimental/`.
+Then register it in `~/.pi/agent/settings.json`:
+
+```json
+"extensions": [
+  "D:/code/pi-kit/extensions/my-extension"
+]
+```
 
 ## Add a skill
 
-Create a directory under `skills/` with a `SKILL.md` file:
-
-```text
-skills/my-skill/SKILL.md
-```
-
-The root `package.json` loads direct children of `skills/` and excludes underscore-prefixed groups such as `skills/_experimental/`.
-
-## Try or install
-
-Run for one Pi session without installing:
-
-```bash
-pi -e /Users/wjinlin/code/pi-kit
-```
-
-Install globally for personal use:
-
-```bash
-pi install /Users/wjinlin/code/pi-kit
-```
-
-Install into a project-local `.pi/settings.json`:
-
-```bash
-pi install -l /Users/wjinlin/code/pi-kit
-```
+Create a directory under `skills/` with a `SKILL.md` file.
 
 ## Conventions
 
-- Keep each extension in `extensions/<name>/`.
-- Keep the Pi entry file at `extensions/<name>/index.ts`.
-- Keep each skill in `skills/<name>/`.
-- Keep the skill entry file at `skills/<name>/SKILL.md`.
-- Put shared code in `shared/`, not inside another extension.
-- Put experiments in `extensions/_experimental/` or `skills/_experimental/`; they are excluded by the manifest.
-- Put temporary work in `work/` and user-facing generated files in `outputs/`.
+- Use kebab-case for extension and skill directory names.
+- Each extension is a self-contained Pi package with its own `package.json` and `node_modules/`.
+- Keep extension entry logic in `index.ts`; move larger implementations into `src/`.
+- Keep each skill in `skills/<name>/SKILL.md`.
+- Put experiments in `extensions/_experimental/` or `skills/_experimental/`.

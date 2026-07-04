@@ -1,0 +1,10 @@
+{
+  "name": "no-token-footer",
+  "version": "1.0.0",
+  "description": "Extension that removes token count from footer",
+  "main": "index.ts",
+  "type": "module",
+  "keywords": ["pi", "extension", "footer", "token"],
+  "author": "",
+  "license": "MIT"
+}

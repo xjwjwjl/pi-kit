@@ -1,0 +1,43 @@
+{
+  "name": "pi-draw",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "pi-native diagram scene generation, saving, and preview.",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "scripts": {
+    "build:web": "vite build --config web/vite.config.ts",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "verify": "npm run build:web && npm run typecheck && npm run test"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.19.6",
+    "hono": "^4.10.7"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.79.9",
+    "@excalidraw/excalidraw": "^0.18.0",
+    "@types/node": "^24.12.4",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^5.1.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tsx": "^4.22.4",
+    "typescript": "^5.9.3",
+    "mermaid": "^11.15.0",
+    "vite": "^7.2.7"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "pi-pane",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Open a new terminal pane running pi from inside pi.",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/**/*.test.ts"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.79.9",
+    "@types/node": "^24.12.4"
+  }
+}
