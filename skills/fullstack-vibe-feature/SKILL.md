@@ -1,5 +1,5 @@
 ---
-name: gva-fullstack-vibe-feature
+name: fullstack-vibe-feature
 description: "用于在 admin 风格全栈项目中实现新业务功能。后端分层：server/api/v1/{module}、server/service/{module}、server/model/{module}；前端分层：web/src/api/{module}.js、web/src/view/{module}。遵循团队规范：保持既有目录风格，不新建 router 目录/enter.go/GroupApp 聚合，用 Register/NewService 显式构造函数 DI，前端以 api/view/components 组织。"
 ---
 
