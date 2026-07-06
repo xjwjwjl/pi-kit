@@ -1,37 +1,37 @@
-# Backend Convention
+# 后端规范
 
-## Directory Layout
+## 目录分层
 
-For module `{module}`, prefer:
+模块 `{module}` 的文件结构：
 
 ```text
-server/api/v1/{module}/{module}.go      # Register + Handlers
-server/service/{module}/{module}.go     # Business logic
-server/model/{module}/{module}.go       # DB model
+server/api/v1/{module}/{module}.go      # Register + Handler
+server/service/{module}/{module}.go     # 业务逻辑
+server/model/{module}/{module}.go       # DB 模型
 server/model/{module}/request/{module}.go
 server/model/{module}/response/{module}.go
-server/utils/autosync/autosync.go       # AutoApiGroup wrapper (shared utility)
+server/utils/autosync/autosync.go       # AutoApiGroup 工具（项目共享一份）
 ```
 
-Do not create new module router directories:
+禁止创建模块级路由目录：
 
 ```text
 server/router/{module}/
 ```
 
-Do not create new module aggregators:
+禁止创建模块级聚合文件：
 
 ```text
 server/**/enter.go
 ```
 
-## API Layer
+## API 层
 
-The API package owns route registration and handler methods. Use `autosync.AutoApiGroup` to eliminate Method/Path duplication between Gin route registration and Casbin `sys_apis` seeding.
+API 包负责路由注册和 handler 方法。使用 `autosync.AutoApiGroup` 消除 Gin 路由注册和 Casbin `sys_apis` 写入之间的 Method/Path 重复。
 
-### Shared Utility: autosync.AutoApiGroup
+### 共享工具：autosync.AutoApiGroup
 
-Place a single copy of `autosync.go` under `server/utils/autosync/`. Each `POST/GET/PUT/DELETE` call registers the Gin route and appends a `*Route` entry to a global registry. `Flush(db)` at the end of `initBizRouter` writes all entries to `sys_apis` in one batch via `FirstOrCreate`, then clears the registry.
+在 `server/utils/autosync/` 下放置一份 `autosync.go`。每次 `POST/GET/PUT/DELETE` 调用既注册 Gin 路由，也追加一条 `*Route` 到全局注册表。`router_biz.go` 末尾调用 `Flush(db)` 将所有条目批量写入 `sys_apis`（`FirstOrCreate`），然后清空注册表。
 
 ```go
 package autosync
@@ -59,12 +59,12 @@ func (r *Route) SetDesc(s string) *Route
 func Flush(db *gorm.DB)
 ```
 
-### Recommended Usage
+### 推荐用法
 
 ```go
 package order
 
-import "{{GO_MODULE}}/utils/autosync"
+import "your-module-path/utils/autosync"
 
 func Register(private, public *gin.RouterGroup, db *gorm.DB, log *zap.Logger) {
     api := NewApi(moduleService.NewService(db, log), log)
@@ -81,18 +81,18 @@ func Register(private, public *gin.RouterGroup, db *gorm.DB, log *zap.Logger) {
 func (a *Api) List(c *gin.Context) { /* bind -> svc -> response */ }
 ```
 
-Key points:
-- Zero Method/Path duplication between Gin routes and Casbin API entries
-- `FirstOrCreate` semantics — safe to run on every startup, won't overwrite records modified via admin UI
-- Adding a new endpoint only requires one line of code
-- `SetApiGroup` is sticky: applies to all subsequent routes until changed
-- Routes without `.SetDesc()` still get a `sys_apis` record, just with empty description
+要点：
+- Gin 路由和 Casbin API 条目零重复
+- `FirstOrCreate` 语义 — 每次启动可安全重跑，不覆盖管理后台修改的记录
+- 新增接口只需一行代码
+- `SetApiGroup` 有粘性：对其后所有路由生效，直到再次调用
+- 未调 `.SetDesc()` 的路由仍会写入 `sys_apis`，描述为空
 
-Handlers should bind input, call service methods, log failures, and write responses. Do not put business workflows or database query chains in handlers.
+Handler 应只做参数绑定、调用 service、记录日志、返回响应。不要在 handler 中写业务流程或数据库查询链。
 
-## Service Layer
+## Service 层
 
-Services must declare dependencies explicitly:
+Service 必须显式声明依赖：
 
 ```go
 type Service struct {
@@ -108,7 +108,7 @@ func NewService(db *gorm.DB, log *zap.Logger) *Service {
 }
 ```
 
-Use `context.Context` for service methods when the caller has request context:
+调用方有请求上下文时，service 方法使用 `context.Context`：
 
 ```go
 func (s *Service) List(ctx context.Context, req request.List) ([]response.Item, int64, error)
@@ -117,58 +117,75 @@ func (s *Service) Update(ctx context.Context, req request.Update) error
 func (s *Service) Delete(ctx context.Context, req request.Delete) error
 ```
 
-## Wiring
+## 接入
 
-Route wiring goes into `server/initialize/router_biz.go` → `initBizRouter()`. Call each module's `Register()` then batch API and menu writes at the end:
+路由注册在 `server/initialize/router_biz.go` → `initBizRouter()`。依次调用各模块的 `Register()`，最后批量写入 API 和菜单：
 
 ```go
 product.Register(privateGroup, publicGroup, global.GVA_DB, global.GVA_LOG)
 order.Register(privateGroup, publicGroup, global.GVA_DB, global.GVA_LOG)
 
 autosync.Flush(global.GVA_DB)
-autosync.FlushMenus(global.GVA_DB)
+autosync.FlushMenus(db, items)
 ```
 
-Table migration goes into `server/initialize/gorm_biz.go` → `bizModel()`:
+表迁移在 `server/initialize/gorm_biz.go` → `bizModel()`：
 
 ```go
 db.AutoMigrate(&order.Order{})
 ```
 
-Use global state only at the outer wiring point. Do not hide dependencies in a catch-all struct unless a repository-local standard requires it.
+全局状态只在最外层接入点使用。不要用万能结构体隐藏依赖，除非项目本地标准明确要求。
 
-## Menu and Permission Initialization
+## 菜单初始化
 
-Menu creation uses the same collect-then-batch pattern as route registration. Each module calls `autosync.EnsureMenu()` in its `Register()` to declare a menu entry. `autosync.FlushMenus(db)` in `router_biz.go` writes all menus to `sys_base_menus` and binds them to the admin role (888) in one pass, then clears the registry.
+各模块导出 `Menu` 变量。在 `router_biz.go` 中组装成菜单树，一次性传入 `autosync.FlushMenus(db, items)`。
 
 ```go
-autosync.EnsureMenu(autosync.Menu{
-    Name:   "product",
-    Title:  "产品管理",
-    Icon:   "box",
-    Parent: "example",  // 父菜单 name，空 = 顶级
-    Sort:   10,
-})
+// ── 模块内导出 ──
+package product
+var Menu = autosync.MenuItem{
+    Name:  "product",
+    Title: "产品管理",
+    Icon:  "box",
+    Sort:  10,
+}
+
+// ── router_biz.go 集中编排 ──
+var system = autosync.MenuItem{Name: "system"} // 桩，引用已有菜单
+
+autosync.FlushMenus(db,
+    dashboard.Menu,
+    system.Sub(
+        user.Menu,
+        role.Menu,
+        product.Menu,   // 挂到已有 "system" 下
+    ),
+    autosync.MenuItem{Name: "biz", Title: "业务管理", Icon: "chart", Sort: 10}.Sub(
+        autosync.MenuItem{Name: "flow", Title: "流量分析", Icon: "flow", Sort: 10},
+    ),
+)
 ```
 
-`Menu` fields:
-- `Name` — unique key, used as `sys_base_menus.name` and `sys_base_menus.path`
-- `Title` — display name (`sys_base_menus.meta.title`)
-- `Icon` — menu icon (`sys_base_menus.meta.icon`)
-- `Parent` — parent menu `name` (empty = top-level)
-- `Component` — frontend file path, defaults to `"view/{name}/index.vue"`
-- `Sort` — sort order
+`MenuItem` 字段：
+- `Name` — 唯一键，同时作为 `sys_base_menus.name` 和 `sys_base_menus.path`
+- `Title` — 显示名（`sys_base_menus.meta.title`）
+- `Icon` — 图标（`sys_base_menus.meta.icon`）
+- `Component` — 前端文件路径，默认 `"view/{name}/index.vue"`
+- `Sort` — 排序
+- `Children` — 子菜单，通过 `.Sub(...)` 设置，无字符串 `Parent` 字段
 
-Key principles:
-- Menu records go into `sys_base_menus` with `name` as the stable lookup key
-- `FirstOrCreate` semantics — safe to re-run, won't overwrite admin UI changes
-- Parent menu referenced by `name`, not database ID — avoids hardcoded IDs
-- All menus bound to admin role (authority_id=888) by default
-- Registry cleared after `FlushMenus()`, no memory retained
+核心原则：
+- 菜单树在 `router_biz.go` 集中组装 — 层级可见、编译期校验
+- `MenuItem{Name: "x"}` 可作为"桩"引用 DB 中已有菜单
+- `Sub()` 可引用任意菜单，不论来自代码还是管理后台
+- `FirstOrCreate` — 安全重入，不覆盖已有数据
+- 所有菜单默认绑定 admin 角色（authority_id=888）
+- 无全局菜单注册表 — 菜单树直接传入 `FlushMenus`
 
-## Naming
+## 命名
 
-- API struct: `Api`, or `{Module}Api` when several APIs share a package.
-- Service struct: `Service`, or `{Module}Service` when several services share a package.
-- Constructor: `NewService(...)`.
-- Route registration: `Register(...)`.
+- API 结构体：`Api`，同包多个时用 `{Module}Api`
+- Service 结构体：`Service`，同包多个时用 `{Module}Service`
+- 构造函数：`NewService(...)`
+- 路由注册函数：`Register(...)`

@@ -1,3 +1,4 @@
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import {
 	formatAnalyze,
 	formatDatabases,
@@ -33,8 +34,6 @@ type ThemeLike = {
 	fg?: (color: string, text: string) => string;
 	bold?: (text: string) => string;
 };
-
-const ANSI_PATTERN = /\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/y;
 
 function isTheme(value: unknown): value is ThemeLike {
 	return isRecord(value) && (typeof value.fg === "function" || typeof value.bold === "function");
@@ -77,25 +76,7 @@ function error(theme: unknown, text: string): string {
 }
 
 function truncateLine(text: string, width: number): string {
-	if (width <= 0) return "";
-	let visible = 0;
-	let output = "";
-	for (let index = 0; index < text.length;) {
-		ANSI_PATTERN.lastIndex = index;
-		const ansi = ANSI_PATTERN.exec(text);
-		if (ansi && ansi.index === index) {
-			output += ansi[0];
-			index += ansi[0].length;
-			continue;
-		}
-		const char = text[index] ?? "";
-		if (visible >= width) return `${output.slice(0)}…`;
-		if (visible === width - 1 && index < text.length - 1) return `${output}…`;
-		output += char;
-		visible++;
-		index++;
-	}
-	return output;
+	return truncateToWidth(text, width, "…");
 }
 
 function linesComponent(getLines: (width: number) => string[]): RenderComponent {

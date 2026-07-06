@@ -1,40 +1,44 @@
 ---
 name: gva-fullstack-vibe-feature
-description: "Use when implementing new business features in admin-style full-stack projects with backend layers like server/api/v1/{module}, server/service/{module}, server/model/{module} and frontend layers like web/src/api/{module}.js and web/src/view/{module}. Applies the team convention: keep existing directory style, avoid new router directories/enter.go/GroupApp aggregators, use explicit constructor DI via Register/NewService patterns, and organize frontend with api/view/components/composables."
+description: "用于在 admin 风格全栈项目中实现新业务功能。后端分层：server/api/v1/{module}、server/service/{module}、server/model/{module}；前端分层：web/src/api/{module}.js、web/src/view/{module}。遵循团队规范：保持既有目录风格，不新建 router 目录/enter.go/GroupApp 聚合，用 Register/NewService 显式构造函数 DI，前端以 api/view/components 组织。"
 ---
 
-# Admin Full-Stack Vibe Feature
+# Admin 全栈业务功能规范
 
-## Quick Start
+纯规范文档 — 无模板、无脚手架。加载后按规范自行编写代码。
 
-1. Detect project layout: `./scripts/detect_project.sh .`
-2. Scaffold a new module: `./scripts/scaffold_feature.sh <module>`
-3. Wire in `server/initialize/router_biz.go` — import module, call `Register(...)`, then `autosync.Flush(db)` / `autosync.FlushMenus(db)`.
-4. Run checks: `./scripts/vibe_check.sh <module>`
+## 目录分层
 
-## Core Rules
+```
+server/
+  api/v1/{module}/{module}.go    — Register + Handler
+  service/{module}/{module}.go   — 业务逻辑
+  model/{module}/{module}.go     — DB 模型
+  model/{module}/request/        — 请求 DTO
+  model/{module}/response/       — 响应 DTO
+  utils/autosync/autosync.go     — 路由/菜单自动同步（共享工具）
 
-- No new `server/router/{module}/` directories.
-- No new `enter.go` files.
-- No `ApiGroupApp` / `ServiceGroupApp` / `RouterGroupApp`.
-- No `Container` struct.
-- Route registration lives in `server/api/v1/{module}/{module}.go` via `Register(...)`.
-- Services use explicit constructor DI: `NewService(db, log)`.
-- Frontend: `web/src/api/{module}.js` + `web/src/view/{module}/` with `components/` and `composables/`.
+web/
+  src/api/{module}.js            — API 封装（唯一允许 import request 的地方）
+  src/view/{module}/
+    index.vue                    — 页面
+    components/                  — UI 子组件（可选）
+```
 
-## References
+## 核心规则
 
-Read on-demand when more detail is needed:
+- 不创建 `server/router/{module}/` 目录
+- 不创建 `enter.go` 文件
+- 不用 `ApiGroupApp` / `ServiceGroupApp` / `RouterGroupApp`
+- 不用 `Container` 结构体
+- 路由注册在 `server/api/v1/{module}/{module}.go` 的 `Register()` 中
+- Service 用显式构造函数 DI：`NewService(db, log)`
+- 前端 `web/src/api/` 是唯一调用 `@/utils/request` 的地方
 
-- [workflow.md](references/workflow.md) — full build order and checks
-- [backend.md](references/backend.md) — API/Service/Model conventions, autosync wrapper, menu wiring
-- [frontend.md](references/frontend.md) — page structure, API wrappers, composables
-- [forbidden.md](references/forbidden.md) — patterns to avoid
+## 参考文档
 
-## Override Precedence
+按需加载：
 
-Repository-local rules override this skill. Check these files in order, first match wins:
-
-- `vibe/standard/spec/*.md`
-- `vibe/*.md`
-- `AGENTS.md`
+- [backend.md](references/backend.md) — API/Service/Model 规范、autosync 用法、菜单声明
+- [frontend.md](references/frontend.md) — 目录分层、API 封装规范
+- [forbidden.md](references/forbidden.md) — 禁止的写法
