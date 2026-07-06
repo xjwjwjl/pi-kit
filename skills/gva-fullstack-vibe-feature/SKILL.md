@@ -1,6 +1,6 @@
 ---
 name: gva-fullstack-vibe-feature
-description: Use when implementing new business features in admin-style full-stack projects with backend layers like server/api/v1/{module}, server/service/{module}, server/model/{module} and frontend layers like web/src/api/{module}.js and web/src/view/{module}. Applies the team convention: keep existing directory style, avoid new router directories/enter.go/GroupApp aggregators, use explicit constructor DI via Register/NewService patterns, and organize frontend with api/view/components/composables.
+description: "Use when implementing new business features in admin-style full-stack projects with backend layers like server/api/v1/{module}, server/service/{module}, server/model/{module} and frontend layers like web/src/api/{module}.js and web/src/view/{module}. Applies the team convention: keep existing directory style, avoid new router directories/enter.go/GroupApp aggregators, use explicit constructor DI via Register/NewService patterns, and organize frontend with api/view/components/composables."
 ---
 
 # Admin Full-Stack Vibe Feature
