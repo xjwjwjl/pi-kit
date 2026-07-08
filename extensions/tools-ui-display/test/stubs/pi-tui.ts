@@ -43,6 +43,14 @@ export function visibleWidth(text: string): number {
 	return text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").length;
 }
 
+export function getCapabilities() {
+	return { images: null, trueColor: true, hyperlinks: false };
+}
+
+export function hyperlink(text: string, _url: string): string {
+	return text;
+}
+
 export function wrapTextWithAnsi(text: string, width: number): string[] {
 	if (width <= 0) return [];
 	if (text.length === 0) return [""];

@@ -3,7 +3,7 @@ import { createEditToolDefinition } from "@earendil-works/pi-coding-agent";
 import { DiffPreviewBlock } from "../components/diff-preview-block.js";
 import { DEFAULT_EDIT_DISPLAY_OPTIONS, type EditDisplayOptions } from "../settings/options.js";
 import { editDiffStatText, editPathText, invalidText, metadataText, numericText, toolNameText } from "../style.js";
-import { emptyComponent, shortPath, textBlocks } from "../tui-utils.js";
+import { emptyComponent, linkPath, shortPath, textBlocks } from "../tui-utils.js";
 import { type CompactSummaryRowState, ensureCompactToolRow, getCompactCallText, setCompactRow, settleCompactSummaryRow, settleCompactRow } from "./compact-text.js";
 import { compactEditError, editSummaryText, shouldInlineEditDiff, type EditArgs } from "./edit-helpers.js";
 import { getExpandedResultRenderer } from "./render-expanded-result.js";
@@ -40,8 +40,10 @@ function resolveEditDisplayOptions(source: EditDisplayOptionsSource): Required<E
 	return { inlineDiffMaxLines };
 }
 
-function editTargetText(args: EditArgs, theme: Theme): string {
-	return editPathText(shortPath(resolveToolPath(args)), theme);
+function editTargetText(args: EditArgs, cwd: string, theme: Theme): string {
+	const rawPath = resolveToolPath(args);
+	const styled = editPathText(shortPath(rawPath), theme);
+	return rawPath ? linkPath(styled, rawPath, cwd) : styled;
 }
 
 function formatEditSummaryPart(part: string, theme: Theme): string {
@@ -113,7 +115,7 @@ export function registerCompactEdit(
 			renderBuiltInEditCall(original, args, theme, context, state);
 
 			const row = ensureCompactToolRow(state, context.lastComponent);
-			const target = editTargetText(args as EditArgs, theme);
+			const target = editTargetText(args as EditArgs, cwd, theme);
 			const preview = previewFromState(state);
 			const previewSummary = preview?.diff ? editSummaryText(preview.diff) : pendingSummary(state);
 			const error = preview?.error ? compactEditError(preview.error) : undefined;
@@ -123,7 +125,7 @@ export function registerCompactEdit(
 		renderResult(result, options, theme, context) {
 			const state = context.state as CompactEditState;
 			const args = context.args as EditArgs;
-			const target = editTargetText(args, theme);
+			const target = editTargetText(args, cwd, theme);
 			const callText = getCompactCallText(state);
 			const renderExpanded = getExpandedResultRenderer(original as any, result, options, theme, {
 				...context,

@@ -1,4 +1,6 @@
-import { Container, Text } from "@earendil-works/pi-tui";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { Container, getCapabilities, hyperlink, Text } from "@earendil-works/pi-tui";
 
 export {
 	countLines,
@@ -19,4 +21,10 @@ export function emptyComponent() {
 export function setText(component: Text, content: string) {
 	component.setText(content);
 	return component;
+}
+
+export function linkPath(styledText: string, rawPath: string, cwd: string): string {
+	if (!getCapabilities().hyperlinks) return styledText;
+	const absolutePath = resolve(cwd, rawPath);
+	return hyperlink(styledText, pathToFileURL(absolutePath).href);
 }

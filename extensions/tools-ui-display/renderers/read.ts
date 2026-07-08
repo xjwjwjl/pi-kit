@@ -2,7 +2,7 @@ import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { createReadToolDefinition } from "@earendil-works/pi-coding-agent";
 import { CompactHintBlock } from "../components/compact-hint-block.js";
 import { invalidText, metadataText, paramText, readMetadataText, readPathText, toolNameText } from "../style.js";
-import { emptyComponent, shortPath, textBlocks } from "../tui-utils.js";
+import { emptyComponent, linkPath, shortPath, textBlocks } from "../tui-utils.js";
 import { compactFileToolError, compactFileToolHint } from "./compact-error.js";
 import { type CompactSummaryRowState, ensureCompactToolRow, getCompactCallText, setCompactRow, settleCompactSummaryRow, settleCompactRow } from "./compact-text.js";
 import { summarizeRead } from "./read-helpers.js";
@@ -25,8 +25,11 @@ function lineRangeText(args: ReadArgs, theme: Theme): string {
 
 type CompactReadState = CompactSummaryRowState & BuiltInRendererSlots;
 
-function readTargetText(args: ReadArgs, theme: Theme): string {
-	return `${readPathText(shortPath(resolveToolPath(args)), theme)}${lineRangeText(args, theme)}`;
+function readTargetText(args: ReadArgs, cwd: string, theme: Theme): string {
+	const rawPath = resolveToolPath(args);
+	const styled = readPathText(shortPath(rawPath), theme);
+	const linked = rawPath ? linkPath(styled, rawPath, cwd) : styled;
+	return `${linked}${lineRangeText(args, theme)}`;
 }
 
 function readPrefix(theme: Theme): string {
@@ -50,7 +53,7 @@ export function registerCompactRead(pi: ExtensionAPI, cwd: string, renderShellSo
 			if (expandedCall) return expandedCall;
 
 			const row = ensureCompactToolRow(state, context.lastComponent === state.builtInCallComponent ? undefined : context.lastComponent);
-			const target = readTargetText(args as ReadArgs, theme);
+			const target = readTargetText(args as ReadArgs, cwd, theme);
 			const summary = state.compactSummary ? readMetadataText(state.compactSummary, theme) : "";
 			return setCompactRow(row, readPrefix(theme), target, summary);
 		},
@@ -58,7 +61,7 @@ export function registerCompactRead(pi: ExtensionAPI, cwd: string, renderShellSo
 			const state = context.state as CompactReadState;
 			const callText = getCompactCallText(state);
 			const args = context.args as ReadArgs;
-			const target = readTargetText(args, theme);
+			const target = readTargetText(args, cwd, theme);
 			const renderExpanded = getExpandedResultRenderer(original, result, options, theme, context, state);
 
 			if (context.isError) {

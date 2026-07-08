@@ -1,6 +1,6 @@
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
-import { IndentedWrappedText, type IndentedWrappedTextSuffixCandidate } from "../components/indented-wrapped-text.js";
+import { CompactToolRow, type CompactToolRowSuffixCandidate } from "../components/compact-tool-row.js";
 import { OutputPreviewBlock } from "../components/output-preview-block.js";
 import { commandText } from "../format/bash-command.js";
 import { summarizeBashCommand, type BashCommandDisplay } from "../format/bash-command-summary.js";
@@ -24,7 +24,7 @@ type BashRefreshTimerEntry = {
 	invalidate: () => void;
 };
 
-type CompactBashState = CompactSummaryState<IndentedWrappedText> & BuiltInRendererSlots<BuiltInBashState> & {
+type CompactBashState = CompactSummaryState<CompactToolRow> & BuiltInRendererSlots<BuiltInBashState> & {
 	compactStartedAt?: number;
 	compactEndedAt?: number;
 	compactInterval?: NodeJS.Timeout;
@@ -62,22 +62,22 @@ function adoptBashStart(state: CompactBashState, toolCallId: string, startedAtBy
 	return startedAt;
 }
 
-function ensureBashCallText(state: CompactBashState, component: unknown): IndentedWrappedText {
-	const text = component instanceof IndentedWrappedText ? component : state.compactCallText ?? new IndentedWrappedText();
+function ensureBashCallText(state: CompactBashState, component: unknown): CompactToolRow {
+	const text = component instanceof CompactToolRow ? component : state.compactCallText ?? new CompactToolRow();
 	state.compactCallText = text;
 	return text;
 }
 
-function getBashCallText(state: CompactBashState): IndentedWrappedText | undefined {
+function getBashCallText(state: CompactBashState): CompactToolRow | undefined {
 	return state.compactCallText;
 }
 
 type BashMetadata = {
 	full: string;
-	candidates: IndentedWrappedTextSuffixCandidate[];
+	candidates: CompactToolRowSuffixCandidate[];
 };
 
-function setBashText(component: IndentedWrappedText, command: BashCommandDisplay, metadata: BashMetadata, theme: Theme) {
+function setBashText(component: CompactToolRow, command: BashCommandDisplay, metadata: BashMetadata, theme: Theme) {
 	component.setParts(`${toolNameText("bash", theme)} `, commandText(command.text, theme), metadata.full, metadata.candidates);
 	return component;
 }
@@ -107,7 +107,7 @@ function compactBashMetadata(
 	const timeoutOnly = mutedMetadataText([timeout], theme);
 	const commandOnly = mutedMetadataText([command.metadata], theme);
 	const fallback = resultAndDuration || resultOnly || durationOnly || timeoutOnly || commandOnly || full;
-	const candidates: IndentedWrappedTextSuffixCandidate[] = [
+	const candidates: CompactToolRowSuffixCandidate[] = [
 		full,
 		timeoutResultAndDuration,
 		{ text: resultAndDuration, fallback: resultAndDuration === fallback },
@@ -140,28 +140,18 @@ function detachBuiltInBashInterval(state: CompactBashState) {
 	if (state.builtInRendererState) state.builtInRendererState.interval = undefined;
 }
 
-function reuseBashRefreshInterval(
+function manageBashRefreshInterval(
 	toolCallId: string,
 	invalidate: () => void,
 	refreshTimerByToolCallId: Map<string, BashRefreshTimerEntry>,
+	allowCreate: boolean,
 ): NodeJS.Timeout | undefined {
-	const existing = refreshTimerByToolCallId.get(toolCallId);
-	if (!existing) return undefined;
-	existing.invalidate = invalidate;
-	return existing.interval;
-}
-
-function ensureBashRefreshInterval(
-	toolCallId: string,
-	invalidate: () => void,
-	refreshTimerByToolCallId: Map<string, BashRefreshTimerEntry>,
-): NodeJS.Timeout {
 	const existing = refreshTimerByToolCallId.get(toolCallId);
 	if (existing) {
 		existing.invalidate = invalidate;
 		return existing.interval;
 	}
-
+	if (!allowCreate) return undefined;
 	const interval = setInterval(() => refreshTimerByToolCallId.get(toolCallId)?.invalidate(), 1000);
 	interval.unref?.();
 	refreshTimerByToolCallId.set(toolCallId, { interval, invalidate });
@@ -190,9 +180,7 @@ function syncBashRefreshLifecycle(
 		return;
 	}
 
-	const interval = allowCreate
-		? ensureBashRefreshInterval(toolCallId, invalidate, refreshTimerByToolCallId)
-		: reuseBashRefreshInterval(toolCallId, invalidate, refreshTimerByToolCallId);
+	const interval = manageBashRefreshInterval(toolCallId, invalidate, refreshTimerByToolCallId, allowCreate);
 	if (!interval) return;
 	syncCompactBashInterval(state, interval);
 	syncBuiltInBashInterval(state, interval);

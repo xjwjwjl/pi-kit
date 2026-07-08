@@ -2,7 +2,7 @@ import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { createWriteToolDefinition, formatSize } from "@earendil-works/pi-coding-agent";
 import { CompactHintBlock } from "../components/compact-hint-block.js";
 import { invalidText, metadataText, numericText, toolNameText, writePathText } from "../style.js";
-import { countLines, emptyComponent, plural, shortPath, textBlocks } from "../tui-utils.js";
+import { countLines, emptyComponent, linkPath, plural, shortPath, textBlocks } from "../tui-utils.js";
 import { compactFileToolError, compactFileToolHint } from "./compact-error.js";
 import { type CompactSummaryRowState, ensureCompactToolRow, getCompactCallText, setCompactRow, settleCompactSummaryRow, settleCompactRow } from "./compact-text.js";
 import { getExpandedResultRenderer, renderExpandedCall, type BuiltInRendererSlots } from "./render-expanded-result.js";
@@ -33,8 +33,9 @@ function writePrefix(theme: Theme): string {
 	return `${toolNameText("write", theme)} `;
 }
 
-function writeTargetText(path: string, theme: Theme): string {
-	return writePathText(path, theme);
+function writeTargetText(displayPath: string, rawPath: string | undefined, cwd: string, theme: Theme): string {
+	const styled = writePathText(displayPath, theme);
+	return rawPath ? linkPath(styled, rawPath, cwd) : styled;
 }
 
 function pendingWriteSummary(args: WriteArgs, state: CompactWriteState): string | undefined {
@@ -61,28 +62,30 @@ export function registerCompactWrite(pi: ExtensionAPI, cwd: string, renderShellS
 
 			const row = ensureCompactToolRow(state, context.lastComponent === state.builtInCallComponent ? undefined : context.lastComponent);
 			const writeArgs = args as WriteArgs;
-			const path = shortPath(resolveToolPath(writeArgs));
+			const rawPath = resolveToolPath(writeArgs);
+			const displayPath = shortPath(rawPath);
 			const summary = pendingWriteSummary(writeArgs, state);
-			return setCompactRow(row, writePrefix(theme), writeTargetText(path, theme), summary ? formatWriteSummary(summary, theme) : "");
+			return setCompactRow(row, writePrefix(theme), writeTargetText(displayPath, rawPath, cwd, theme), summary ? formatWriteSummary(summary, theme) : "");
 		},
 		renderResult(result, options, theme, context) {
 			const state = context.state as CompactWriteState;
 			const callText = getCompactCallText(state);
-			const path = shortPath(resolveToolPath(context.args as WriteArgs));
+			const rawPath = resolveToolPath(context.args as WriteArgs);
+			const displayPath = shortPath(rawPath);
 			const renderExpanded = getExpandedResultRenderer(original, result, options, theme, context, state);
 
 			if (context.isError) {
 				const rawError = textBlocks(result);
 				const error = compactFileToolError(rawError);
 				const hint = compactFileToolHint(rawError);
-				settleCompactRow(state, callText, "failed", writePrefix(theme), writeTargetText(path, theme), metadataText([invalidText(error, theme)], theme));
+				settleCompactRow(state, callText, "failed", writePrefix(theme), writeTargetText(displayPath, rawPath, cwd, theme), metadataText([invalidText(error, theme)], theme));
 				if (renderExpanded) return renderExpanded();
 				return hint ? new CompactHintBlock(hint, theme) : emptyComponent();
 			}
 
 			const summary = summarizeWrite(context.args as WriteArgs);
 			const compactSummary = summary ? writeSummaryText(summary) : "invalid content";
-			settleCompactSummaryRow(state, callText, "success", compactSummary, writePrefix(theme), writeTargetText(path, theme), formatWriteSummary(compactSummary, theme));
+			settleCompactSummaryRow(state, callText, "success", compactSummary, writePrefix(theme), writeTargetText(displayPath, rawPath, cwd, theme), formatWriteSummary(compactSummary, theme));
 			return renderExpanded?.() ?? emptyComponent();
 		},
 	});

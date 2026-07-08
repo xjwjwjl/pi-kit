@@ -38,7 +38,6 @@ async function registerCompactRenderers(pi: ExtensionAPI, cwd: string, displayOp
 
 export default async function toolsUiDisplayExtension(pi: ExtensionAPI) {
 	const cwd = process.cwd();
-	let compactRenderersScheduled = false;
 	const displayOptions: MutableToolsUiDisplayOptions = {
 		bash: { ...DEFAULT_BASH_DISPLAY_OPTIONS },
 		edit: { ...DEFAULT_EDIT_DISPLAY_OPTIONS },
@@ -55,14 +54,5 @@ export default async function toolsUiDisplayExtension(pi: ExtensionAPI) {
 	}
 
 	registerLazyToolsUiSettingsCommand(pi, displayOptions);
-	pi.on("session_start", async (_event, ctx) => {
-		if (ctx.mode !== "tui" || compactRenderersScheduled) return;
-		compactRenderersScheduled = true;
-		try {
-			await registerCompactRenderers(pi, cwd, displayOptions);
-		} catch (error) {
-			compactRenderersScheduled = false;
-			console.warn("[tools-ui-display] Failed to load compact renderers:", error);
-		}
-	});
+	await registerCompactRenderers(pi, cwd, displayOptions);
 }

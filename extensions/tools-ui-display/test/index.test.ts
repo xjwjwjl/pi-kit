@@ -43,18 +43,13 @@ async function emitSessionStart(stub: ReturnType<typeof createPiStub>, ctx: { ha
 	}
 }
 
-test("extension does not override built-in tools outside TUI sessions", async () => {
+test("extension registers compact renderers on load regardless of mode", async () => {
 	const stub = createPiStub();
 	await toolsUiDisplayExtension(stub.api as any);
 
-	assert.equal(stub.tools.size, 0);
+	// Compact renderers are registered unconditionally — harmless in non-TUI modes.
+	assert.equal(stub.tools.size, 4);
 	assert.ok(stub.commands.get("tools-ui-settings"), "settings command should be registered lazily on load");
-
-	await emitSessionStart(stub, { hasUI: true, mode: "rpc" });
-	assert.equal(stub.tools.size, 0);
-
-	await emitSessionStart(stub, { hasUI: false, mode: "print" });
-	assert.equal(stub.tools.size, 0);
 });
 
 test("extension loads compact renderers only for TUI sessions", async () => {
