@@ -4,10 +4,10 @@
 
 ## 后端
 
-- 创建 `server/router/{module}/` 目录
+- 创建 `{server}/router/{module}/` 目录
 - 创建 `enter.go`、`ApiGroupApp`、`ServiceGroupApp`、`RouterGroupApp`、`Container` 等旧 GVA 样板
 - 添加包级 service 单例，如 `var XxxServiceApp = new(...)`
-- 在 service 包中 import `server/global`
+- 在 service 包中 import `{server}/global`
 - 在 handler 中直接写数据库查询或业务流程
 
 ## 前端
