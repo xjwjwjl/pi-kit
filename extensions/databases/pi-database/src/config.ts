@@ -1,0 +1,214 @@
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import process from "node:process";
+import type { JsonRecord, ResolvedProjectConfig, ResolvedSource, SqlDialect } from "./types.js";
+
+export const CONFIG_FILE_PATH = path.join(".pi", "databases.json");
+
+const TEMPLATE = {
+  version: 1,
+  default_source: "app_mysql",
+  sources: [
+    {
+      name: "app_mysql",
+      dialect: "mysql",
+      allow_write_access: false,
+      options: {
+        host: "127.0.0.1",
+        port: 3306,
+        user: "readonly_user",
+        password: ""
+      }
+    },
+    {
+      name: "analytics_clickhouse",
+      dialect: "clickhouse",
+      allow_write_access: false,
+      options: {
+        url: "http://localhost:8123",
+        username: "default",
+        password: ""
+      }
+    }
+  ]
+};
+
+function isRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
+}
+
+function asBoolean(value: unknown, fallback: boolean): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    if (value.toLowerCase() === "true") return true;
+    if (value.toLowerCase() === "false") return false;
+  }
+  return fallback;
+}
+
+function isDialect(value: unknown): value is SqlDialect {
+  return value === "mysql" || value === "clickhouse";
+}
+
+export function getContextCwd(ctx: unknown): string {
+  return isRecord(ctx) && typeof ctx.cwd === "string" && ctx.cwd ? ctx.cwd : process.cwd();
+}
+
+export function findProjectConfigPath(startDir: string): string | undefined {
+  let current = path.resolve(startDir);
+  while (true) {
+    const configPath = path.join(current, CONFIG_FILE_PATH);
+    if (existsSync(configPath)) return configPath;
+    const parent = path.dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
+  }
+}
+
+function parseConfig(configPath: string): JsonRecord {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(configPath, "utf-8"));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to read ${configPath}: ${message}`);
+  }
+  if (!isRecord(parsed)) throw new Error(`Invalid ${configPath}: expected a JSON object.`);
+  return parsed;
+}
+
+function resolveSource(value: unknown, configPath: string): ResolvedSource {
+  if (!isRecord(value)) throw new Error(`Invalid ${configPath}: every source must be an object.`);
+  const name = asString(value.name);
+  if (!name || !/^[a-z][a-z0-9_-]*$/i.test(name)) {
+    throw new Error(`Invalid ${configPath}: source names must use letters, digits, underscores, or hyphens.`);
+  }
+  if (!isDialect(value.dialect)) throw new Error(`Invalid ${configPath}: source "${name}" has an unsupported dialect.`);
+  if (!isRecord(value.options)) throw new Error(`Invalid ${configPath}: source "${name}" requires an options object.`);
+  const allowWriteAccess = asBoolean(value.allow_write_access, false);
+  const options = { ...value.options };
+  return {
+    name,
+    dialect: value.dialect,
+    options,
+    allowWriteAccess,
+    configPath,
+    cacheKey: JSON.stringify({ name, dialect: value.dialect, options })
+  };
+}
+
+export function loadProjectConfig(cwd: string): ResolvedProjectConfig {
+  const configPath = findProjectConfigPath(cwd);
+  if (!configPath) {
+    throw new Error(`No database config found for ${cwd}. Run /database-init to create .pi/databases.json.`);
+  }
+  const root = parseConfig(configPath);
+  if (root.version !== 1 || !Array.isArray(root.sources)) {
+    throw new Error(`Invalid ${configPath}: expected version 1 with a sources array. Run /database-migrate for the legacy format.`);
+  }
+  const sources = root.sources.map((source) => resolveSource(source, configPath));
+  if (sources.length === 0) throw new Error(`Invalid ${configPath}: sources must not be empty.`);
+  const names = new Set<string>();
+  for (const source of sources) {
+    if (names.has(source.name)) throw new Error(`Invalid ${configPath}: source "${source.name}" is duplicated.`);
+    names.add(source.name);
+  }
+  const defaultSource = asString(root.default_source);
+  if (defaultSource && !names.has(defaultSource)) {
+    throw new Error(`Invalid ${configPath}: default_source "${defaultSource}" does not exist.`);
+  }
+  return { configPath, defaultSource, sources };
+}
+
+export function selectSource(config: ResolvedProjectConfig, requested?: string): ResolvedSource {
+  if (requested) {
+    const source = config.sources.find((item) => item.name === requested);
+    if (!source) throw new Error(`Unknown database source "${requested}". Call database_list_sources first.`);
+    return source;
+  }
+  if (config.defaultSource) return config.sources.find((item) => item.name === config.defaultSource)!;
+  if (config.sources.length === 1) return config.sources[0]!;
+  throw new Error("Multiple database sources are configured without default_source. Pass source or call database_list_sources.");
+}
+
+export function buildDatabaseContextPrompt(cwd: string): string | undefined {
+  try {
+    const config = loadProjectConfig(cwd);
+    const sources = config.sources
+      .map((source) => `- ${source.name}: ${source.dialect}${source.name === config.defaultSource ? " (default)" : ""}`)
+      .join("\n");
+    return [
+      "Configured database sources are available through database_* tools:",
+      sources,
+      "",
+      "For requests about these configured MySQL or ClickHouse databases, use database_* tools instead of bash, mysql, clickhouse-client, or another local database client.",
+      "Use database_list_databases for requests to list databases; use database_list_tables for tables; use database_ping for connectivity; and use database_query only for read-only SQL.",
+      "When the intended source is unclear, call database_list_sources first. Omit source only for the listed default source or when exactly one source exists.",
+      "Use database_write only for an explicit user-requested allowed change. It requires interactive confirmation and must not be retried automatically after a timeout or connection loss.",
+      "If database_write returns blocked or unsupported, stop. State the selected source, dialect, and allow_write_access setting, then ask the user what to do. Do not use bash, mysql, clickhouse-client, another database client, or edit databases.json to bypass the result."
+    ].join("\n");
+  } catch {
+    return undefined;
+  }
+}
+
+function writeProjectConfig(configPath: string, root: unknown): void {
+  const directory = path.dirname(configPath);
+  mkdirSync(directory, { recursive: true });
+  let mode = 0o600;
+  try {
+    mode = statSync(configPath).mode & 0o777;
+  } catch {
+    // New files default to owner-only permissions where supported.
+  }
+  const tempPath = `${configPath}.${process.pid}.tmp`;
+  writeFileSync(tempPath, `${JSON.stringify(root, null, 2)}\n`, { encoding: "utf-8", mode });
+  renameSync(tempPath, configPath);
+}
+
+export function initializeProjectConfig(cwd: string): { created: boolean; configPath: string; reason?: string } {
+  const targetPath = path.join(path.resolve(cwd), CONFIG_FILE_PATH);
+  const existingPath = findProjectConfigPath(cwd);
+  if (existingPath) {
+    return {
+      created: false,
+      configPath: existingPath,
+      reason: path.resolve(existingPath) === targetPath ? "A project database config already exists." : "A database config is already inherited from a parent directory."
+    };
+  }
+  writeProjectConfig(targetPath, TEMPLATE);
+  return { created: true, configPath: targetPath };
+}
+
+function legacySource(name: string, dialect: SqlDialect, value: JsonRecord): JsonRecord {
+  const { allow_write_access, allow_drop: _allowDrop, ...options } = value;
+  return {
+    name,
+    dialect,
+    allow_write_access: asBoolean(allow_write_access, false),
+    options
+  };
+}
+
+export function migrateLegacyProjectConfig(cwd: string): { migrated: boolean; configPath: string; reason?: string } {
+  const configPath = findProjectConfigPath(cwd);
+  if (!configPath) throw new Error(`No database config found for ${cwd}. Run /database-init first.`);
+  const root = parseConfig(configPath);
+  if (root.version === 1 && Array.isArray(root.sources)) {
+    return { migrated: false, configPath, reason: "The config already uses the version 1 source format." };
+  }
+  const sources: JsonRecord[] = [];
+  if (isRecord(root.mysql)) sources.push(legacySource("mysql_default", "mysql", root.mysql));
+  if (isRecord(root.clickhouse)) sources.push(legacySource("clickhouse_default", "clickhouse", root.clickhouse));
+  if (sources.length === 0) throw new Error(`Cannot migrate ${configPath}: no legacy mysql or clickhouse config was found.`);
+  writeProjectConfig(configPath, {
+    version: 1,
+    default_source: sources[0]!.name,
+    sources
+  });
+  return { migrated: true, configPath };
+}

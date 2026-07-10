@@ -1,0 +1,17 @@
+{
+  "name": "pi-database",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "check": "node --import ./tests/register-ts-loader.mjs --experimental-strip-types ./tests/self-check.ts"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "dependencies": {
+    "@clickhouse/client": "^1.18.3",
+    "@sinclair/typebox": "^0.34.41",
+    "mysql2": "^3.14.1"
+  }
+}
