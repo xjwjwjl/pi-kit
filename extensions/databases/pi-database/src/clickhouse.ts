@@ -1,7 +1,8 @@
 import { ClickHouseLogLevel, ResultSet, createClient, type ClickHouseClient } from "@clickhouse/client";
 import { firstKeyword, hasMultipleStatements, normalizeSql } from "./sql.js";
 import { DatabasePolicyError } from "./types.js";
-import type { DatabaseAdapter, PingResult, QueryResult, ResolvedSource, TableResult, ValidatedWrite, WriteResult } from "./types.js";
+import { boundItems, boundRows, boundTableNames, truncateText } from "./results.js";
+import type { DatabaseAdapter, DescribeTableResult, PingResult, QueryResult, ResolvedSource, SearchTablesResult, TableResult, ValidatedWrite, WriteResult } from "./types.js";
 
 const clients = new Map<string, ClickHouseClient>();
 const clientCacheKeyBySource = new Map<string, string>();
@@ -46,8 +47,7 @@ function url(source: ResolvedSource): string {
 }
 
 function timeout(source: ResolvedSource): number {
-  if (source.options.request_timeout_ms !== undefined) return asPositiveInteger(source.options.request_timeout_ms, 30_000);
-  return asPositiveInteger(source.options.send_receive_timeout, 30) * 1000;
+  return source.queryTimeoutMs;
 }
 
 function sourceIdentity(source: ResolvedSource): string {
@@ -163,14 +163,76 @@ export const clickhouseAdapter: DatabaseAdapter = {
     const selected = requiredDatabase(source, database);
     const rows = await selectJson<{ name?: string }>(
       source,
-      `SELECT name FROM system.tables WHERE database = ${sqlString(selected)} ORDER BY name`,
+      `SELECT name FROM system.tables WHERE database = ${sqlString(selected)} ORDER BY name LIMIT 501`,
       signal
     );
+    const bounded = boundTableNames(rows.map((row) => String(row.name ?? "")).filter(Boolean));
     return {
       source: source.name,
       dialect: "clickhouse",
       database: selected,
-      tables: rows.map((row) => String(row.name ?? "")).filter(Boolean)
+      tables: bounded.tables,
+      truncated: bounded.truncated
+    };
+  },
+
+  async searchTables(source, term, database, signal): Promise<SearchTablesResult> {
+    if (signal?.aborted) throw new Error("Operation aborted.");
+    const needle = term.trim();
+    if (!needle) throw new Error("Search term is required.");
+    const databaseWhere = database ? `database = ${sqlString(database)} AND ` : "";
+    const rows = await selectJson<{ database?: string; name?: string; engine?: string; comment?: string }>(
+      source,
+      `SELECT database, name, engine, comment FROM system.tables
+       WHERE ${databaseWhere} (positionCaseInsensitiveUTF8(name, ${sqlString(needle)}) > 0 OR positionCaseInsensitiveUTF8(comment, ${sqlString(needle)}) > 0)
+       ORDER BY database, name LIMIT 501`,
+      signal
+    );
+    const rawMatches = rows.slice(0, 500).map((row) => ({
+      database: String(row.database ?? ""),
+      table: String(row.name ?? ""),
+      engine: row.engine == null ? undefined : String(row.engine),
+      comment: row.comment == null ? null : truncateText(String(row.comment)).value
+    })).filter((match) => match.database && match.table);
+    const bounded = boundItems(rawMatches);
+    return { source: source.name, dialect: "clickhouse", matches: bounded.items, truncated: rows.length > rawMatches.length || bounded.truncated };
+  },
+
+  async describeTable(source, database, table, signal): Promise<DescribeTableResult> {
+    if (signal?.aborted) throw new Error("Operation aborted.");
+    const tables = await selectJson<{ engine?: string; create_table_query?: string }>(
+      source,
+      `SELECT engine, create_table_query FROM system.tables WHERE database = ${sqlString(database)} AND name = ${sqlString(table)} LIMIT 1`,
+      signal
+    );
+    const metadata = tables[0];
+    if (!metadata) throw new Error(`Table \"${database}.${table}\" was not found.`);
+    const columns = await selectJson<{ name?: string; type?: string; default_expression?: string; comment?: string; position?: number }>(
+      source,
+      `SELECT name, type, default_expression, comment, position FROM system.columns
+       WHERE database = ${sqlString(database)} AND table = ${sqlString(table)} ORDER BY position LIMIT 501`,
+      signal
+    );
+    const boundedColumns = boundItems(columns.map((column) => ({
+      name: String(column.name ?? ""),
+      type: String(column.type ?? ""),
+      default: column.default_expression == null ? null : truncateText(String(column.default_expression)).value,
+      comment: column.comment == null ? null : truncateText(String(column.comment)).value,
+      position: Number(column.position ?? 0)
+    })));
+    const createText = metadata.create_table_query == null ? undefined : truncateText(String(metadata.create_table_query));
+    const truncated = boundedColumns.truncated || createText?.truncated === true;
+    return {
+      source: source.name,
+      dialect: "clickhouse",
+      database,
+      table,
+      engine: metadata.engine == null ? undefined : String(metadata.engine),
+      columns: boundedColumns.items,
+      indexes: [],
+      create_statement: createText?.value,
+      truncated,
+      warnings: truncated ? ["Table metadata was truncated to the result limits."] : []
     };
   },
 
@@ -195,14 +257,15 @@ export const clickhouseAdapter: DatabaseAdapter = {
     const rows = Array.isArray(payload.data)
       ? payload.data.map((row) => Array.isArray(row) ? row : columns.map((column) => (row as Record<string, unknown>)[column]))
       : [];
-    const limited = rows.slice(0, maxRows);
+    const bounded = boundRows(rows, maxRows);
     return {
       source: source.name,
       dialect: "clickhouse",
       columns,
-      rows: limited,
-      row_count: limited.length,
-      truncated: rows.length > limited.length,
+      rows: bounded.rows,
+      row_count: bounded.rows.length,
+      truncated: bounded.truncated,
+      warnings: bounded.warnings,
       query_id: response.query_id
     };
   },

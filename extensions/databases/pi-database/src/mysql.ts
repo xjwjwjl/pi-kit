@@ -2,7 +2,8 @@ import mysql from "mysql2/promise";
 import type { Pool, ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { firstKeyword, hasMultipleStatements, hasTopLevelKeyword, normalizeSql } from "./sql.js";
 import { DatabasePolicyError } from "./types.js";
-import type { DatabaseAdapter, PingResult, QueryResult, ResolvedSource, TableResult, ValidatedWrite, WriteResult } from "./types.js";
+import { boundItems, boundRows, boundTableNames, truncateText } from "./results.js";
+import type { DatabaseAdapter, DescribeTableResult, PingResult, QueryResult, ResolvedSource, SearchTablesResult, TableResult, ValidatedWrite, WriteResult } from "./types.js";
 
 const pools = new Map<string, Pool>();
 const poolCacheKeyBySource = new Map<string, string>();
@@ -79,7 +80,7 @@ function getPool(source: ResolvedSource): Pool {
 }
 
 function timeout(source: ResolvedSource): number {
-  return asPositiveInteger(source.options.query_timeout_ms, 30_000);
+  return source.queryTimeoutMs;
 }
 
 function buildReadQuery(statement: string, maxRows: number): string {
@@ -143,6 +144,14 @@ function requiredDatabase(source: ResolvedSource, requested?: string): string {
   return database;
 }
 
+function escapeLike(term: string): string {
+  return `%${term.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_")}%`;
+}
+
+function quoteIdentifier(value: string): string {
+  return `\`${value.replace(/`/g, "``")}\``;
+}
+
 export const mysqlAdapter: DatabaseAdapter = {
   dialect: "mysql",
 
@@ -172,15 +181,100 @@ export const mysqlAdapter: DatabaseAdapter = {
     if (signal?.aborted) throw new Error("Operation aborted.");
     const selected = requiredDatabase(source, database);
     const [rows] = await getPool(source).query<RowDataPacket[]>({
-      sql: "SELECT table_name FROM information_schema.tables WHERE table_schema = ? ORDER BY table_name",
+      sql: "SELECT table_name AS table_name FROM information_schema.tables WHERE table_schema = ? ORDER BY table_name LIMIT 501",
       values: [selected],
       timeout: timeout(source)
     });
+    const bounded = boundTableNames(rows.map((row) => String(row.table_name ?? "")).filter(Boolean));
     return {
       source: source.name,
       dialect: "mysql",
       database: selected,
-      tables: rows.map((row) => String(row.table_name ?? "")).filter(Boolean)
+      tables: bounded.tables,
+      truncated: bounded.truncated
+    };
+  },
+
+  async searchTables(source, term, database, signal): Promise<SearchTablesResult> {
+    if (signal?.aborted) throw new Error("Operation aborted.");
+    const like = escapeLike(term.trim());
+    if (!like || like === "%%") throw new Error("Search term is required.");
+    const where = database ? "table_schema = ? AND" : "";
+    const values = database ? [database, like, like] : [like, like];
+    const [rows] = await getPool(source).query<RowDataPacket[]>({
+      sql: `SELECT table_schema AS table_schema, table_name AS table_name, table_type AS table_type, engine AS engine, table_comment AS table_comment
+            FROM information_schema.tables
+            WHERE ${where} (table_name LIKE ? ESCAPE '\\\\' OR table_comment LIKE ? ESCAPE '\\\\')
+            ORDER BY table_schema, table_name
+            LIMIT 501`,
+      values,
+      timeout: timeout(source)
+    });
+    const rawMatches = rows.slice(0, 500).map((row) => ({
+      database: String(row.table_schema ?? ""),
+      table: String(row.table_name ?? ""),
+      type: row.table_type == null ? undefined : String(row.table_type),
+      engine: row.engine == null ? undefined : String(row.engine),
+      comment: row.table_comment == null ? null : truncateText(String(row.table_comment)).value
+    })).filter((match) => match.database && match.table);
+    const bounded = boundItems(rawMatches);
+    return { source: source.name, dialect: "mysql", matches: bounded.items, truncated: rows.length > rawMatches.length || bounded.truncated };
+  },
+
+  async describeTable(source, database, table, signal): Promise<DescribeTableResult> {
+    if (signal?.aborted) throw new Error("Operation aborted.");
+    const pool = getPool(source);
+    const [tableRows] = await pool.query<RowDataPacket[]>({
+      sql: "SELECT engine AS engine FROM information_schema.tables WHERE table_schema = ? AND table_name = ?",
+      values: [database, table],
+      timeout: timeout(source)
+    });
+    if (tableRows.length === 0) throw new Error(`Table \"${database}.${table}\" was not found.`);
+    const [columnRows] = await pool.query<RowDataPacket[]>({
+      sql: `SELECT column_name AS column_name, column_type AS column_type, is_nullable AS is_nullable, column_default AS column_default, column_comment AS column_comment, ordinal_position AS ordinal_position
+            FROM information_schema.columns WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position LIMIT 501`,
+      values: [database, table],
+      timeout: timeout(source)
+    });
+    const [indexRows] = await pool.query<RowDataPacket[]>({
+      sql: `SELECT index_name AS index_name, column_name AS column_name, non_unique AS non_unique, index_type AS index_type, seq_in_index AS seq_in_index
+            FROM information_schema.statistics WHERE table_schema = ? AND table_name = ? ORDER BY index_name, seq_in_index LIMIT 501`,
+      values: [database, table],
+      timeout: timeout(source)
+    });
+    const [createRows] = await pool.query<RowDataPacket[]>({ sql: `SHOW CREATE TABLE ${quoteIdentifier(database)}.${quoteIdentifier(table)}`, timeout: timeout(source) });
+    const indexes = new Map<string, { name: string; columns: string[]; unique?: boolean; type?: string }>();
+    for (const row of indexRows) {
+      const name = String(row.index_name ?? "");
+      if (!name) continue;
+      const index = indexes.get(name) ?? { name, columns: [], unique: Number(row.non_unique ?? 1) === 0, type: row.index_type == null ? undefined : String(row.index_type) };
+      index.columns.push(String(row.column_name ?? ""));
+      indexes.set(name, index);
+    }
+    const createRow = createRows[0] ?? {};
+    const createStatement = Object.values(createRow).find((value) => typeof value === "string" && /create table/i.test(value));
+    const boundedColumns = boundItems(columnRows.map((row) => ({
+      name: String(row.column_name ?? ""),
+      type: String(row.column_type ?? ""),
+      nullable: String(row.is_nullable ?? "").toUpperCase() === "YES",
+      default: row.column_default == null ? null : truncateText(String(row.column_default)).value,
+      comment: row.column_comment == null ? null : truncateText(String(row.column_comment)).value,
+      position: Number(row.ordinal_position ?? 0)
+    })));
+    const boundedIndexes = boundItems([...indexes.values()]);
+    const createText = typeof createStatement === "string" ? truncateText(createStatement) : undefined;
+    const truncated = boundedColumns.truncated || boundedIndexes.truncated || createText?.truncated === true;
+    return {
+      source: source.name,
+      dialect: "mysql",
+      database,
+      table,
+      engine: tableRows[0]?.engine == null ? undefined : String(tableRows[0].engine),
+      columns: boundedColumns.items,
+      indexes: boundedIndexes.items,
+      create_statement: createText?.value,
+      truncated,
+      warnings: truncated ? ["Table metadata was truncated to the result limits."] : []
     };
   },
 
@@ -193,15 +287,16 @@ export const mysqlAdapter: DatabaseAdapter = {
       rowsAsArray: true
     });
     const columns = Array.isArray(fields) ? fields.map((field) => field.name) : [];
-    const rawRows = Array.isArray(rows) ? rows : [];
-    const limited = rawRows.slice(0, maxRows).map((row) => rowValues(row, columns));
+    const rawRows = Array.isArray(rows) ? rows.map((row) => rowValues(row, columns)) : [];
+    const bounded = boundRows(rawRows, maxRows);
     return {
       source: source.name,
       dialect: "mysql",
       columns,
-      rows: limited,
-      row_count: limited.length,
-      truncated: rawRows.length > limited.length,
+      rows: bounded.rows,
+      row_count: bounded.rows.length,
+      truncated: bounded.truncated,
+      warnings: bounded.warnings,
       query_id: `mysql-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`
     };
   },

@@ -1,5 +1,6 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
+import { highlightCode, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { Text, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@mariozechner/pi-tui";
+import type { Component } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { clickhouseAdapter } from "./src/clickhouse.js";
 import {
@@ -20,7 +21,7 @@ const adapters: Record<ResolvedSource["dialect"], DatabaseAdapter> = {
   clickhouse: clickhouseAdapter
 };
 
-let writeQueue: Promise<void> = Promise.resolve();
+const writeQueues = new Map<string, Promise<void>>();
 
 const SourceParams = Type.Object({
   source: Type.Optional(Type.String({ description: "Configured database source name" }))
@@ -31,10 +32,22 @@ const ListTablesParams = Type.Object({
   database: Type.Optional(Type.String({ description: "Database name; defaults to the source database" }))
 });
 
+const SearchTablesParams = Type.Object({
+  source: Type.Optional(Type.String({ description: "Configured database source name" })),
+  term: Type.String({ description: "Case-insensitive table name or comment search text" }),
+  database: Type.Optional(Type.String({ description: "Optional database filter" }))
+});
+
+const DescribeTableParams = Type.Object({
+  source: Type.Optional(Type.String({ description: "Configured database source name" })),
+  database: Type.String({ description: "Database containing the table" }),
+  table: Type.String({ description: "Table to describe" })
+});
+
 const QueryParams = Type.Object({
   source: Type.Optional(Type.String({ description: "Configured database source name" })),
   query: Type.String({ description: "Single read-only SQL statement" }),
-  max_rows: Type.Optional(Type.Integer({ minimum: 1, maximum: 500, description: "Maximum returned rows; default 100" }))
+  max_rows: Type.Optional(Type.Integer({ minimum: 1, maximum: 500, description: "Maximum returned rows; defaults to the selected source max_rows" }))
 });
 
 const WriteParams = Type.Object({
@@ -64,36 +77,451 @@ function sourceDetails(source: ResolvedSource, isDefault: boolean) {
     default: isDefault,
     host: host ?? url,
     database,
-    allow_write_access: source.allowWriteAccess
+    allow_write_access: source.allowWriteAccess,
+    query_timeout_ms: source.queryTimeoutMs,
+    max_rows: source.maxRows
   };
 }
 
-function formatSources(details: { config_path: string; sources: ReturnType<typeof sourceDetails>[] }): string {
-  const lines = [`Sources: ${details.sources.length}`];
-  for (const source of details.sources) {
-    const address = [source.host, source.database].filter(Boolean).join(" / ");
-    lines.push(`- ${source.name}${source.default ? " (default)" : ""}: ${source.dialect}${address ? ` | ${address}` : ""}`);
+function splitTopLevelCommaList(value: string): string[] {
+  const items: string[] = [];
+  let current = "";
+  let depth = 0;
+  let quote: "'" | '"' | "`" | null = null;
+
+  for (let index = 0; index < value.length; index++) {
+    const char = value[index]!;
+    const previous = value[index - 1];
+    if (quote) {
+      current += char;
+      if (char === quote && previous !== "\\") quote = null;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === "`") {
+      quote = char;
+      current += char;
+      continue;
+    }
+    if (char === "(") depth++;
+    else if (char === ")" && depth > 0) depth--;
+    if (char === "," && depth === 0) {
+      items.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += char;
   }
-  return lines.join("\n");
+  if (current.trim()) items.push(current.trim());
+  return items;
 }
 
-function formatQuery(details: Record<string, unknown>): string {
+function formatSqlForUi(query: string): string {
+  let formatted = query.trim()
+    .replace(/\s+/g, " ")
+    .replace(/\b(FROM)\b/gi, "\n$1")
+    .replace(/\b(WHERE)\b/gi, "\n$1")
+    .replace(/\b((?:LEFT|RIGHT|INNER|FULL|CROSS)\s+JOIN)\b/gi, "\n$1")
+    .replace(/\b(JOIN)\b/gi, "\n$1")
+    .replace(/\b(ON)\b/gi, "\n  $1")
+    .replace(/\b(AND)\b/gi, "\n  $1")
+    .replace(/\b(OR)\b/gi, "\n  $1")
+    .replace(/\b(GROUP\s+BY)\b/gi, "\n$1")
+    .replace(/\b(ORDER\s+BY)\b/gi, "\n$1")
+    .replace(/\b(LIMIT)\b/gi, "\n$1")
+    .replace(/\b(SETTINGS)\b/gi, "\n$1");
+
+  formatted = formatted.replace(/^SELECT\s+([\s\S]*?)\nFROM\b/i, (_match, selectList: string) => {
+    const columns = splitTopLevelCommaList(selectList);
+    return columns.length <= 1 ? `SELECT ${selectList}\nFROM` : `SELECT\n  ${columns.join(",\n  ")}\nFROM`;
+  });
+  return formatted.split("\n").map((line) => line.trimEnd()).join("\n").trim();
+}
+
+function getResultText(result: { content?: unknown }): string {
+  const text = Array.isArray(result.content) ? result.content.find((item): item is { type: string; text: string } => isRecord(item) && item.type === "text") : undefined;
+  return isRecord(text) && typeof text.text === "string" ? text.text : "";
+}
+
+type QueryViewTheme = {
+  output: (text: string) => string;
+  muted: (text: string) => string;
+  accent: (text: string) => string;
+  border: (text: string) => string;
+  error: (text: string) => string;
+  number: (text: string) => string;
+  nullValue: (text: string) => string;
+  empty: (text: string) => string;
+  sql: (text: string) => string[];
+};
+
+function createQueryViewTheme(theme: { fg(color: string, text: string): string }): QueryViewTheme {
+  return {
+    output: (text) => theme.fg("toolOutput", text),
+    muted: (text) => theme.fg("muted", text),
+    accent: (text) => theme.fg("accent", text),
+    border: (text) => theme.fg("borderMuted", text),
+    error: (text) => theme.fg("error", text),
+    number: (text) => theme.fg("syntaxNumber", text),
+    nullValue: (text) => theme.fg("dim", text),
+    empty: (text) => theme.fg("muted", text),
+    sql: (text) => highlightCode(text, "sql")
+  };
+}
+
+function formatCell(value: unknown): string {
+  if (value === null) return "NULL";
+  if (value === undefined) return "—";
+  if (typeof value === "string") return value === "" ? '""' : JSON.stringify(value).slice(1, -1);
+  if (typeof value === "object") return JSON.stringify(value) ?? String(value);
+  return String(value);
+}
+
+function fitCell(value: string, width: number, alignRight = false): string {
+  const clipped = truncateToWidth(value, width, "…");
+  const padding = " ".repeat(Math.max(0, width - visibleWidth(clipped)));
+  return alignRight ? `${padding}${clipped}` : `${clipped}${padding}`;
+}
+
+function isNumericValue(value: unknown): boolean {
+  return typeof value === "number" || typeof value === "bigint" || (typeof value === "string" && /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(value));
+}
+
+function styleCell(value: unknown, cell: string, theme: QueryViewTheme): string {
+  if (value === null) return theme.nullValue(cell);
+  if (value === "") return theme.empty(cell);
+  if (isNumericValue(value)) return theme.number(cell);
+  return theme.output(cell);
+}
+
+function formatElapsed(value: unknown): string | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  return value >= 1000 ? `${(value / 1000).toFixed(2)} s` : `${value.toFixed(1)} ms`;
+}
+
+function tableListView(result: { source: string; dialect: string; database: string; tables: string[]; truncated: boolean }): Record<string, unknown> {
+  return {
+    source: result.source,
+    dialect: result.dialect,
+    label: result.database,
+    count_label: `${result.tables.length} tables`,
+    truncated: result.truncated,
+    warnings: [],
+    columns: ["table"],
+    rows: result.tables.map((table) => [table])
+  };
+}
+
+function tableSearchView(result: { source: string; dialect: string; matches: Array<{ database: string; table: string; type?: string; engine?: string; comment?: string | null }>; truncated: boolean }): Record<string, unknown> {
+  return {
+    source: result.source,
+    dialect: result.dialect,
+    count_label: `${result.matches.length} matches`,
+    truncated: result.truncated,
+    warnings: [],
+    columns: ["database", "table", "type", "engine", "comment"],
+    rows: result.matches.map((match) => [match.database, match.table, match.type ?? null, match.engine ?? null, match.comment ?? null])
+  };
+}
+
+function databaseListView(databases: string[], source: string, dialect: string): Record<string, unknown> {
+  return {
+    source,
+    dialect,
+    count_label: `${databases.length} databases`,
+    truncated: false,
+    warnings: [],
+    columns: ["database"],
+    rows: databases.map((db) => [db])
+  };
+}
+
+function sourceListView(details: { config_path: string; sources: ReturnType<typeof sourceDetails>[] }): Record<string, unknown> {
+  return {
+    label: `config: ${details.config_path}`,
+    count_label: `${details.sources.length} sources`,
+    columns: ["source", "dialect", "host", "database", "default", "write"],
+    rows: details.sources.map((s) => [s.name, s.dialect, s.host ?? "—", s.database ?? "—", s.default ? "✓" : "—", s.allow_write_access ? "yes" : "no"])
+  };
+}
+
+function tableDescriptionView(result: {
+  source: string;
+  dialect: string;
+  database: string;
+  table: string;
+  engine?: string;
+  columns: Array<{ name: string; type: string; nullable?: boolean; default?: string | null; comment?: string | null; position?: number }>;
+  indexes: Array<{ name: string; columns: string[]; unique?: boolean; type?: string }>;
+  create_statement?: string;
+  truncated: boolean;
+  warnings: string[];
+}): Record<string, unknown> {
+  return {
+    source: result.source,
+    dialect: result.dialect,
+    label: `${result.database}.${result.table}${result.engine ? ` · ${result.engine}` : ""}`,
+    count_label: `${result.columns.length} columns · ${result.indexes.length} indexes`,
+    truncated: result.truncated,
+    warnings: result.warnings,
+    columns: ["#", "name", "type", "nullable", "default", "comment"],
+    rows: result.columns.map((column) => [column.position ?? null, column.name, column.type, column.nullable === undefined ? null : column.nullable ? "yes" : "no", column.default ?? null, column.comment ?? null]),
+    indexes: result.indexes,
+    create_statement: result.create_statement
+  };
+}
+
+function allocateColumnWidths(columns: string[], rows: unknown[][], width: number): number[] | undefined {
+  if (columns.length === 0 || columns.length > 8 || width < 40) return undefined;
+  const separatorWidth = Math.max(0, columns.length - 1) * 3;
+  const natural = columns.map((column, columnIndex) => Math.min(32, Math.max(
+    visibleWidth(column),
+    ...rows.map((row) => visibleWidth(formatCell(row[columnIndex])))
+  )));
+  const widths = natural.map((columnWidth) => Math.min(columnWidth, 8));
+  let remaining = width - separatorWidth - widths.reduce((sum, columnWidth) => sum + columnWidth, 0);
+  if (remaining < 0) return undefined;
+  while (remaining > 0) {
+    let grew = false;
+    for (let columnIndex = 0; columnIndex < widths.length && remaining > 0; columnIndex++) {
+      if (widths[columnIndex]! >= natural[columnIndex]!) continue;
+      widths[columnIndex]!++;
+      remaining--;
+      grew = true;
+    }
+    if (!grew) break;
+  }
+  return widths;
+}
+
+function renderQueryData(details: Record<string, unknown>, expanded: boolean, width: number, theme?: QueryViewTheme): string[] {
+  const t = theme ?? { output: (text: string) => text, muted: (text: string) => text, accent: (text: string) => text, border: (text: string) => text, error: (text: string) => text, number: (text: string) => text, nullValue: (text: string) => text, empty: (text: string) => text, sql: (text: string) => text.split("\n") };
+  const columns = Array.isArray(details.columns) ? details.columns.filter((column): column is string => typeof column === "string") : [];
+  const rows = Array.isArray(details.rows) ? details.rows.filter((row): row is unknown[] => Array.isArray(row)) : [];
+  if (columns.length === 0) return [];
+  if (rows.length === 0) return [t.muted("No rows returned.")];
+
+  const tableRows = expanded ? rows : rows.slice(0, 10);
+  const widths = allocateColumnWidths(columns, tableRows, width);
+  const lines: string[] = [];
+  if (widths) {
+    const separator = t.border(" │ ");
+    lines.push(columns.map((column, index) => t.accent(fitCell(column, widths[index]!))).join(separator));
+    lines.push(t.border(widths.map((columnWidth) => "─".repeat(columnWidth)).join("─┼─")));
+    for (const row of tableRows) {
+      lines.push(columns.map((_column, index) => {
+        const value = row[index];
+        const text = formatCell(value);
+        const cell = fitCell(text, widths[index]!, isNumericValue(value));
+        return styleCell(value, cell, t);
+      }).join(separator));
+    }
+  } else {
+    const recordRows = expanded ? rows : rows.slice(0, 3);
+    const labelWidth = Math.min(24, Math.max(1, ...columns.map(visibleWidth)));
+    const valueWidth = Math.max(1, width - labelWidth - 3);
+    recordRows.forEach((row, rowIndex) => {
+      if (rowIndex > 0) lines.push(t.border("─".repeat(Math.min(width, 24))));
+      lines.push(t.accent(`#${rowIndex + 1}`));
+      columns.forEach((column, columnIndex) => {
+        const label = fitCell(column, labelWidth);
+        const rawValue = row[columnIndex];
+        const value = truncateToWidth(formatCell(rawValue), valueWidth, "…");
+        lines.push(`${t.muted(label)} ${t.border("│")} ${styleCell(rawValue, value, t)}`);
+      });
+    });
+  }
+
+  const shownRows = widths ? tableRows.length : (expanded ? rows.length : Math.min(rows.length, 3));
+  if (shownRows < rows.length) lines.push(t.muted(`… ${rows.length - shownRows} more rows (expand to view)`));
+  return lines;
+}
+
+function renderQueryResultLines(
+  args: unknown,
+  result: { content?: unknown; details?: unknown },
+  isError: boolean,
+  expanded: boolean,
+  width: number,
+  theme?: QueryViewTheme
+): string[] {
+  const t = theme ?? { output: (text: string) => text, muted: (text: string) => text, accent: (text: string) => text, border: (text: string) => text, error: (text: string) => text, number: (text: string) => text, nullValue: (text: string) => text, empty: (text: string) => text, sql: (text: string) => text.split("\n") };
+  const safeWidth = Math.max(1, width);
+  const query = isRecord(args) && typeof args.query === "string" ? formatSqlForUi(args.query) : "";
+  const lines = query
+    ? t.sql(query).flatMap((line) => wrapTextWithAnsi(line, safeWidth))
+    : [];
+  if (isError) {
+    if (lines.length) lines.push("");
+    return [...lines, ...wrapTextWithAnsi(t.error(`Error: ${getResultText(result).trim() || "Query failed"}`), safeWidth)];
+  }
+
+  const details = isRecord(result.details) ? result.details : {};
   const source = typeof details.source === "string" ? details.source : "database";
   const dialect = typeof details.dialect === "string" ? details.dialect : "";
-  const rows = typeof details.row_count === "number" ? details.row_count : 0;
-  const truncated = details.truncated === true ? " (truncated)" : "";
-  return `${source} (${dialect})\nRows: ${rows}${truncated}`;
+  const rowCount = typeof details.row_count === "number" ? details.row_count : 0;
+  const truncated = details.truncated === true ? " · truncated" : "";
+  const elapsedText = formatElapsed(details.elapsed_ms);
+  const elapsed = elapsedText ? ` · ${elapsedText}` : "";
+  if (lines.length) lines.push("");
+  const sourceText = `${source} · ${dialect}`;
+  const statsText = `${rowCount} rows${elapsed}${truncated}`;
+  if (visibleWidth(`${sourceText} · ${statsText}`) <= safeWidth) {
+    lines.push(`${t.muted(dialect)}${t.accent(` · ${source}`)}${t.muted(` · ${statsText}`)}`);
+  } else {
+    lines.push(truncateToWidth(`${t.muted(dialect)}${t.accent(` · ${source}`)}`, safeWidth));
+    lines.push(truncateToWidth(t.muted(statsText), safeWidth));
+  }
+  const warnings = Array.isArray(details.warnings) ? details.warnings.filter((warning): warning is string => typeof warning === "string") : [];
+  for (const warning of warnings) lines.push(...wrapTextWithAnsi(t.muted(`Warning: ${warning}`), safeWidth));
+  const dataLines = renderQueryData(details, expanded, safeWidth, t);
+  if (dataLines.length) lines.push("", ...dataLines);
+  return lines.map((line) => truncateToWidth(line, safeWidth));
+}
+
+function renderMetadataResultLines(view: Record<string, unknown>, result: { content?: unknown }, isError: boolean, expanded: boolean, width: number, theme: QueryViewTheme): string[] {
+  const safeWidth = Math.max(1, width);
+  if (isError) return wrapTextWithAnsi(theme.error(`Error: ${getResultText(result).trim() || "Operation failed"}`), safeWidth);
+
+  const source = typeof view.source === "string" && view.source ? view.source : "";
+  const dialect = typeof view.dialect === "string" && view.dialect ? view.dialect : "";
+  const label = typeof view.label === "string" && view.label ? view.label : "";
+  const countLabel = typeof view.count_label === "string" ? view.count_label : "";
+  const truncated = view.truncated === true ? " · truncated" : "";
+
+  const headerParts: string[] = [];
+  if (dialect) headerParts.push(theme.muted(dialect));
+  if (source) {
+    const sep = headerParts.length ? " · " : "";
+    headerParts.push(`${theme.muted(sep)}${theme.accent(source)}`);
+  }
+  if (label) {
+    const sep = headerParts.length ? " · " : "";
+    headerParts.push(theme.muted(`${sep}${label}`));
+  }
+  if (countLabel) {
+    const sep = headerParts.length ? " · " : "";
+    headerParts.push(theme.muted(`${sep}${countLabel}`));
+  }
+  if (truncated) headerParts.push(theme.muted(truncated));
+
+  const plainPrefix = [dialect, source ? ` · ${source}` : "", label ? ` · ${label}` : "", countLabel ? ` · ${countLabel}` : "", truncated].join("");
+
+  const lines = visibleWidth(plainPrefix) <= safeWidth
+    ? [headerParts.join("")]
+    : [truncateToWidth(`${dialect ? theme.muted(dialect) : ""}${source ? theme.accent(` · ${source}`) : ""}${label ? theme.muted(` · ${label}`) : ""}`, safeWidth), theme.muted(`${countLabel}${truncated}`)];
+
+  const warnings = Array.isArray(view.warnings) ? view.warnings.filter((warning): warning is string => typeof warning === "string") : [];
+  for (const warning of warnings) lines.push(...wrapTextWithAnsi(theme.muted(`Warning: ${warning}`), safeWidth));
+  const dataLines = renderQueryData(view, expanded, safeWidth, theme);
+  if (dataLines.length) lines.push("", ...dataLines);
+
+  if (expanded && Array.isArray(view.indexes)) {
+    const indexes = view.indexes.filter(isRecord);
+    if (indexes.length) {
+      lines.push("", theme.accent("Indexes"));
+      for (const index of indexes) {
+        const name = typeof index.name === "string" ? index.name : "(unnamed)";
+        const columns = Array.isArray(index.columns) ? index.columns.filter((column): column is string => typeof column === "string").join(", ") : "";
+        const bits = [index.unique === true ? "unique" : undefined, typeof index.type === "string" ? index.type : undefined].filter(Boolean).join(" · ");
+        lines.push(...wrapTextWithAnsi(theme.output(`${name}${bits ? ` (${bits})` : ""}: ${columns}`), safeWidth));
+      }
+    }
+  }
+
+  if (expanded && typeof view.create_statement === "string" && view.create_statement) {
+    lines.push("", theme.accent("DDL"), ...theme.sql(view.create_statement).flatMap((line) => wrapTextWithAnsi(line, safeWidth)));
+  }
+  return lines.map((line) => truncateToWidth(line, safeWidth));
+}
+
+class PingResultComponent implements Component {
+  private readonly details: Record<string, unknown>;
+  private readonly result: { content?: unknown };
+  private readonly isError: boolean;
+  private readonly theme: QueryViewTheme;
+
+  constructor(details: Record<string, unknown>, result: { content?: unknown }, isError: boolean, theme: QueryViewTheme) {
+    this.details = details;
+    this.result = result;
+    this.isError = isError;
+    this.theme = theme;
+  }
+
+  render(width: number): string[] {
+    const safeWidth = Math.max(1, width);
+    if (this.isError) return wrapTextWithAnsi(this.theme.error(`Error: ${getResultText(this.result).trim() || "Ping failed"}`), safeWidth);
+    const source = typeof this.details.source === "string" ? this.details.source : "";
+    const dialect = typeof this.details.dialect === "string" ? this.details.dialect : "";
+    const ok = this.details.ok === true;
+    const version = typeof this.details.server_version === "string" ? this.details.server_version : "";
+    const database = typeof this.details.current_database === "string" && this.details.current_database ? this.details.current_database : null;
+    const status = ok ? this.theme.accent("connected") : this.theme.error("unreachable");
+    const versionSuffix = version ? ` · ${version}` : "";
+    const dbLine = database ? this.theme.muted(`current database: ${database}`) : "";
+    const lines = [truncateToWidth(`${this.theme.muted(dialect)}${this.theme.accent(` · ${source}`)} ${status}${this.theme.muted(versionSuffix)}`, safeWidth)];
+    if (dbLine) lines.push(truncateToWidth(dbLine, safeWidth));
+    return lines;
+  }
+
+  invalidate(): void {}
+}
+
+class MetadataResultComponent implements Component {
+  private readonly view: Record<string, unknown>;
+  private readonly result: { content?: unknown };
+  private readonly isError: boolean;
+  private readonly expanded: boolean;
+  private readonly theme: QueryViewTheme;
+
+  constructor(view: Record<string, unknown>, result: { content?: unknown }, isError: boolean, expanded: boolean, theme: QueryViewTheme) {
+    this.view = view;
+    this.result = result;
+    this.isError = isError;
+    this.expanded = expanded;
+    this.theme = theme;
+  }
+
+  render(width: number): string[] {
+    return renderMetadataResultLines(this.view, this.result, this.isError, this.expanded, width, this.theme);
+  }
+
+  invalidate(): void {}
+}
+
+class QueryResultComponent implements Component {
+  private readonly args: unknown;
+  private readonly result: { content?: unknown; details?: unknown };
+  private readonly isError: boolean;
+  private readonly expanded: boolean;
+  private readonly theme: QueryViewTheme;
+
+  constructor(args: unknown, result: { content?: unknown; details?: unknown }, isError: boolean, expanded: boolean, theme: QueryViewTheme) {
+    this.args = args;
+    this.result = result;
+    this.isError = isError;
+    this.expanded = expanded;
+    this.theme = theme;
+  }
+
+  render(width: number): string[] {
+    return renderQueryResultLines(this.args, this.result, this.isError, this.expanded, width, this.theme);
+  }
+
+  invalidate(): void {}
 }
 
 function writeResultColor(details: WriteResult | undefined, isError: boolean): "error" | "warning" | "toolOutput" {
   if (isError) return "error";
-  return details?.blocked === true ? "warning" : "toolOutput";
+  return details?.blocked === true || details?.outcome === "unknown" ? "warning" : "toolOutput";
 }
 
 function formatWrite(details: WriteResult): string {
   if (details.cancelled) return `${details.source} (${details.dialect})\nWrite cancelled`;
   if (details.blocked) {
     return `${details.source} (${details.dialect})\nWrite blocked: ${details.reason ?? "Current policy does not allow this statement."}\n${details.next_action ?? "Explain the policy and ask the user what to do next."}`;
+  }
+  if (details.outcome === "unknown") {
+    return `${details.source} (${details.dialect})\nWrite outcome unknown: ${details.reason ?? "The connection ended before the result was known."}\n${details.next_action ?? "Verify the database before taking any further action. Do not retry automatically."}`;
   }
   if (!details.executed) return `${details.source} (${details.dialect})\n${details.reason ?? "Write not executed"}`;
   const lines = [`${details.source} (${details.dialect})`, `${details.statement_kind.toUpperCase()} executed`];
@@ -104,12 +532,27 @@ function formatWrite(details: WriteResult): string {
   return lines.join("\n");
 }
 
-function serializeWrite<T>(task: () => Promise<T>): Promise<T> {
-  const next = writeQueue.then(task, task);
-  writeQueue = next.then(
+function isUncertainWriteError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /timeout|timed out|connection|socket|econn|network|aborted|reset|closed/i.test(message);
+}
+
+function writeQueueKey(source: ResolvedSource): string {
+  return `${source.configPath}:${source.name}`;
+}
+
+function serializeWrite<T>(source: ResolvedSource, task: () => Promise<T>): Promise<T> {
+  const key = writeQueueKey(source);
+  const previous = writeQueues.get(key) ?? Promise.resolve();
+  const next = previous.then(task, task);
+  const settled = next.then(
     () => undefined,
     () => undefined
   );
+  writeQueues.set(key, settled);
+  void settled.finally(() => {
+    if (writeQueues.get(key) === settled) writeQueues.delete(key);
+  });
   return next;
 }
 
@@ -173,7 +616,12 @@ function registerTools(pi: ExtensionAPI): void {
         config_path: config.configPath,
         sources: config.sources.map((source) => sourceDetails(source, source.name === config.defaultSource))
       };
-      return makeResult(details, formatSources(details));
+      return makeResult(details);
+    },
+    renderResult(result, options, theme, context) {
+      const details = isRecord(result.details) ? result.details : {};
+      const view = sourceListView(details as { config_path: string; sources: ReturnType<typeof sourceDetails>[] });
+      return new MetadataResultComponent(view, result, context.isError, options.expanded, createQueryViewTheme(theme));
     }
   });
 
@@ -189,6 +637,10 @@ function registerTools(pi: ExtensionAPI): void {
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const source = resolveCurrentSource(ctx, (params as { source?: string }).source);
       return makeResult(await adapterFor(source).ping(source, signal));
+    },
+    renderResult(result, _options, theme, context) {
+      const details = isRecord(result.details) ? result.details : {};
+      return new PingResultComponent(details, result, context.isError, createQueryViewTheme(theme));
     }
   });
 
@@ -205,7 +657,12 @@ function registerTools(pi: ExtensionAPI): void {
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const source = resolveCurrentSource(ctx, (params as { source?: string }).source);
       const databases = await adapterFor(source).listDatabases(source, signal);
-      return makeResult({ source: source.name, dialect: source.dialect, databases }, `Databases: ${databases.length}\n${databases.map((database) => `- ${database}`).join("\n")}`);
+      return makeResult({ source: source.name, dialect: source.dialect, databases });
+    },
+    renderResult(result, options, theme, context) {
+      const details = isRecord(result.details) ? result.details : {};
+      const view = databaseListView(Array.isArray(details.databases) ? details.databases as string[] : [], typeof details.source === "string" ? details.source : "", typeof details.dialect === "string" ? details.dialect : "");
+      return new MetadataResultComponent(view, result, context.isError, options.expanded, createQueryViewTheme(theme));
     }
   });
 
@@ -222,7 +679,54 @@ function registerTools(pi: ExtensionAPI): void {
       const input = params as { source?: string; database?: string };
       const source = resolveCurrentSource(ctx, input.source);
       const result = await adapterFor(source).listTables(source, input.database ?? String(source.options.database ?? ""), signal);
-      return makeResult(result, `${result.source} (${result.dialect})\nDatabase: ${result.database}\nTables: ${result.tables.length}`);
+      return makeResult(result);
+    },
+    renderResult(result, options, theme, context) {
+      const view = isRecord(result.details) ? tableListView(result.details as never) : {};
+      return new MetadataResultComponent(view, result, context.isError, options.expanded, createQueryViewTheme(theme));
+    }
+  });
+
+  pi.registerTool({
+    name: "database_search_tables",
+    label: "Database Search Tables",
+    description: "Search table names and comments across one configured source.",
+    promptSnippet: "Find likely tables by name or comment before writing SQL",
+    promptGuidelines: [
+      "Use database_search_tables when the user gives a business term or the target table is unknown; do not guess table names in database_query.",
+      "Pass database to database_search_tables when the search should stay inside one database."
+    ],
+    parameters: SearchTablesParams,
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      const input = params as { source?: string; term: string; database?: string };
+      const source = resolveCurrentSource(ctx, input.source);
+      const result = await adapterFor(source).searchTables(source, input.term, input.database, signal);
+      return makeResult(result);
+    },
+    renderResult(result, options, theme, context) {
+      const view = isRecord(result.details) ? tableSearchView(result.details as never) : {};
+      return new MetadataResultComponent(view, result, context.isError, options.expanded, createQueryViewTheme(theme));
+    }
+  });
+
+  pi.registerTool({
+    name: "database_describe_table",
+    label: "Database Describe Table",
+    description: "Describe columns, indexes, engine, and create statement for one table.",
+    promptSnippet: "Inspect a table's columns and schema before querying or changing it",
+    promptGuidelines: [
+      "Use database_describe_table before database_query or database_write when exact table columns or schema are unknown."
+    ],
+    parameters: DescribeTableParams,
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      const input = params as { source?: string; database: string; table: string };
+      const source = resolveCurrentSource(ctx, input.source);
+      const result = await adapterFor(source).describeTable(source, input.database, input.table, signal);
+      return makeResult(result);
+    },
+    renderResult(result, options, theme, context) {
+      const view = isRecord(result.details) ? tableDescriptionView(result.details as never) : {};
+      return new MetadataResultComponent(view, result, context.isError, options.expanded, createQueryViewTheme(theme));
     }
   });
 
@@ -233,21 +737,27 @@ function registerTools(pi: ExtensionAPI): void {
     promptSnippet: "Run a bounded read-only SQL query against a configured MySQL or ClickHouse source",
     promptGuidelines: [
       "Use database_query for configured MySQL or ClickHouse data requests instead of shelling out to a local database client.",
-      "Use database_list_sources before database_query when the intended source is not already known, and database_list_tables before guessing table or column names.",
+      "Use database_list_sources before database_query when the intended source is not already known, database_search_tables when the target table is unknown, and database_describe_table before guessing column names.",
       "database_query is read-only. Use database_write only for an explicit user-requested allowed change."
     ],
     parameters: QueryParams,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const input = params as { source?: string; query: string; max_rows?: number };
       const source = resolveCurrentSource(ctx, input.source);
-      onUpdate({ content: [{ type: "text", text: `Querying ${source.name}...` }] });
-      const maxRows = Math.max(1, Math.min(input.max_rows ?? 100, 500));
+      onUpdate({ content: [{ type: "text", text: `${formatSqlForUi(input.query)}\n\nRunning...` }] });
+      const maxRows = Math.max(1, Math.min(input.max_rows ?? source.maxRows, 500));
+      const startedAt = performance.now();
       const result = await adapterFor(source).query(source, input.query, maxRows, signal);
-      return makeResult(result, formatQuery(result));
+      result.elapsed_ms = performance.now() - startedAt;
+      return makeResult(result);
     },
-    renderResult(result, _options, theme, context) {
-      const details = isRecord(result.details) ? result.details : {};
-      return new Text(theme.fg(context.isError ? "error" : "toolOutput", context.isError ? String(result.content?.[0]?.text ?? "Query failed") : formatQuery(details)), 0, 0);
+    renderResult(result, options, theme, context) {
+      if (options.isPartial) {
+        const query = isRecord(context.args) && typeof context.args.query === "string" ? context.args.query : "";
+        const text = query ? `${highlightCode(formatSqlForUi(query), "sql").join("\n")}\n\n${theme.fg("muted", "Running...")}` : theme.fg("muted", "Running...");
+        return new Text(text, 0, 0);
+      }
+      return new QueryResultComponent(context.args, result, context.isError, options.expanded, createQueryViewTheme(theme));
     }
   });
 
@@ -259,13 +769,13 @@ function registerTools(pi: ExtensionAPI): void {
     promptGuidelines: [
       "Use database_write only for an explicit user-requested change after selecting the correct source; never use bash or a local database client as a write fallback.",
       "database_write always prompts the user to confirm and rejects destructive, delete, replacement, rename, multi-statement, and unsupported SQL. If it returns blocked, stop and explain the selected source policy to the user.",
-      "Do not retry database_write after a timeout or lost connection without first checking the database, and never use bash or a database client to bypass a blocked result."
+      "If database_write reports outcome unknown after a timeout or lost connection, first use database_query or metadata tools to verify database state; do not retry automatically and never use bash or a database client to bypass policy."
     ],
     parameters: WriteParams,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const input = params as { source?: string; statement: string };
-      return serializeWrite(async () => {
-        const source = resolveCurrentSource(ctx, input.source);
+      const source = resolveCurrentSource(ctx, input.source);
+      return serializeWrite(source, async () => {
         const adapter = adapterFor(source);
         let write;
         try {
@@ -313,8 +823,24 @@ function registerTools(pi: ExtensionAPI): void {
           return makeResult(result, formatWrite(result));
         }
         onUpdate({ content: [{ type: "text", text: `Writing to ${source.name}...` }] });
-        const result = await adapter.write(source, write, signal);
-        return makeResult(result, formatWrite(result));
+        try {
+          const result = await adapter.write(source, write, signal);
+          return makeResult(result, formatWrite(result));
+        } catch (error) {
+          if (!isUncertainWriteError(error)) throw error;
+          const result: WriteResult = {
+            source: source.name,
+            dialect: source.dialect,
+            executed: false,
+            cancelled: false,
+            statement_kind: write.statementKind,
+            requested_statement: write.statement,
+            outcome: "unknown",
+            reason: error instanceof Error ? error.message : String(error),
+            next_action: "Write outcome is unknown. First use database_query or database_list_tables to verify the database state before any further action. Do not retry this write automatically."
+          };
+          return makeResult(result, formatWrite(result));
+        }
       });
     },
     renderResult(result, _options, theme, context) {
@@ -344,6 +870,7 @@ export default function databaseExtension(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async () => {
+    writeQueues.clear();
     await Promise.all([mysqlAdapter.close(), clickhouseAdapter.close()]);
   });
 }
@@ -351,5 +878,19 @@ export default function databaseExtension(pi: ExtensionAPI) {
 export const __test__ = {
   registerCommands,
   registerTools,
-  writeResultColor
+  formatSqlForUi,
+  isNumericValue,
+  formatElapsed,
+  tableListView,
+  tableSearchView,
+  tableDescriptionView,
+  databaseListView,
+  sourceListView,
+  renderQueryData,
+  renderQueryResultLines,
+  renderMetadataResultLines,
+  PingResultComponent,
+  writeResultColor,
+  writeQueueKey,
+  serializeWrite
 };

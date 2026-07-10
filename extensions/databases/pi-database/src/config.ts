@@ -13,6 +13,8 @@ const TEMPLATE = {
       name: "app_mysql",
       dialect: "mysql",
       allow_write_access: false,
+      query_timeout_ms: 30000,
+      max_rows: 100,
       options: {
         host: "127.0.0.1",
         port: 3306,
@@ -24,6 +26,8 @@ const TEMPLATE = {
       name: "analytics_clickhouse",
       dialect: "clickhouse",
       allow_write_access: false,
+      query_timeout_ms: 30000,
+      max_rows: 100,
       options: {
         url: "http://localhost:8123",
         username: "default",
@@ -48,6 +52,13 @@ function asBoolean(value: unknown, fallback: boolean): boolean {
     if (value.toLowerCase() === "false") return false;
   }
   return fallback;
+}
+
+function asPositiveInteger(value: unknown, fallback: number, maximum?: number): number {
+  const number = typeof value === "number" ? value : typeof value === "string" ? Number.parseInt(value, 10) : NaN;
+  if (!Number.isFinite(number) || number <= 0) return fallback;
+  const normalized = Math.floor(number);
+  return maximum === undefined ? normalized : Math.min(normalized, maximum);
 }
 
 function isDialect(value: unknown): value is SqlDialect {
@@ -90,14 +101,18 @@ function resolveSource(value: unknown, configPath: string): ResolvedSource {
   if (!isDialect(value.dialect)) throw new Error(`Invalid ${configPath}: source "${name}" has an unsupported dialect.`);
   if (!isRecord(value.options)) throw new Error(`Invalid ${configPath}: source "${name}" requires an options object.`);
   const allowWriteAccess = asBoolean(value.allow_write_access, false);
+  const queryTimeoutMs = asPositiveInteger(value.query_timeout_ms, 30_000);
+  const maxRows = asPositiveInteger(value.max_rows, 100, 500);
   const options = { ...value.options };
   return {
     name,
     dialect: value.dialect,
     options,
     allowWriteAccess,
+    queryTimeoutMs,
+    maxRows,
     configPath,
-    cacheKey: JSON.stringify({ name, dialect: value.dialect, options })
+    cacheKey: JSON.stringify({ name, dialect: value.dialect, options, queryTimeoutMs })
   };
 }
 
@@ -146,10 +161,10 @@ export function buildDatabaseContextPrompt(cwd: string): string | undefined {
       sources,
       "",
       "For requests about these configured MySQL or ClickHouse databases, use database_* tools instead of bash, mysql, clickhouse-client, or another local database client.",
-      "Use database_list_databases for requests to list databases; use database_list_tables for tables; use database_ping for connectivity; and use database_query only for read-only SQL.",
+      "Use database_list_databases for requests to list databases; use database_list_tables for tables; use database_search_tables when the target table is unknown; use database_describe_table before guessing columns; use database_ping for connectivity; and use database_query only for read-only SQL.",
       "When the intended source is unclear, call database_list_sources first. Omit source only for the listed default source or when exactly one source exists.",
       "Use database_write only for an explicit user-requested allowed change. It requires interactive confirmation and must not be retried automatically after a timeout or connection loss.",
-      "If database_write returns blocked or unsupported, stop. State the selected source, dialect, and allow_write_access setting, then ask the user what to do. Do not use bash, mysql, clickhouse-client, another database client, or edit databases.json to bypass the result."
+      "If database_write returns blocked or unsupported, stop. State the selected source, dialect, and allow_write_access setting, then ask the user what to do. If its outcome is unknown, first verify the database with database_query or metadata tools and do not retry automatically. Do not use bash, mysql, clickhouse-client, another database client, or edit databases.json to bypass the result."
     ].join("\n");
   } catch {
     return undefined;
@@ -185,11 +200,26 @@ export function initializeProjectConfig(cwd: string): { created: boolean; config
 }
 
 function legacySource(name: string, dialect: SqlDialect, value: JsonRecord): JsonRecord {
-  const { allow_write_access, allow_drop: _allowDrop, ...options } = value;
+  const {
+    allow_write_access,
+    allow_drop: _allowDrop,
+    query_timeout_ms,
+    request_timeout_ms,
+    send_receive_timeout,
+    max_rows,
+    ...options
+  } = value;
+  const timeoutValue = dialect === "mysql"
+    ? query_timeout_ms
+    : request_timeout_ms ?? (typeof send_receive_timeout === "number" || typeof send_receive_timeout === "string"
+      ? asPositiveInteger(send_receive_timeout, 30) * 1000
+      : undefined);
   return {
     name,
     dialect,
     allow_write_access: asBoolean(allow_write_access, false),
+    query_timeout_ms: asPositiveInteger(timeoutValue, 30_000),
+    max_rows: asPositiveInteger(max_rows, 100, 500),
     options
   };
 }

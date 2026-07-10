@@ -3,3 +3,7 @@ export type ExtensionAPI = {
   registerCommand(name: string, definition: unknown): void;
   on(event: string, handler: unknown): void;
 };
+
+export function highlightCode(code: string, _language?: string): string[] {
+  return code.split("\n");
+}
