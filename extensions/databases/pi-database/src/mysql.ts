@@ -1,9 +1,10 @@
 import mysql from "mysql2/promise";
 import type { Pool, ResultSetHeader, RowDataPacket } from "mysql2/promise";
+import { sourceWithDatabase } from "./config.js";
 import { firstKeyword, hasMultipleStatements, hasTopLevelKeyword, normalizeSql } from "./sql.js";
 import { DatabasePolicyError } from "./types.js";
 import { boundItems, boundRows, boundTableNames, truncateText } from "./results.js";
-import type { DatabaseAdapter, DescribeTableResult, PingResult, QueryResult, ResolvedSource, SearchTablesResult, TableResult, ValidatedWrite, WriteResult } from "./types.js";
+import type { DatabaseAdapter, DescribeTableResult, ListDatabasesResult, PingResult, QueryResult, ResolvedSource, SearchTablesResult, TableResult, ValidatedWrite, WriteResult } from "./types.js";
 
 const pools = new Map<string, Pool>();
 const poolCacheKeyBySource = new Map<string, string>();
@@ -12,6 +13,7 @@ const TABLE_IDENTIFIER = `${IDENTIFIER}(?:\\.${IDENTIFIER})?`;
 const INSERT_PATTERN = new RegExp(`^INSERT\\s+INTO\\s+${TABLE_IDENTIFIER}(?:\\s*\\([^)]*\\))?\\s+VALUES\\s*\\(`, "i");
 const UPDATE_PATTERN = new RegExp(`^UPDATE\\s+${TABLE_IDENTIFIER}\\s+SET\\s+`, "i");
 const CREATE_TABLE_PATTERN = new RegExp(`^CREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${TABLE_IDENTIFIER}\\s*\\(`, "i");
+const CREATE_DATABASE_PATTERN = new RegExp(`^CREATE\\s+DATABASE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${IDENTIFIER}$`, "i");
 const ALTER_ADD_PATTERN = new RegExp(`^ALTER\\s+TABLE\\s+${TABLE_IDENTIFIER}\\s+ADD\\s+(?:COLUMN|INDEX)\\b`, "i");
 
 function asString(value: unknown): string | undefined {
@@ -38,7 +40,7 @@ function readPassword(source: ResolvedSource): string {
 }
 
 function sourceIdentity(source: ResolvedSource): string {
-  return `${source.configPath}:${source.name}`;
+  return `${source.configPath}:${source.name}:${asString(source.options.database) ?? ""}`;
 }
 
 function getPool(source: ResolvedSource): Pool {
@@ -107,29 +109,30 @@ function validateRead(statement: string): string {
 function validateWrite(source: ResolvedSource, statement: string): ValidatedWrite {
   const normalized = normalizeSql(statement);
   if (!normalized) throw new DatabasePolicyError("Statement is empty.");
-  if (!source.allowWriteAccess) throw new DatabasePolicyError(`Writes are disabled for source "${source.name}".`);
+  if (!source.allowWrite) throw new DatabasePolicyError(`Writes are disabled for source "${source.name}".`);
   if (hasMultipleStatements(statement)) throw new DatabasePolicyError("database_write expects a single SQL statement.");
   if (/\/\*!/.test(statement)) throw new DatabasePolicyError("MySQL executable comments are not allowed.");
   const keyword = firstKeyword(normalized);
-  if (keyword === "INSERT" && INSERT_PATTERN.test(normalized)) return { statement: normalized, statementKind: "insert" };
+  if (keyword === "INSERT" && INSERT_PATTERN.test(normalized)) return { statement: normalized, statementKind: "insert", databaseRequired: true };
   if (keyword === "UPDATE" && UPDATE_PATTERN.test(normalized)) {
     if (!hasTopLevelKeyword(normalized, "WHERE")) throw new DatabasePolicyError("MySQL UPDATE statements require a top-level WHERE clause.");
-    return { statement: normalized, statementKind: "update" };
+    return { statement: normalized, statementKind: "update", databaseRequired: true };
   }
+  if (keyword === "CREATE" && CREATE_DATABASE_PATTERN.test(normalized)) return { statement: normalized, statementKind: "create", databaseRequired: false };
   if (keyword === "CREATE" && CREATE_TABLE_PATTERN.test(normalized)) {
     if (hasTopLevelKeyword(normalized, "AS") || hasTopLevelKeyword(normalized, "LIKE")) {
       throw new DatabasePolicyError("Derived CREATE TABLE statements are not supported.");
     }
-    return { statement: normalized, statementKind: "create" };
+    return { statement: normalized, statementKind: "create", databaseRequired: true };
   }
   if (keyword === "ALTER" && ALTER_ADD_PATTERN.test(normalized)) {
     const destructiveActions = ["DROP", "DELETE", "MODIFY", "CHANGE", "RENAME", "REPLACE", "TRUNCATE", "CLEAR", "REMOVE", "MOVE"];
     if (destructiveActions.some((action) => hasTopLevelKeyword(normalized, action))) {
       throw new DatabasePolicyError("MySQL writes do not support destructive ALTER TABLE statements.");
     }
-    return { statement: normalized, statementKind: "alter" };
+    return { statement: normalized, statementKind: "alter", databaseRequired: true };
   }
-  throw new DatabasePolicyError("MySQL writes support only INSERT ... VALUES, UPDATE ... WHERE, CREATE TABLE, and ALTER TABLE ... ADD COLUMN/INDEX.");
+  throw new DatabasePolicyError("MySQL writes support only INSERT ... VALUES, UPDATE ... WHERE, CREATE DATABASE, CREATE TABLE, and ALTER TABLE ... ADD COLUMN/INDEX.");
 }
 
 function rowValues(row: unknown, columns: string[]): unknown[] {
@@ -157,6 +160,7 @@ export const mysqlAdapter: DatabaseAdapter = {
 
   async ping(source, signal): Promise<PingResult> {
     if (signal?.aborted) throw new Error("Operation aborted.");
+    const startedAt = performance.now();
     const [rows] = await getPool(source).query<RowDataPacket[]>({
       sql: "SELECT VERSION() AS server_version, DATABASE() AS current_database",
       timeout: timeout(source)
@@ -166,15 +170,17 @@ export const mysqlAdapter: DatabaseAdapter = {
       source: source.name,
       dialect: "mysql",
       ok: true,
+      latency_ms: performance.now() - startedAt,
       server_version: typeof row?.server_version === "string" ? row.server_version : undefined,
       current_database: row?.current_database == null ? null : String(row.current_database)
     };
   },
 
-  async listDatabases(source, signal): Promise<string[]> {
+  async listDatabases(source, signal): Promise<ListDatabasesResult> {
     if (signal?.aborted) throw new Error("Operation aborted.");
     const [rows] = await getPool(source).query<RowDataPacket[]>({ sql: "SHOW DATABASES", timeout: timeout(source) });
-    return rows.map((row) => String(row.Database ?? "")).filter(Boolean);
+    const bounded = boundItems(rows.map((row) => String(row.Database ?? "")).filter(Boolean));
+    return { source: source.name, dialect: "mysql", databases: bounded.items, truncated: bounded.truncated };
   },
 
   async listTables(source, database, signal): Promise<TableResult> {
@@ -278,12 +284,13 @@ export const mysqlAdapter: DatabaseAdapter = {
     };
   },
 
-  async query(source, statement, maxRows, signal): Promise<QueryResult> {
+  async query(source, database, statement, maxRows, signal): Promise<QueryResult> {
     if (signal?.aborted) throw new Error("Operation aborted.");
+    const querySource = sourceWithDatabase(source, database);
     const normalized = validateRead(statement);
-    const [rows, fields] = await getPool(source).query({
+    const [rows, fields] = await getPool(querySource).query({
       sql: buildReadQuery(normalized, maxRows),
-      timeout: timeout(source),
+      timeout: timeout(querySource),
       rowsAsArray: true
     });
     const columns = Array.isArray(fields) ? fields.map((field) => field.name) : [];
@@ -292,6 +299,7 @@ export const mysqlAdapter: DatabaseAdapter = {
     return {
       source: source.name,
       dialect: "mysql",
+      database,
       columns,
       rows: bounded.rows,
       row_count: bounded.rows.length,
@@ -303,13 +311,15 @@ export const mysqlAdapter: DatabaseAdapter = {
 
   validateWrite: validateWrite,
 
-  async write(source, write, signal): Promise<WriteResult> {
+  async write(source, database, write, signal): Promise<WriteResult> {
     if (signal?.aborted) throw new Error("Operation aborted.");
-    const [result] = await getPool(source).query({ sql: write.statement, timeout: timeout(source) });
+    const writeSource = database ? sourceWithDatabase(source, database) : source;
+    const [result] = await getPool(writeSource).query({ sql: write.statement, timeout: timeout(writeSource) });
     const header = result as ResultSetHeader;
     return {
       source: source.name,
       dialect: "mysql",
+      database,
       executed: true,
       cancelled: false,
       statement_kind: write.statementKind,

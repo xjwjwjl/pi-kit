@@ -7,3 +7,7 @@ export type ExtensionAPI = {
 export function highlightCode(code: string, _language?: string): string[] {
   return code.split("\n");
 }
+
+export function keyHint(keybinding: string, description: string): string {
+  return `[${keybinding}:${description}]`;
+}

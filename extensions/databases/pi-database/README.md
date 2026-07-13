@@ -9,40 +9,44 @@ The extension reads `.pi/databases.json` from the current project or its nearest
 ```json
 {
   "version": 1,
-  "default_source": "app_mysql",
+  "default_source": "",
   "sources": [
     {
-      "name": "app_mysql",
+      "name": "mysql_localhost",
       "dialect": "mysql",
-      "allow_write_access": false,
+      "allow_write": true,
+      "write_confirm": false,
       "query_timeout_ms": 30000,
       "max_rows": 100,
       "options": {
         "host": "127.0.0.1",
         "port": 3306,
         "user": "app_reader",
-        "password_env": "APP_MYSQL_PASSWORD"
+        "password_env": "APP_MYSQL_PASSWORD",
+        "database": ""
       }
     },
     {
-      "name": "analytics_clickhouse",
+      "name": "clickhouse_localhost"
       "dialect": "clickhouse",
-      "allow_write_access": false,
+      "allow_write": true,
+      "write_confirm": false,
       "query_timeout_ms": 30000,
       "max_rows": 100,
       "options": {
         "url": "http://127.0.0.1:8123",
         "username": "analytics_reader",
-        "password_env": "ANALYTICS_CLICKHOUSE_PASSWORD"
+        "password_env": "ANALYTICS_CLICKHOUSE_PASSWORD",
+        "database": ""
       }
     }
   ]
 }
 ```
 
-Source names are globally unique and may contain letters, digits, underscores, and hyphens. `password_env` takes precedence over `password` and fails clearly when the named environment variable is absent. `options.database` is optional; set it only when one database should be the source default. `query_timeout_ms` defaults to `30000`; `max_rows` defaults to `100` and is capped at `500`. The `database_query.max_rows` argument overrides its source default for that call.
+Source names are globally unique and may contain letters, digits, underscores, and hyphens. `password_env` takes precedence over `password` and fails clearly when the named environment variable is absent. `options.database` is optional; set it only when one database should be the source default. `query_timeout_ms` defaults to `30000`; `max_rows` defaults to `100` and is capped at `500`. The `database_query.max_rows` argument overrides its source default for that call. `allow_write` defaults to `true`. `write_confirm` defaults to `false`; set it to `true` for a source that should require interactive confirmation before writes.
 
-When a tool omits `source`, it uses `default_source`; a single configured source is also selected automatically. Multiple sources without a default require an explicit source name. Without `options.database`, `database_list_tables` requires its `database` argument.
+When a tool omits `source`, it uses `default_source`; a single configured source is also selected automatically. Multiple sources without a default require an explicit source name. Without `options.database`, `database_list_tables` requires its `database` argument. `database_query` always requires its `database` argument, even when the source has a default database.
 
 ## Commands
 
@@ -62,7 +66,7 @@ Neither command overwrites an existing config without an explicit migration conf
 - `database_query`
 - `database_write`
 
-Every result identifies its source and dialect. Results are bounded to 500 rows/tables, 50KB total output, and 2,000 characters per cell or metadata text field. `database_query` is read-only. `database_write` needs `allow_write_access: true` on the selected source and always asks for interactive confirmation.
+Every result identifies its source and dialect. Results are bounded to 500 rows/tables, 50KB total output, and 2,000 characters per cell or metadata text field. `database_query` is read-only. `database_write` runs only when `allow_write: true` on the selected source and asks for interactive confirmation only when `write_confirm: true` is configured for that source. Table-scoped writes require its `database` argument; only `CREATE DATABASE` omits it.
 
 Allowed writes:
 
@@ -70,16 +74,18 @@ Allowed writes:
 MySQL:
   INSERT ... VALUES
   UPDATE ... WHERE
+  CREATE DATABASE [IF NOT EXISTS] ...
   CREATE TABLE ... (...)
   ALTER TABLE ... ADD COLUMN / ADD INDEX
 
 ClickHouse:
   INSERT ... VALUES
+  CREATE DATABASE [IF NOT EXISTS] ...
   CREATE TABLE ... (...)
   ALTER TABLE ... ADD COLUMN
 ```
 
-Deletes, replacement writes, drops, truncates, renames, derived table creation, `INSERT SELECT`, destructive `ALTER`, ClickHouse mutations, `ON CLUSTER`, admin operations, and multiple statements are rejected. If a confirmed write times out or loses its connection, the result reports `outcome: "unknown"`; inspect with `database_query` or metadata tools before any further action, and never retry automatically.
+Deletes, replacement writes, drops, truncates, renames, derived table creation, `INSERT SELECT`, destructive `ALTER`, ClickHouse mutations, `ON CLUSTER`, other admin operations, and multiple statements are rejected. If a confirmed write times out or loses its connection, the result reports `outcome: "unknown"`; inspect with `database_query` or metadata tools before any further action, and never retry automatically.
 
 ## Discovery workflow
 

@@ -7,31 +7,35 @@ export const CONFIG_FILE_PATH = path.join(".pi", "databases.json");
 
 const TEMPLATE = {
   version: 1,
-  default_source: "app_mysql",
+  default_source: "",
   sources: [
     {
-      name: "app_mysql",
+      name: "mysql_localhost",
       dialect: "mysql",
-      allow_write_access: false,
+      allow_write: true,
+      write_confirm: false,
       query_timeout_ms: 30000,
       max_rows: 100,
       options: {
         host: "127.0.0.1",
         port: 3306,
         user: "readonly_user",
-        password: ""
+        password: "",
+        database: ""
       }
     },
     {
-      name: "analytics_clickhouse",
+      name: "clickhouse_localhost",
       dialect: "clickhouse",
-      allow_write_access: false,
+      allow_write: true,
+      write_confirm: false,
       query_timeout_ms: 30000,
       max_rows: 100,
       options: {
         url: "http://localhost:8123",
         username: "default",
-        password: ""
+        password: "",
+        database: ""
       }
     }
   ]
@@ -92,6 +96,19 @@ function parseConfig(configPath: string): JsonRecord {
   return parsed;
 }
 
+function sourceCacheKey(name: string, dialect: SqlDialect, options: JsonRecord, queryTimeoutMs: number): string {
+  return JSON.stringify({ name, dialect, options, queryTimeoutMs });
+}
+
+export function sourceWithDatabase(source: ResolvedSource, database: string): ResolvedSource {
+  const options = { ...source.options, database };
+  return {
+    ...source,
+    options,
+    cacheKey: sourceCacheKey(source.name, source.dialect, options, source.queryTimeoutMs)
+  };
+}
+
 function resolveSource(value: unknown, configPath: string): ResolvedSource {
   if (!isRecord(value)) throw new Error(`Invalid ${configPath}: every source must be an object.`);
   const name = asString(value.name);
@@ -100,7 +117,8 @@ function resolveSource(value: unknown, configPath: string): ResolvedSource {
   }
   if (!isDialect(value.dialect)) throw new Error(`Invalid ${configPath}: source "${name}" has an unsupported dialect.`);
   if (!isRecord(value.options)) throw new Error(`Invalid ${configPath}: source "${name}" requires an options object.`);
-  const allowWriteAccess = asBoolean(value.allow_write_access, false);
+  const allowWrite = asBoolean(value.allow_write, true);
+  const writeConfirm = asBoolean(value.write_confirm, false);
   const queryTimeoutMs = asPositiveInteger(value.query_timeout_ms, 30_000);
   const maxRows = asPositiveInteger(value.max_rows, 100, 500);
   const options = { ...value.options };
@@ -108,11 +126,12 @@ function resolveSource(value: unknown, configPath: string): ResolvedSource {
     name,
     dialect: value.dialect,
     options,
-    allowWriteAccess,
+    allowWrite,
+    writeConfirm,
     queryTimeoutMs,
     maxRows,
     configPath,
-    cacheKey: JSON.stringify({ name, dialect: value.dialect, options, queryTimeoutMs })
+    cacheKey: sourceCacheKey(name, value.dialect, options, queryTimeoutMs)
   };
 }
 
@@ -154,17 +173,17 @@ export function buildDatabaseContextPrompt(cwd: string): string | undefined {
   try {
     const config = loadProjectConfig(cwd);
     const sources = config.sources
-      .map((source) => `- ${source.name}: ${source.dialect}${source.name === config.defaultSource ? " (default)" : ""}`)
+      .map((source) => `- ${source.name}: ${source.dialect}${source.name === config.defaultSource ? " (default)" : ""}${source.allowWrite && !source.writeConfirm ? " (write confirmation off)" : ""}`)
       .join("\n");
     return [
       "Configured database sources are available through database_* tools:",
       sources,
       "",
-      "For requests about these configured MySQL or ClickHouse databases, use database_* tools instead of bash, mysql, clickhouse-client, or another local database client.",
-      "Use database_list_databases for requests to list databases; use database_list_tables for tables; use database_search_tables when the target table is unknown; use database_describe_table before guessing columns; use database_ping for connectivity; and use database_query only for read-only SQL.",
-      "When the intended source is unclear, call database_list_sources first. Omit source only for the listed default source or when exactly one source exists.",
-      "Use database_write only for an explicit user-requested allowed change. It requires interactive confirmation and must not be retried automatically after a timeout or connection loss.",
-      "If database_write returns blocked or unsupported, stop. State the selected source, dialect, and allow_write_access setting, then ask the user what to do. If its outcome is unknown, first verify the database with database_query or metadata tools and do not retry automatically. Do not use bash, mysql, clickhouse-client, another database client, or edit databases.json to bypass the result."
+      "For requests about these configured databases, use the database_* tool family.",
+      "Use database_list_tables only when the database is known; use database_search_tables when the target table is unknown; use database_describe_table before guessing columns; use database_ping for connectivity; and use database_query only for read-only SQL.",
+      "A default source selects only the connection, never a database. When the intended source is unclear, call database_list_sources first; omit source only for the listed default source or when exactly one source exists. For database_query and database_list_tables, always pass database. If the database is unknown, call database_list_databases first.",
+      "Use database_write only for an explicit user-requested allowed change. It requires database for table-scoped writes; omit database only for CREATE DATABASE. It follows the selected source's confirmation policy and must not be retried automatically after a timeout or connection loss.",
+      "If database_write returns blocked or unsupported, stop. State the selected source, dialect, and allow_write setting, then ask the user what to do. If its outcome is unknown, first verify the database with database_query or metadata tools and do not retry automatically. Do not bypass this policy with non-database_* tools or config edits."
     ].join("\n");
   } catch {
     return undefined;
@@ -201,7 +220,8 @@ export function initializeProjectConfig(cwd: string): { created: boolean; config
 
 function legacySource(name: string, dialect: SqlDialect, value: JsonRecord): JsonRecord {
   const {
-    allow_write_access,
+    allow_write,
+    write_confirm,
     allow_drop: _allowDrop,
     query_timeout_ms,
     request_timeout_ms,
@@ -217,7 +237,8 @@ function legacySource(name: string, dialect: SqlDialect, value: JsonRecord): Jso
   return {
     name,
     dialect,
-    allow_write_access: asBoolean(allow_write_access, false),
+    allow_write: asBoolean(allow_write, true),
+    write_confirm: asBoolean(write_confirm, false),
     query_timeout_ms: asPositiveInteger(timeoutValue, 30_000),
     max_rows: asPositiveInteger(max_rows, 100, 500),
     options

@@ -6,7 +6,8 @@ export type ResolvedSource = {
   name: string;
   dialect: SqlDialect;
   options: JsonRecord;
-  allowWriteAccess: boolean;
+  allowWrite: boolean;
+  writeConfirm: boolean;
   queryTimeoutMs: number;
   maxRows: number;
   configPath: string;
@@ -22,6 +23,7 @@ export type ResolvedProjectConfig = {
 export type QueryResult = {
   source: string;
   dialect: SqlDialect;
+  database: string;
   columns: string[];
   rows: unknown[][];
   row_count: number;
@@ -35,8 +37,16 @@ export type PingResult = {
   source: string;
   dialect: SqlDialect;
   ok: boolean;
+  latency_ms?: number;
   server_version?: string;
   current_database?: string | null;
+};
+
+export type ListDatabasesResult = {
+  source: string;
+  dialect: SqlDialect;
+  databases: string[];
+  truncated: boolean;
 };
 
 export type TableResult = {
@@ -94,6 +104,7 @@ export type DescribeTableResult = {
 export type ValidatedWrite = {
   statement: string;
   statementKind: "insert" | "update" | "create" | "alter";
+  databaseRequired: boolean;
 };
 
 export class DatabasePolicyError extends Error {
@@ -110,7 +121,9 @@ export type WriteResult = {
   cancelled: boolean;
   blocked?: boolean;
   statement_kind: ValidatedWrite["statementKind"] | "unknown";
-  allow_write_access?: boolean;
+  allow_write?: boolean;
+  write_confirm?: boolean;
+  database?: string;
   requested_statement?: string;
   next_action?: string;
   query_id?: string;
@@ -125,12 +138,12 @@ export type WriteResult = {
 export type DatabaseAdapter = {
   dialect: SqlDialect;
   ping(source: ResolvedSource, signal?: AbortSignal): Promise<PingResult>;
-  listDatabases(source: ResolvedSource, signal?: AbortSignal): Promise<string[]>;
+  listDatabases(source: ResolvedSource, signal?: AbortSignal): Promise<ListDatabasesResult>;
   listTables(source: ResolvedSource, database: string, signal?: AbortSignal): Promise<TableResult>;
   searchTables(source: ResolvedSource, term: string, database?: string, signal?: AbortSignal): Promise<SearchTablesResult>;
   describeTable(source: ResolvedSource, database: string, table: string, signal?: AbortSignal): Promise<DescribeTableResult>;
-  query(source: ResolvedSource, statement: string, maxRows: number, signal?: AbortSignal): Promise<QueryResult>;
+  query(source: ResolvedSource, database: string, statement: string, maxRows: number, signal?: AbortSignal): Promise<QueryResult>;
   validateWrite(source: ResolvedSource, statement: string): ValidatedWrite;
-  write(source: ResolvedSource, write: ValidatedWrite, signal?: AbortSignal): Promise<WriteResult>;
+  write(source: ResolvedSource, database: string | undefined, write: ValidatedWrite, signal?: AbortSignal): Promise<WriteResult>;
   close(): Promise<void>;
 };

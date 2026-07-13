@@ -1,8 +1,9 @@
 import { ClickHouseLogLevel, ResultSet, createClient, type ClickHouseClient } from "@clickhouse/client";
+import { sourceWithDatabase } from "./config.js";
 import { firstKeyword, hasMultipleStatements, normalizeSql } from "./sql.js";
 import { DatabasePolicyError } from "./types.js";
 import { boundItems, boundRows, boundTableNames, truncateText } from "./results.js";
-import type { DatabaseAdapter, DescribeTableResult, PingResult, QueryResult, ResolvedSource, SearchTablesResult, TableResult, ValidatedWrite, WriteResult } from "./types.js";
+import type { DatabaseAdapter, DescribeTableResult, ListDatabasesResult, PingResult, QueryResult, ResolvedSource, SearchTablesResult, TableResult, ValidatedWrite, WriteResult } from "./types.js";
 
 const clients = new Map<string, ClickHouseClient>();
 const clientCacheKeyBySource = new Map<string, string>();
@@ -10,6 +11,7 @@ const IDENTIFIER = "(?:`(?:``|[^`])+`|[A-Za-z_][A-Za-z0-9_$]*)";
 const TABLE_IDENTIFIER = `${IDENTIFIER}(?:\\.${IDENTIFIER})?`;
 const INSERT_PATTERN = new RegExp(`^INSERT\\s+INTO\\s+${TABLE_IDENTIFIER}(?:\\s*\\([^)]*\\))?\\s+VALUES\\s*\\(`, "i");
 const CREATE_TABLE_PATTERN = new RegExp(`^CREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${TABLE_IDENTIFIER}\\s*\\(`, "i");
+const CREATE_DATABASE_PATTERN = new RegExp(`^CREATE\\s+DATABASE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${IDENTIFIER}$`, "i");
 const ALTER_ADD_COLUMN_PATTERN = new RegExp(`^ALTER\\s+TABLE\\s+${TABLE_IDENTIFIER}\\s+ADD\\s+COLUMN\\b`, "i");
 
 function asString(value: unknown): string | undefined {
@@ -51,7 +53,7 @@ function timeout(source: ResolvedSource): number {
 }
 
 function sourceIdentity(source: ResolvedSource): string {
-  return `${source.configPath}:${source.name}`;
+  return `${source.configPath}:${source.name}:${asString(source.options.database) ?? ""}`;
 }
 
 function getClient(source: ResolvedSource): ClickHouseClient {
@@ -98,19 +100,20 @@ function validateRead(statement: string): string {
 function validateWrite(source: ResolvedSource, statement: string): ValidatedWrite {
   const normalized = normalizeSql(statement);
   if (!normalized) throw new DatabasePolicyError("Statement is empty.");
-  if (!source.allowWriteAccess) throw new DatabasePolicyError(`Writes are disabled for source "${source.name}".`);
+  if (!source.allowWrite) throw new DatabasePolicyError(`Writes are disabled for source "${source.name}".`);
   if (hasMultipleStatements(statement)) throw new DatabasePolicyError("database_write expects a single SQL statement.");
   if (/\bON\s+CLUSTER\b/i.test(normalized)) throw new DatabasePolicyError("ClickHouse writes do not support ON CLUSTER.");
   if (/^ALTER\s+TABLE\b[\s\S]*\b(DELETE|DROP|MODIFY|CLEAR|REPLACE|MOVE|FETCH|FREEZE|REMOVE)\b/i.test(normalized)) {
     throw new DatabasePolicyError("ClickHouse writes do not support destructive or mutation ALTER TABLE statements.");
   }
-  if (INSERT_PATTERN.test(normalized)) return { statement: normalized, statementKind: "insert" };
+  if (INSERT_PATTERN.test(normalized)) return { statement: normalized, statementKind: "insert", databaseRequired: true };
+  if (CREATE_DATABASE_PATTERN.test(normalized)) return { statement: normalized, statementKind: "create", databaseRequired: false };
   if (CREATE_TABLE_PATTERN.test(normalized)) {
     if (/\bAS\s+SELECT\b/i.test(normalized)) throw new DatabasePolicyError("Derived CREATE TABLE statements are not supported.");
-    return { statement: normalized, statementKind: "create" };
+    return { statement: normalized, statementKind: "create", databaseRequired: true };
   }
-  if (ALTER_ADD_COLUMN_PATTERN.test(normalized)) return { statement: normalized, statementKind: "alter" };
-  throw new DatabasePolicyError("ClickHouse writes support only INSERT ... VALUES, CREATE TABLE, and ALTER TABLE ... ADD COLUMN.");
+  if (ALTER_ADD_COLUMN_PATTERN.test(normalized)) return { statement: normalized, statementKind: "alter", databaseRequired: true };
+  throw new DatabasePolicyError("ClickHouse writes support only INSERT ... VALUES, CREATE DATABASE, CREATE TABLE, and ALTER TABLE ... ADD COLUMN.");
 }
 
 async function selectJson<T extends Record<string, unknown>>(source: ResolvedSource, query: string, signal?: AbortSignal): Promise<T[]> {
@@ -137,6 +140,7 @@ export const clickhouseAdapter: DatabaseAdapter = {
   dialect: "clickhouse",
 
   async ping(source, signal): Promise<PingResult> {
+    const startedAt = performance.now();
     const client = getClient(source);
     const ping = await client.ping({ select: true, abort_signal: signal });
     if (!ping.success) throw new Error(ping.error.message);
@@ -149,14 +153,16 @@ export const clickhouseAdapter: DatabaseAdapter = {
       source: source.name,
       dialect: "clickhouse",
       ok: true,
+      latency_ms: performance.now() - startedAt,
       server_version: rows[0]?.server_version,
       current_database: rows[0]?.current_database ?? null
     };
   },
 
-  async listDatabases(source, signal): Promise<string[]> {
+  async listDatabases(source, signal): Promise<ListDatabasesResult> {
     const rows = await selectJson<{ name?: string }>(source, "SELECT name FROM system.databases ORDER BY name", signal);
-    return rows.map((row) => String(row.name ?? "")).filter(Boolean);
+    const bounded = boundItems(rows.map((row) => String(row.name ?? "")).filter(Boolean));
+    return { source: source.name, dialect: "clickhouse", databases: bounded.items, truncated: bounded.truncated };
   },
 
   async listTables(source, database, signal): Promise<TableResult> {
@@ -236,9 +242,10 @@ export const clickhouseAdapter: DatabaseAdapter = {
     };
   },
 
-  async query(source, statement, maxRows, signal): Promise<QueryResult> {
+  async query(source, database, statement, maxRows, signal): Promise<QueryResult> {
+    const querySource = sourceWithDatabase(source, database);
     const normalized = validateRead(statement).replace(/\s+FORMAT\s+[A-Za-z0-9_]+\s*$/i, "");
-    const response = await getClient(source).exec({
+    const response = await getClient(querySource).exec({
       query: normalized,
       abort_signal: signal,
       clickhouse_settings: {
@@ -261,6 +268,7 @@ export const clickhouseAdapter: DatabaseAdapter = {
     return {
       source: source.name,
       dialect: "clickhouse",
+      database,
       columns,
       rows: bounded.rows,
       row_count: bounded.rows.length,
@@ -272,9 +280,10 @@ export const clickhouseAdapter: DatabaseAdapter = {
 
   validateWrite: validateWrite,
 
-  async write(source, write, signal): Promise<WriteResult> {
+  async write(source, database, write, signal): Promise<WriteResult> {
     if (signal?.aborted) throw new Error("Operation aborted.");
-    const response = await getClient(source).command({
+    const writeSource = database ? sourceWithDatabase(source, database) : source;
+    const response = await getClient(writeSource).command({
       query: write.statement,
       abort_signal: signal,
       clickhouse_settings: { readonly: "0" }
@@ -282,6 +291,7 @@ export const clickhouseAdapter: DatabaseAdapter = {
     return {
       source: source.name,
       dialect: "clickhouse",
+      database,
       executed: true,
       cancelled: false,
       statement_kind: write.statementKind,

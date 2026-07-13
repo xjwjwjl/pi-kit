@@ -4,7 +4,33 @@ export type Component = {
 };
 
 export class Text {
-  constructor(..._args: unknown[]) {}
+  private text: string;
+
+  constructor(text = "", ..._args: unknown[]) {
+    this.text = text;
+  }
+
+  setText(text: string): void {
+    this.text = text;
+  }
+
+  render(_width: number): string[] {
+    return this.text.split("\n");
+  }
+
+  invalidate(): void {}
+}
+
+export const Key = {
+  enter: "enter",
+  escape: "escape",
+  ctrl(value: string): string {
+    return `ctrl+${value}`;
+  }
+};
+
+export function matchesKey(data: string, key: string): boolean {
+  return data === key || (key === Key.enter && data === "\r") || (key === Key.escape && data === "\u001b");
 }
 
 export function visibleWidth(text: string): number {
