@@ -1,9 +1,10 @@
 {
-  "name": "clickhouse-client",
+  "name": "pi-clickhouse",
   "private": true,
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "check": "node --import ./tests/register-ts-loader.mjs --experimental-strip-types ./tests/self-check.ts",
     "smoke:run-query": "node --experimental-strip-types ./tests/run-query-smoke.ts"
   },
   "pi": {

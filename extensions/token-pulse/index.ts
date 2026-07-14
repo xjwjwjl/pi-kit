@@ -257,7 +257,8 @@ function formatTokenCount(n: number): string {
 	const r = Math.round(n);
 	if (r <= 0) return "0";
 	if (r < 1000) return String(r);
-	return `${(r / 1000).toFixed(1)}k`;
+	if (r < 1_000_000) return `${(r / 1000).toFixed(1)}k`;
+	return `${(r / 1_000_000).toFixed(1)}M`;
 }
 
 function formatCost(value: number): string {

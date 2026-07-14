@@ -10,7 +10,7 @@
 
 - 不是围绕某一个数据库产品做能力堆叠
 - 不是包装现成 MCP server
-- 不是复用现有 `clickhouse-client` extension
+- 不是复用现有 `pi-clickhouse` extension
 - 而是做一层 pi 原生的、方言可插拔的 SQL 工具抽象
 
 ## 2. 约束与原则
@@ -61,7 +61,7 @@
 
 明确不采用的东西：
 
-- 不复用本地 `clickhouse-client` extension 的设计
+- 不复用本地 `pi-clickhouse` extension 的设计
 - 不直接照搬 `mysql_query` 这种单 tool 模型
 - 不直接包 Python MariaDB MCP 进 pi
 - 不把任何一个数据库的能力模型当成“标准模型”
@@ -603,7 +603,7 @@ sqlkit/
 - 默认只读
 - 多数据源配置
 - UI 和 LLM 输出分离
-- 不复用现有 `clickhouse-client` 设计
+- 不复用现有 `pi-clickhouse` 设计
 
 一句话概括：
 

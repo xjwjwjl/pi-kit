@@ -6,7 +6,7 @@ import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { createClient, ResultSet, ClickHouseLogLevel, type ClickHouseClient } from "@clickhouse/client";
 
-const CLIENT_APP_NAME = "pi-clickhouse-client";
+const CLIENT_APP_NAME = "pi-clickhouse";
 const ENGINE_DISPLAY_ORDER = [
 	"MergeTree",
 	"AggregatingMergeTree",
@@ -21,11 +21,7 @@ const ENGINE_DISPLAY_LABELS: Record<string, string> = {
 	View: "Views",
 	Distributed: "Distributed Tables",
 };
-const CONFIG_FILE_CANDIDATES = [
-	path.join(".pi", "clickhouse-client.json"),
-	".clickhouse-client.json",
-	"clickhouse-client.json",
-];
+const CONFIG_FILE_PATH = path.join(".pi", "databases.json");
 
 type RawProjectConfig = {
 	url?: unknown;
@@ -41,7 +37,6 @@ type RawProjectConfig = {
 	send_receive_timeout?: unknown;
 	request_timeout_ms?: unknown;
 	allow_write_access?: unknown;
-	allow_drop?: unknown;
 };
 
 type ResolvedProjectConfig = {
@@ -54,7 +49,14 @@ type ResolvedProjectConfig = {
 	pathname?: string;
 	requestTimeoutMs: number;
 	allowWriteAccess: boolean;
-	allowDrop: boolean;
+};
+
+type WriteResultShape = {
+	executed: boolean;
+	cancelled: boolean;
+	statement_kind: "insert" | "create" | "alter";
+	query_id?: string;
+	reason?: string;
 };
 
 type ColumnInfo = {
@@ -102,11 +104,19 @@ type EngineGroup = {
 
 const clientCache = new Map<string, ClickHouseClient>();
 let registered = false;
+let writeQueue: Promise<void> = Promise.resolve();
 
 const RunQueryParams = Type.Object({
 	query: Type.String({
 		description:
-			"Single ClickHouse SQL statement to execute. Do not include an explicit FORMAT clause; the tool controls the response format automatically. Use LIMIT for large result sets.",
+			"Single read-only ClickHouse SQL statement to execute. Do not include an explicit FORMAT clause; the tool controls the response format automatically. Use LIMIT for large result sets.",
+	}),
+});
+
+const WriteStatementParams = Type.Object({
+	statement: Type.String({
+		description:
+			"Single supported ClickHouse write statement. Execution always requires interactive user confirmation.",
 	}),
 });
 
@@ -152,10 +162,8 @@ function getContextCwd(ctx: unknown): string {
 function findProjectConfigPath(startDir: string): string | undefined {
 	let current = path.resolve(startDir);
 	while (true) {
-		for (const candidate of CONFIG_FILE_CANDIDATES) {
-			const fullPath = path.join(current, candidate);
-			if (existsSync(fullPath)) return fullPath;
-		}
+		const configPath = path.join(current, CONFIG_FILE_PATH);
+		if (existsSync(configPath)) return configPath;
 		const parent = path.dirname(current);
 		if (parent === current) return undefined;
 		current = parent;
@@ -179,9 +187,7 @@ function buildUrl(config: RawProjectConfig, sourcePath: string): string {
 function resolveProjectConfig(cwd: string): ResolvedProjectConfig {
 	const configPath = findProjectConfigPath(cwd);
 	if (!configPath) {
-		throw new Error(
-			`No clickhouse-client config found for ${cwd}. Create one at .pi/clickhouse-client.json or .clickhouse-client.json.`,
-		);
+		throw new Error(`No ClickHouse config found for ${cwd}. Create .pi/databases.json with a "clickhouse" object.`);
 	}
 
 	let parsed: unknown;
@@ -196,7 +202,11 @@ function resolveProjectConfig(cwd: string): ResolvedProjectConfig {
 		throw new Error(`Invalid ${configPath}: expected a JSON object`);
 	}
 
-	const config = parsed as RawProjectConfig;
+	const config = parsed.clickhouse;
+	if (!isRecord(config)) {
+		throw new Error(`Invalid ${configPath}: missing "clickhouse" object`);
+	}
+
 	const username = normalizeString(config.username ?? config.user);
 	if (!username) {
 		throw new Error(`Invalid ${configPath}: missing \"username\" (or \"user\")`);
@@ -209,7 +219,6 @@ function resolveProjectConfig(cwd: string): ResolvedProjectConfig {
 		? normalizePositiveInteger(config.request_timeout_ms, 300_000)
 		: normalizePositiveInteger(config.send_receive_timeout, 300) * 1000;
 	const allowWriteAccess = normalizeBoolean(config.allow_write_access, false);
-	const allowDrop = normalizeBoolean(config.allow_drop, false);
 	const url = buildUrl(config, configPath);
 
 	const cacheKeyPayload = {
@@ -219,8 +228,6 @@ function resolveProjectConfig(cwd: string): ResolvedProjectConfig {
 		database,
 		pathname,
 		requestTimeoutMs,
-		allowWriteAccess,
-		allowDrop,
 	};
 
 	return {
@@ -233,7 +240,6 @@ function resolveProjectConfig(cwd: string): ResolvedProjectConfig {
 		pathname,
 		requestTimeoutMs,
 		allowWriteAccess,
-		allowDrop,
 	};
 }
 
@@ -264,19 +270,136 @@ function escapeSqlString(value: string): string {
 	return `'${value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
 }
 
-function getReadonlySetting(config: ResolvedProjectConfig): "0" | "1" {
-	return config.allowWriteAccess ? "0" : "1";
+const CLICKHOUSE_IDENTIFIER = "(?:`(?:``|[^`])+`|[A-Za-z_][A-Za-z0-9_$]*)";
+const CLICKHOUSE_TABLE_IDENTIFIER = `${CLICKHOUSE_IDENTIFIER}(?:\\.${CLICKHOUSE_IDENTIFIER})?`;
+const CLICKHOUSE_INSERT_PATTERN = new RegExp(
+	`^INSERT\\s+INTO\\s+${CLICKHOUSE_TABLE_IDENTIFIER}(?:\\s*\\([^)]*\\))?\\s+VALUES\\s*\\(`,
+	"i",
+);
+const CLICKHOUSE_CREATE_TABLE_PATTERN = new RegExp(
+	`^CREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${CLICKHOUSE_TABLE_IDENTIFIER}\\s*\\(`,
+	"i",
+);
+const CLICKHOUSE_ALTER_ADD_COLUMN_PATTERN = new RegExp(
+	`^ALTER\\s+TABLE\\s+${CLICKHOUSE_TABLE_IDENTIFIER}\\s+ADD\\s+COLUMN\\b`,
+	"i",
+);
+
+type ValidatedClickHouseWrite = {
+	statement: string;
+	statementKind: WriteResultShape["statement_kind"];
+};
+
+type WriteConfirmationContext = {
+	hasUI?: boolean;
+	ui?: {
+		confirm?: (title: string, message: string) => Promise<boolean> | boolean;
+	};
+};
+
+function hasMultipleStatements(query: string): boolean {
+	let quote: "'" | '"' | "`" | null = null;
+	let blockComment = false;
+	let lineComment = false;
+
+	for (let index = 0; index < query.length; index++) {
+		const char = query[index];
+		const next = query[index + 1];
+		const previous = query[index - 1];
+
+		if (lineComment) {
+			if (char === "\n" || char === "\r") lineComment = false;
+			continue;
+		}
+		if (blockComment) {
+			if (char === "*" && next === "/") {
+				blockComment = false;
+				index += 1;
+			}
+			continue;
+		}
+		if (quote) {
+			if (char === quote && previous !== "\\") quote = null;
+			continue;
+		}
+		if (char === "-" && next === "-") {
+			lineComment = true;
+			index += 1;
+			continue;
+		}
+		if (char === "#") {
+			lineComment = true;
+			continue;
+		}
+		if (char === "/" && next === "*") {
+			blockComment = true;
+			index += 1;
+			continue;
+		}
+		if (char === "'" || char === '"' || char === "`") {
+			quote = char;
+			continue;
+		}
+		if (char === ";" && query.slice(index + 1).trim() !== "") return true;
+	}
+
+	return false;
 }
 
-function validateDestructiveOperations(config: ResolvedProjectConfig, query: string): void {
-	if (!config.allowWriteAccess) return;
-	if (config.allowDrop) return;
-	const destructivePattern = /\b(DROP\s+(\S+\s+)*(TABLE|DATABASE|VIEW|DICTIONARY)|TRUNCATE\s+TABLE)\b/i;
-	if (destructivePattern.test(query)) {
-		throw new Error(
-			"Destructive operations (DROP, TRUNCATE) are not allowed. Set allow_drop=true in your project config to enable them.",
-		);
+function validateReadQuerySafety(query: string): void {
+	const normalized = normalizeQueryForClickHouseClient(query);
+	if (!normalized) throw new Error("Query is empty.");
+	if (hasMultipleStatements(query)) throw new Error("clickhouse_run_query expects a single SQL statement.");
+	if (!isQueryWithOutput(normalized)) {
+		throw new Error("clickhouse_run_query supports only SELECT, WITH, SHOW, DESCRIBE, EXISTS, DESC, or EXPLAIN statements.");
 	}
+}
+
+function validateWriteStatement(config: ResolvedProjectConfig, statement: string): ValidatedClickHouseWrite {
+	const normalized = normalizeQueryForClickHouseClient(statement);
+	if (!normalized) throw new Error("Statement is empty.");
+	if (!config.allowWriteAccess) {
+		throw new Error("ClickHouse writes are disabled. Set allow_write_access=true in your project config to enable clickhouse_write.");
+	}
+	if (hasMultipleStatements(statement)) throw new Error("clickhouse_write expects a single SQL statement.");
+	if (/\bON\s+CLUSTER\b/i.test(normalized)) {
+		throw new Error("clickhouse_write does not support ON CLUSTER statements.");
+	}
+	if (/^ALTER\s+TABLE\b[\s\S]*\b(DELETE|DROP|MODIFY|CLEAR|REPLACE|MOVE|FETCH|FREEZE|REMOVE)\b/i.test(normalized)) {
+		throw new Error("clickhouse_write does not support destructive or mutation ALTER TABLE statements.");
+	}
+	if (CLICKHOUSE_INSERT_PATTERN.test(normalized)) {
+		return { statement: normalized, statementKind: "insert" };
+	}
+	if (CLICKHOUSE_CREATE_TABLE_PATTERN.test(normalized)) {
+		if (/\bAS\s+SELECT\b/i.test(normalized)) {
+			throw new Error("clickhouse_write does not support derived CREATE TABLE statements.");
+		}
+		return { statement: normalized, statementKind: "create" };
+	}
+	if (CLICKHOUSE_ALTER_ADD_COLUMN_PATTERN.test(normalized)) {
+		return { statement: normalized, statementKind: "alter" };
+	}
+	if (/^(DELETE|DROP|TRUNCATE|RENAME|SYSTEM|KILL|OPTIMIZE|ATTACH|DETACH|BACKUP|RESTORE)\b/i.test(normalized)) {
+		throw new Error("clickhouse_write does not support destructive or administrative statements.");
+	}
+	throw new Error("clickhouse_write supports only INSERT ... VALUES, CREATE TABLE, and ALTER TABLE ... ADD COLUMN statements.");
+}
+
+function serializeWrite<T>(task: () => Promise<T>): Promise<T> {
+	const next = writeQueue.then(task, task);
+	writeQueue = next.then(
+		() => undefined,
+		() => undefined,
+	);
+	return next;
+}
+
+async function confirmWrite(ctx: unknown, title: string, message: string): Promise<boolean | undefined> {
+	if (!isRecord(ctx) || ctx.hasUI !== true || !isRecord(ctx.ui) || typeof ctx.ui.confirm !== "function") {
+		return undefined;
+	}
+	return (ctx as WriteConfirmationContext).ui!.confirm!(title, message);
 }
 
 async function executeSelectJson<T extends Record<string, unknown>>(
@@ -290,7 +413,7 @@ async function executeSelectJson<T extends Record<string, unknown>>(
 		format: "JSONEachRow",
 		abort_signal: abortSignal,
 		clickhouse_settings: {
-			readonly: getReadonlySetting(config),
+			readonly: "1",
 			output_format_json_quote_64bit_integers: 0,
 		},
 	});
@@ -329,50 +452,57 @@ async function runQuery(
 	query: string,
 	abortSignal?: AbortSignal,
 ): Promise<QueryResultShape> {
-	validateDestructiveOperations(config, query);
+	validateReadQuerySafety(query);
 	const client = getClient(config);
 	const normalized = stripTrailingFormatClause(normalizeQueryForClickHouseClient(query));
-	const isSelectLike = isQueryWithOutput(normalized);
-
-	if (isSelectLike) {
-		const result = await client.exec({
-			query: normalized,
-			abort_signal: abortSignal,
-			clickhouse_settings: {
-				readonly: getReadonlySetting(config),
-				default_format: "JSONCompact",
-				output_format_json_quote_64bit_integers: 0,
-			},
-		});
-		const resultSet = new ResultSet(result.stream, "JSONCompact", result.query_id);
-		let json: { meta?: Array<{ name: string }>; data?: unknown[] };
-		try {
-			json = (await resultSet.json()) as { meta?: Array<{ name: string }>; data?: unknown[] };
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			throw new Error(
-				`Failed to parse ClickHouse response as JSONCompact. clickhouse_run_query expects a single result set; avoid multiple SQL statements and explicit FORMAT clauses. Original error: ${message}`,
-			);
-		}
-		const columns = Array.isArray(json.meta) ? json.meta.map((col) => col.name) : [];
-		const rows = Array.isArray(json.data)
-			? json.data.map((row) =>
-					Array.isArray(row)
-						? row
-						: columns.map((column) => (row as Record<string, unknown>)[column]),
-				)
-			: [];
-		return { query_id: result.query_id, columns, rows };
-	}
-
-	const result = await client.command({
+	const result = await client.exec({
 		query: normalized,
 		abort_signal: abortSignal,
 		clickhouse_settings: {
-			readonly: getReadonlySetting(config),
+			readonly: "1",
+			default_format: "JSONCompact",
+			output_format_json_quote_64bit_integers: 0,
 		},
 	});
-	return { query_id: result.query_id, columns: [], rows: [] };
+	const resultSet = new ResultSet(result.stream, "JSONCompact", result.query_id);
+	let json: { meta?: Array<{ name: string }>; data?: unknown[] };
+	try {
+		json = (await resultSet.json()) as { meta?: Array<{ name: string }>; data?: unknown[] };
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		throw new Error(
+			`Failed to parse ClickHouse response as JSONCompact. clickhouse_run_query expects a single result set; avoid multiple SQL statements and explicit FORMAT clauses. Original error: ${message}`,
+		);
+	}
+	const columns = Array.isArray(json.meta) ? json.meta.map((col) => col.name) : [];
+	const rows = Array.isArray(json.data)
+		? json.data.map((row) =>
+				Array.isArray(row)
+					? row
+					: columns.map((column) => (row as Record<string, unknown>)[column]),
+			)
+		: [];
+	return { query_id: result.query_id, columns, rows };
+}
+
+async function runWrite(
+	config: ResolvedProjectConfig,
+	write: ValidatedClickHouseWrite,
+	abortSignal?: AbortSignal,
+): Promise<WriteResultShape> {
+	if (abortSignal?.aborted) throw new Error("Operation aborted.");
+	const client = getClient(config);
+	const result = await client.command({
+		query: write.statement,
+		abort_signal: abortSignal,
+		clickhouse_settings: { readonly: "0" },
+	});
+	return {
+		executed: true,
+		cancelled: false,
+		statement_kind: write.statementKind,
+		query_id: result.query_id,
+	};
 }
 
 async function pingClickHouse(
@@ -764,6 +894,35 @@ function formatRunQueryResultForUi(args: unknown, result: { content?: unknown; d
 	return lines.length > 0 ? lines.join("\n") : "Query executed";
 }
 
+function formatWriteResultForUi(args: unknown, result: { content?: unknown; details?: unknown }, isError = false): string {
+	const statement = isRecord(args) && typeof args.statement === "string" ? args.statement.trim() : "";
+	const lines: string[] = [];
+	if (statement) lines.push(formatSqlForUi(statement));
+
+	if (isError) {
+		const errorText = getResultText(result).trim();
+		if (lines.length > 0) lines.push("");
+		lines.push(`Error: ${errorText || "Write failed"}`);
+		return lines.join("\n");
+	}
+
+	if (!isRecord(result.details)) return lines.length > 0 ? lines.join("\n") : "Write completed";
+	if (lines.length > 0) lines.push("");
+	if (result.details.cancelled === true) {
+		lines.push("Write cancelled");
+		return lines.join("\n");
+	}
+	if (result.details.executed !== true) {
+		lines.push(typeof result.details.reason === "string" ? result.details.reason : "Write not executed");
+		return lines.join("\n");
+	}
+
+	const statementKind = typeof result.details.statement_kind === "string" ? result.details.statement_kind.toUpperCase() : "WRITE";
+	lines.push(`${statementKind} executed`);
+	if (typeof result.details.query_id === "string") lines.push(`Query ID: ${result.details.query_id}`);
+	return lines.join("\n");
+}
+
 function registerTools(pi: ExtensionAPI): void {
 	if (registered) return;
 	registered = true;
@@ -816,7 +975,7 @@ function registerTools(pi: ExtensionAPI): void {
 		name: "clickhouse_run_query",
 		label: "ClickHouse Run Query",
 		description:
-			"Execute a single ClickHouse SQL statement using the current project's config. Result-producing statements return structured details as { columns, rows } using JSONCompact; avoid multiple statements and explicit FORMAT clauses.",
+			"Execute a single read-only ClickHouse SQL statement using the current project's config. Result-producing statements return structured details as { columns, rows } using JSONCompact; avoid multiple statements and explicit FORMAT clauses.",
 		parameters: RunQueryParams,
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const query = String((params as { query: string }).query);
@@ -834,6 +993,59 @@ function registerTools(pi: ExtensionAPI): void {
 			return new Text(theme.fg(context.isError ? "error" : "toolOutput", formatRunQueryResultForUi(context.args, result, context.isError)), 0, 0);
 		},
 	});
+
+	pi.registerTool({
+		name: "clickhouse_write",
+		label: "ClickHouse Write",
+		description: "Execute one confirmed ClickHouse insert or additive schema change using the current project's config.",
+		promptSnippet: "Execute one confirmed ClickHouse INSERT VALUES, CREATE TABLE, or ALTER TABLE ADD COLUMN statement",
+		promptGuidelines: [
+			"Use clickhouse_write only for an explicit user-requested database change, never as a fallback for clickhouse_run_query.",
+			"clickhouse_write supports INSERT ... VALUES, CREATE TABLE, and ALTER TABLE ... ADD COLUMN only. It rejects mutations, ON CLUSTER, and INSERT SELECT.",
+			"clickhouse_write always prompts the user to confirm. Do not retry after a timeout or lost connection without first checking the database.",
+		],
+		parameters: WriteStatementParams,
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+			const statement = String((params as { statement: string }).statement);
+			return serializeWrite(async () => {
+				const config = resolveProjectConfig(getContextCwd(ctx));
+				const write = validateWriteStatement(config, statement);
+				const confirmed = await confirmWrite(
+					ctx,
+					`Confirm ClickHouse ${write.statementKind}`,
+					`ClickHouse ${write.statementKind.toUpperCase()}\n\n${formatSqlForUi(write.statement)}\n\nExecute this statement?`,
+				);
+				if (confirmed === undefined) {
+					const details: WriteResultShape = {
+						executed: false,
+						cancelled: false,
+						statement_kind: write.statementKind,
+						reason: "Interactive confirmation is required; no write was executed.",
+					};
+					return makeTextResult({ config: config.sourcePath, ...details });
+				}
+				if (!confirmed) {
+					const details: WriteResultShape = {
+						executed: false,
+						cancelled: true,
+						statement_kind: write.statementKind,
+					};
+					return makeTextResult({ config: config.sourcePath, ...details });
+				}
+				onUpdate({ content: [{ type: "text", text: `${formatSqlForUi(write.statement)}\n\nWriting...` }] });
+				const result = await runWrite(config, write, signal);
+				return makeTextResult({ config: config.sourcePath, ...result });
+			});
+		},
+		renderResult(result, options, theme, context) {
+			if (options.isPartial) {
+				const statement = isRecord(context.args) && typeof context.args.statement === "string" ? context.args.statement.trim() : "";
+				const text = statement ? `${formatSqlForUi(statement)}\n\nWriting...` : "Writing...";
+				return new Text(theme.fg("toolOutput", text), 0, 0);
+			}
+			return new Text(theme.fg(context.isError ? "error" : "toolOutput", formatWriteResultForUi(context.args, result, context.isError)), 0, 0);
+		},
+	});
 }
 
 export default function clickhouseClientExtension(pi: ExtensionAPI) {
@@ -847,8 +1059,16 @@ export default function clickhouseClientExtension(pi: ExtensionAPI) {
 		const cwd = getContextCwd(ctx);
 		const configPath = findProjectConfigPath(cwd);
 		ctx.ui.setStatus(
-			"clickhouse-client",
+			"pi-clickhouse",
 			configPath ? `clickhouse config: ${path.relative(cwd, configPath) || configPath}` : "clickhouse: no project config",
 		);
 	});
 }
+
+export const __test__ = {
+	resolveProjectConfig,
+	hasMultipleStatements,
+	validateReadQuerySafety,
+	validateWriteStatement,
+	registerTools,
+};

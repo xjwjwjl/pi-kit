@@ -1,0 +1,8 @@
+{
+  "host": "192.168.27.69",
+  "port": 3306,
+  "user": "root",
+  "password": "Mysql@2o20...",
+  "database": "",
+  "allow_write_access": false
+}

@@ -9,6 +9,9 @@ outputs/*
 !work/.gitkeep
 !outputs/.gitkeep
 
+# Ignore nested .git repos inside databases
+extensions/databases/**/.git
+
 # Test and coverage output
 coverage/
 .vitest/
