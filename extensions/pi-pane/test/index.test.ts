@@ -9,11 +9,15 @@ import {
 	detectPaneBackend,
 	expandWindowsEnvVars,
 	extractWindowsExecutable,
+	getBackendCommand,
 	getPaneArgumentCompletions,
+	looksLikeWindowsPath,
 	parsePaneArgs,
+	posixifyPiArg,
 	quotePosix,
 	quotePowerShell,
 	splitShellArgs,
+	stripJsonComments,
 } from "../index.ts";
 
 test("parsePaneArgs defaults to right fresh", () => {
@@ -105,8 +109,8 @@ test("buildTmuxPaneArgs maps right and down to tmux split flags", () => {
 });
 
 test("buildWindowsTerminalPaneArgs maps right and down to Windows Terminal split flags", () => {
-	assert.equal(buildWindowsTerminalPaneArgs("right", "D:\\code\\x", [], "C:\\Git\\bin\\bash.exe")[3], "--vertical");
-	assert.equal(buildWindowsTerminalPaneArgs("down", "D:\\code\\x", [], "C:\\Git\\bin\\bash.exe")[3], "--horizontal");
+	assert.equal(buildWindowsTerminalPaneArgs("right", "D:\\code\\x", [], "C:\\Git\\bin\\bash.exe")[1], "--vertical");
+	assert.equal(buildWindowsTerminalPaneArgs("down", "D:\\code\\x", [], "C:\\Git\\bin\\bash.exe")[1], "--horizontal");
 });
 
 test("buildWindowsTerminalPaneArgs launches Git Bash instead of PowerShell", () => {
@@ -117,10 +121,10 @@ test("buildWindowsTerminalPaneArgs launches Git Bash instead of PowerShell", () 
 		"C:\\Git\\bin\\bash.exe",
 	);
 
-	assert.equal(args[6], "C:\\Git\\bin\\bash.exe");
-	assert.equal(args[7], "-c");
-	assert.match(args[8], /cd 'D:\/code\/x' && pi '--fork' 'C:\/Users\/admin\/\.pi\/session\.jsonl'/);
-	assert.doesNotMatch(args[8], /;/);
+	assert.equal(args[4], "C:\\Git\\bin\\bash.exe");
+	assert.equal(args[5], "-c");
+	assert.match(args[6], /cd 'D:\/code\/x' && pi '--fork' 'C:\/Users\/admin\/\.pi\/session\.jsonl'/);
+	assert.doesNotMatch(args[6], /;/);
 	assert.doesNotMatch(args.join(" "), /powershell/i);
 });
 
@@ -155,4 +159,78 @@ test("detectPaneBackend respects explicit backend first", () => {
 
 test("detectPaneBackend prefers Windows Terminal before tmux", () => {
 	assert.equal(detectPaneBackend({ TMUX: "/tmp/tmux", WT_SESSION: "1" }, "win32"), "windows-terminal");
+});
+
+test("stripJsonComments removes line and block comments", () => {
+	assert.equal(
+		stripJsonComments('{ "a": 1 // comment\n, "b": 2 /* block */ }'),
+		'{ "a": 1 \n, "b": 2  }',
+	);
+	assert.equal(stripJsonComments('{"x":1}'), '{"x":1}');
+});
+
+test("stripJsonComments preserves :// URLs in string values", () => {
+	assert.equal(
+		stripJsonComments('{ "url": "https://example.com" // note\n}'),
+		'{ "url": "https://example.com" \n}',
+	);
+});
+
+test("getBackendCommand omits -w when WT_SESSION is set", () => {
+	const wtArgs = getBackendCommand(
+		"windows-terminal",
+		{ direction: "right", mode: "fresh", startup: "normal", dryRun: false },
+		"D:\\code\\x",
+		[],
+		{ WT_SESSION: "abc123" },
+	).args;
+	assert.equal(wtArgs[0], "split-pane");
+	assert.ok(!wtArgs.includes("-w"));
+});
+
+test("getBackendCommand adds -w 0 when WT_SESSION is absent", () => {
+	const wtArgs = getBackendCommand(
+		"windows-terminal",
+		{ direction: "right", mode: "fresh", startup: "normal", dryRun: false },
+		"D:\\code\\x",
+		[],
+		{},
+	).args;
+	assert.equal(wtArgs[0], "-w");
+	assert.equal(wtArgs[1], "0");
+});
+
+test("looksLikeWindowsPath detects drive-letter and UNC paths", () => {
+	assert.equal(looksLikeWindowsPath("C:\\Users\\admin\\.pi\\session.jsonl"), true);
+	assert.equal(looksLikeWindowsPath("D:/code/pi-kit"), true);
+	assert.equal(looksLikeWindowsPath("\\\\server\\share\\dir"), true);
+});
+
+test("looksLikeWindowsPath ignores flags and non-path values", () => {
+	assert.equal(looksLikeWindowsPath("--offline"), false);
+	assert.equal(looksLikeWindowsPath("--fork"), false);
+	assert.equal(looksLikeWindowsPath("gpt-4"), false);
+	assert.equal(looksLikeWindowsPath("some\\nbackslash"), false); // backslashes but not absolute path
+	assert.equal(looksLikeWindowsPath("use \\d+ regex"), false);
+});
+
+test("posixifyPiArg converts Windows paths but not flags", () => {
+	assert.equal(posixifyPiArg("C:\\Users\\admin\\.pi\\session.jsonl"), "C:/Users/admin/.pi/session.jsonl");
+	assert.equal(posixifyPiArg("--offline"), "--offline");
+	assert.equal(posixifyPiArg("--prompt"), "--prompt");
+	assert.equal(posixifyPiArg("deepseek/deepseek-v4-flash"), "deepseek/deepseek-v4-flash");
+});
+
+test("buildWindowsTerminalPaneArgs keeps backslashes in non-path pi args", () => {
+	const args = buildWindowsTerminalPaneArgs(
+		"right",
+		"D:\\code\\x",
+		["--fork", "C:\\Users\\admin\\.pi\\session.jsonl", "--prompt", "use \\d+ regex"],
+		"C:\\Git\\bin\\bash.exe",
+	);
+	const bashCmd = args[args.indexOf("-c") + 1];
+	// session file should be posixified
+	assert.match(bashCmd, /C:\/Users\/admin\/\.pi\/session\.jsonl/);
+	// backslash in --prompt value should be preserved
+	assert.match(bashCmd, /use \\d\+ regex/);
 });

@@ -32,7 +32,7 @@ const DIRECTIONS: PaneDirection[] = ["right", "down"];
 const BACKENDS: PaneBackend[] = ["tmux", "windows-terminal"];
 const MODES: PaneMode[] = ["fork", "fresh"];
 const STARTUPS: PaneStartup[] = ["normal", "fast"];
-export const FAST_PI_ARGS = ["--offline", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files"];
+export const FAST_PI_ARGS = ["--offline", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files"] as const;
 
 const PANE_COMPLETIONS: PaneCompletionItem[] = [
 	{ value: "right", label: "right", description: "Open a pane to the right", group: "direction" },
@@ -180,6 +180,17 @@ export function toPosixPath(value: string): string {
 	return value.replace(/\\/g, "/");
 }
 
+/** True when the arg looks like a Windows filesystem path that needs POSIX conversion. */
+function looksLikeWindowsPath(value: string): boolean {
+	return /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\\\");
+}
+
+function posixifyPiArg(value: string): string {
+	return looksLikeWindowsPath(value) ? toPosixPath(value) : value;
+}
+
+export { looksLikeWindowsPath, posixifyPiArg };
+
 export function quotePosix(value: string): string {
 	return `'${value.replace(/'/g, `'\\''`)}'`;
 }
@@ -282,8 +293,8 @@ export function buildPiArgs(
 export function buildTmuxPaneArgs(direction: PaneDirection, cwd: string, piArgs: string[]): string[] {
 	const splitFlag = direction === "right" ? "-h" : "-v";
 	const quotedCwd = quotePosix(toPosixPath(cwd));
-	const piCommand = ["pi", ...piArgs.map((arg) => quotePosix(toPosixPath(arg)))].join(" ");
-	const command = `cd ${quotedCwd} && ${piCommand}; exec "\${SHELL:-/bin/sh}"`;
+	const piCommand = ["pi", ...piArgs.map((arg) => quotePosix(posixifyPiArg(arg)))].join(" ");
+	const command = `cd ${quotedCwd} && ${piCommand}; exec "\${SHELL:-/bin/sh}" -i`;
 
 	return ["split-window", splitFlag, command];
 }
@@ -308,6 +319,12 @@ function getWindowsTerminalSettingsPaths(env: NodeJS.ProcessEnv = process.env): 
 	return [...new Set(paths)];
 }
 
+export function stripJsonComments(raw: string): string {
+	// Require whitespace or line-start before // to avoid stripping :// URLs inside strings.
+	// Lookbehind avoids consuming the preceding character.
+	return raw.replace(/(?<=^|\s)\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -317,7 +334,8 @@ function readWindowsTerminalGitBashFromSettings(env: NodeJS.ProcessEnv = process
 		if (!existsSync(settingsPath)) continue;
 
 		try {
-			const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as unknown;
+			const raw = readFileSync(settingsPath, "utf8");
+			const settings = JSON.parse(stripJsonComments(raw)) as unknown;
 			if (!isRecord(settings)) continue;
 
 			const profiles = isRecord(settings.profiles) ? settings.profiles.list : undefined;
@@ -393,12 +411,10 @@ export function buildWindowsTerminalPaneArgs(
 ): string[] {
 	const splitFlag = direction === "right" ? "--vertical" : "--horizontal";
 	const quotedCwd = quotePosix(toPosixPath(cwd));
-	const piCommand = ["pi", ...piArgs.map((arg) => quotePosix(toPosixPath(arg)))].join(" ");
+	const piCommand = ["pi", ...piArgs.map((arg) => quotePosix(posixifyPiArg(arg)))].join(" ");
 	const bashCommand = `cd ${quotedCwd} && ${piCommand} || true && exec bash -i`;
 
 	return [
-		"-w",
-		"0",
 		"split-pane",
 		splitFlag,
 		"--startingDirectory",
@@ -417,12 +433,18 @@ export function detectPaneBackend(env: NodeJS.ProcessEnv = process.env, platform
 	return undefined;
 }
 
-function getBackendCommand(backend: PaneBackend, options: PaneOptions, cwd: string, piArgs: string[]) {
+export function getBackendCommand(backend: PaneBackend, options: PaneOptions, cwd: string, piArgs: string[], env: NodeJS.ProcessEnv = process.env) {
 	if (backend === "tmux") {
 		return { command: "tmux", args: buildTmuxPaneArgs(options.direction, cwd, piArgs) };
 	}
 
-	return { command: "wt", args: buildWindowsTerminalPaneArgs(options.direction, cwd, piArgs) };
+	const wtArgs = buildWindowsTerminalPaneArgs(options.direction, cwd, piArgs);
+	// When WT_SESSION is set, wt auto-targets the current window; -w 0 can target a different window.
+	// Only add -w 0 when running outside Windows Terminal.
+	if (!env.WT_SESSION) {
+		wtArgs.unshift("-w", "0");
+	}
+	return { command: "wt", args: wtArgs };
 }
 
 function commandPreview(command: string, args: string[]): string {
@@ -452,6 +474,9 @@ async function openPane(pi: ExtensionAPI, ctx: ExtensionCommandContext, options:
 	}
 
 	const piArgs = buildPiArgs(ctx, options);
+	if (options.mode === "fork" && !piArgs.includes("--fork")) {
+		ctx.ui.notify("Fork mode requested but no session file found — starting fresh session instead.", "warn");
+	}
 	const { command, args } = getBackendCommand(backend, options, ctx.cwd, piArgs);
 	const preview = commandPreview(command, args);
 
@@ -461,7 +486,15 @@ async function openPane(pi: ExtensionAPI, ctx: ExtensionCommandContext, options:
 		return;
 	}
 
-	const result = await pi.exec(command, args, { cwd: ctx.cwd, timeout: 5000 });
+	let result;
+	try {
+		result = await pi.exec(command, args, { cwd: ctx.cwd, timeout: 10000 });
+	} catch (err) {
+		const details = err instanceof Error ? err.message : String(err);
+		ctx.ui.notify(`Failed to spawn ${command}: ${truncateNotice(details)}`, "error");
+		return;
+	}
+
 	if (result.code !== 0) {
 		const details = (result.stderr || result.stdout || `exit code ${result.code}`).trim();
 		ctx.ui.notify(`Failed to open ${options.direction} pane via ${paneBackendLabel(backend)}: ${truncateNotice(details)}`, "error");
