@@ -1,6 +1,6 @@
 ---
 name: feature-dev
-description: "Structured 7-phase workflow for building new features: discovery, codebase exploration, clarifying questions, architecture design, implementation, quality review, summary. Use for multi-file features, complex integrations, new modules, or features with architectural decisions. NOT for single-line fixes, trivial changes, or urgent hotfixes. Trigger: feature-dev, /feature-dev, 新功能开发, 功能设计, 架构设计, feature development, build a feature."
+description: "Structured feature development workflow covering requirements, codebase exploration, architecture design, implementation, and review. For multi-file changes, new modules, complex integrations, or features with architectural decisions. Trigger: 新功能开发, feature-dev, 功能设计, 架构设计, feature development."
 ---
 
 # Feature Dev
@@ -16,7 +16,7 @@ This skill guides feature development. It does not edit code until Phase 5 (Impl
 - Pi has no subagents. Run exploration/design/review as sequential passes with different lenses.
 - Use `codegraph` (via the codegraph skill) for codebase exploration when available.
 - Use `code-review` skill for Phase 6 quality review when available.
-- Use project-specific skills (e.g., `fullstack-vibe-feature`, `autosync-api`, `autosync-menu`) when their conventions apply.
+- Use project-specific skills (e.g., `autosync-api`, `autosync-menu`) when their conventions apply.
 - Track progress with TodoWrite. One task per phase.
 
 ## Workflow
@@ -128,5 +128,4 @@ Output:
 
 - **codegraph**: preferred for Phase 2 codebase exploration
 - **code-review**: preferred for Phase 6 quality review
-- **fullstack-vibe-feature**: use when the project is a Go/Vue admin (GVA) project
 - **autosync-api / autosync-menu**: use in Phase 5 when adding new Gin routes or menus
