@@ -395,12 +395,61 @@ function isAssistantMessage(event: any): boolean {
 	return event?.message?.role === "assistant";
 }
 
+function isFailedAssistantMessage(message: any): boolean {
+	// Pi's only successful assistant terminal states. Treat pending, missing,
+	// or provider-specific stop reasons as failed so malformed responses cannot
+	// contaminate request averages.
+	return message?.stopReason !== "stop" && message?.stopReason !== "length" && message?.stopReason !== "toolUse";
+}
+
+function nonNegativeFiniteNumber(value: unknown): number | null {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function estimateAssistantMessageTokens(message: any): number {
+	if (!Array.isArray(message?.content)) return 0;
+
+	let total = 0;
+	for (const block of message.content) {
+		if (block?.type === "text" && typeof block.text === "string") {
+			total += estimateTokensFromTextRaw(block.text, "auto");
+		} else if (block?.type === "thinking" && typeof block.thinking === "string") {
+			total += estimateTokensFromTextRaw(block.thinking, "prose");
+		} else if (block?.type === "toolCall") {
+			let argumentsText = "";
+			try {
+				argumentsText = typeof block.arguments === "string" ? block.arguments : JSON.stringify(block.arguments ?? "") ?? "";
+			} catch {
+				argumentsText = String(block.arguments ?? "");
+			}
+			total += estimateTokensFromTextRaw(`${block.name ?? ""}${argumentsText}`, "structured");
+		}
+	}
+	return total;
+}
+
+function resolveFinalOutputTokens(
+	failed: boolean,
+	providerOutput: number | null,
+	estimatedOutput: number,
+): number | null {
+	// Failed responses may report zero usage after producing partial output.
+	if (failed && (providerOutput == null || providerOutput === 0) && estimatedOutput > 0) {
+		return estimatedOutput;
+	}
+	if (providerOutput != null) return providerOutput;
+	return estimatedOutput > 0 ? estimatedOutput : null;
+}
+
 export default function tokenPulseExtension(pi: ExtensionAPI) {
 	// Mutable runtime state for the current session/request.
 	const state = createState();
 	let timer: ReturnType<typeof setInterval> | undefined;
 	let lastCtx: ExtensionContext | undefined;
 	let pendingTurnIndex: number | null = null;
+	// Pi emits agent_start/agent_end for each retry attempt, while agent_settled
+	// marks the end of the complete run. Keep totals alive across those attempts.
+	let agentRunActive = false;
 
 	// Sticky display state keeps the last meaningful Output TPS visible
 	// through tool phases and completed turns.
@@ -463,6 +512,7 @@ export default function tokenPulseExtension(pi: ExtensionAPI) {
 			const estimatedOutput = outTokensCached(state);
 			if (estimatedOutput > 0) {
 				outputTokens += estimatedOutput;
+				state.lastOutputTokens = estimatedOutput;
 			}
 			currentRequestOutputPending = false;
 		}
@@ -654,6 +704,7 @@ export default function tokenPulseExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", (_event, ctx) => {
 		pendingTurnIndex = null;
+		agentRunActive = false;
 		resetState(state, null);
 		state.wallStartedAt = null;
 		state.wallEndedAt = null;
@@ -665,14 +716,21 @@ export default function tokenPulseExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_start", (_event, ctx) => {
-		if (state.wallStartedAt == null || state.wallEndedAt != null) {
-			state.wallStartedAt = nowMs();
-			state.wallEndedAt = null;
+		const isNewAgentRun = !agentRunActive;
+		agentRunActive = true;
+
+		// Automatic retries create another agent_start, but they are still part of
+		// the same user-visible run and must not erase its accumulated usage.
+		if (isNewAgentRun) {
+			if (state.wallStartedAt == null || state.wallEndedAt != null) {
+				state.wallStartedAt = nowMs();
+				state.wallEndedAt = null;
+			}
+			resetStickyMetrics(true);
+			resetRequestAverages();
+			resetUsageTotals();
+			clearUI(ctx);
 		}
-		resetStickyMetrics(true);
-		resetRequestAverages();
-		resetUsageTotals();
-		clearUI(ctx);
 		requestRender(ctx);
 	});
 
@@ -790,35 +848,37 @@ export default function tokenPulseExtension(pi: ExtensionAPI) {
 		ensureTurnMeasurement();
 		finishModelGeneration();
 
-		const input = event?.message?.usage?.input;
-		const output = event?.message?.usage?.output;
-		const cacheRead = event?.message?.usage?.cacheRead;
-		const cost = event?.message?.usage?.cost?.total;
-		if (typeof input === "number" && Number.isFinite(input) && input > 0) {
+		const failed = isFailedAssistantMessage(event?.message);
+		const input = nonNegativeFiniteNumber(event?.message?.usage?.input);
+		const providerOutput = nonNegativeFiniteNumber(event?.message?.usage?.output);
+		const cacheRead = nonNegativeFiniteNumber(event?.message?.usage?.cacheRead);
+		const cost = nonNegativeFiniteNumber(event?.message?.usage?.cost?.total);
+		if (input != null && input > 0) {
 			inputTokens += input;
 		}
-		if (typeof output === "number" && output >= 0) {
-			state.lastOutputTokens = output;
-			outputTokens += output;
+		const streamedOutput = currentRequestOutputPending ? outTokensCached(state) : 0;
+		const messageOutput = estimateAssistantMessageTokens(event?.message);
+		const estimatedOutput = Math.max(streamedOutput, messageOutput);
+		const finalizedOutput = resolveFinalOutputTokens(failed, providerOutput, estimatedOutput);
+		if (finalizedOutput != null) {
+			state.lastOutputTokens = finalizedOutput;
+			outputTokens += finalizedOutput;
 			lastDeltaTokens = 0;
 			lastDeltaTimeMs = 0;
 			cachedVisibleLen = -1;
 			cachedThinkingLen = -1;
 			cachedToolCallLen = -1;
-		} else if (currentRequestOutputPending) {
-			const estimatedOutput = outTokensCached(state);
-			if (estimatedOutput > 0) {
-				outputTokens += estimatedOutput;
-			}
 		}
-		if (typeof cacheRead === "number" && Number.isFinite(cacheRead) && cacheRead > 0) {
+		if (cacheRead != null && cacheRead > 0) {
 			cacheReadTotal += cacheRead;
 		}
-		if (typeof cost === "number" && Number.isFinite(cost) && cost > 0) {
+		if (cost != null && cost > 0) {
 			runCostTotal += cost;
 		}
 		currentRequestOutputPending = false;
-		recordCompletedModelTurnAverages();
+		if (!failed) {
+			recordCompletedModelTurnAverages();
+		}
 
 		requestRender(ctx);
 	});
@@ -835,18 +895,33 @@ export default function tokenPulseExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_end", (_event, ctx) => {
+		// agent_end closes one attempt. A retry may immediately emit another
+		// agent_start, so do not close the wall-clock run or show its summary here.
+		commitPendingEstimatedUsage();
+		finishModelGeneration();
+		endToolExecution();
+		finishTurn();
+		state.streaming = false;
+		state.inToolPhase = false;
+		stopTimer();
+		requestRender(ctx);
+	});
+
+	pi.on("agent_settled", (_event, ctx) => {
+		if (!agentRunActive) return;
+
 		commitPendingEstimatedUsage();
 		state.wallEndedAt = nowMs();
 		finishModelGeneration();
 		endToolExecution();
 		finishTurn();
 		state.streaming = false;
+		state.inToolPhase = false;
 		stopTimer();
 
-		// ponytail: persist run metrics as session entry (invisible to LLM)
+		// ponytail: show the complete run summary after retries/continuations settle
 		const totalMs = state.wallStartedAt != null ? state.wallEndedAt - state.wallStartedAt : 0;
 		const averages = getRequestAverages();
-		// ponytail: show run summary as persistent notification
 		const timePart = `⏱ ${formatDuration(totalMs)}`;
 		const statParts: string[] = [];
 		if (inputTokens > 0) statParts.push(`↑${formatTokenCount(inputTokens)}`);
@@ -859,13 +934,15 @@ export default function tokenPulseExtension(pi: ExtensionAPI) {
 		let message = timePart;
 		if (statParts.length > 0) message += ` | ${statParts.join(" ")}`;
 		if (avgParts.length > 0) message += ` | ${avgParts.join(" · ")}`;
-		if (ctx.hasUI) ctx.ui.notify(message, "info");
 
+		agentRunActive = false;
+		if (ctx.hasUI) ctx.ui.notify(message, "info");
 		requestRender(ctx);
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
 		pendingTurnIndex = null;
+		agentRunActive = false;
 		stopTimer();
 		commitPendingEstimatedUsage();
 		resetState(state, null);
