@@ -26,7 +26,8 @@ cp ask_user.ts ~/.pi/agent/extensions/
 
 - **Multi-question tabs** — group up to 5 questions in one call with Tab/←→ navigation
 - **Submit tab** — review all answers before submitting
-- **Custom answers** — `Type something.` for free-text input on any choice question (`allowCustom: true`, default on)
+- **Custom answers** — `Type something.` for free-text input on any choice question (`allowCustom: true`, default on); multi-select custom values can be added repeatedly and removed with Space
+- **Optional/default answers** — set `required: false` to show Skip, or `defaultValue` to preselect an existing choice
 - **Answer prefill** — revisiting a question shows the previous answer
 - **Compact rendering** — no markdown engine, no overlay, just inline TUI
 
@@ -35,15 +36,16 @@ cp ask_user.ts ~/.pi/agent/extensions/
 - 1–5 questions per call
 - 2–5 options per choice question when fixed options are provided
 - Label length limits enforced in schema and runtime validation
-- Reserved labels (`Other`, `Type something.`, `Chat about this`, `Next →`) rejected
+- Reserved labels (`Other`, `Type something.`, `Skip`, `Next →`) rejected
 
 ## Usage notes
 
 - `ask_user` is for collecting user input needed to continue the main task.
 - It is not meant for quizzes or long-form teaching flows.
 - For `text` questions, omit `options` entirely; a compatibility shim drops accidental empty `options: []` and any `options` attached to `kind: "text"` before schema validation.
-- For `multi` questions, `Type something.` stores a single typed custom value that can be reopened and edited.
-- Revisiting a question shows the previous answer and prefills the editor when reopening typed input.
+- `required` defaults to `true`; optional questions can be skipped. `defaultValue` must equal an existing option value and preselects it for `single` or `multi`.
+- For `multi` questions, `Type something.` adds a custom value; use Space on a typed value to remove it.
+- Revisiting a question shows the previous single/text answer and prefills the editor when reopening typed input.
 - The model is instructed to batch related questions into one call and avoid back-to-back `ask_user` invocations.
 
 ## Example
@@ -63,12 +65,14 @@ cp ask_user.ts ~/.pi/agent/extensions/
         { value: "server", label: "部署到自己的服务器" },
       ],
       allowCustom: true,
+      defaultValue: "platform",
     },
     {
       id: "notes",
       label: "补充",
       prompt: "还有什么需要提前说明的？",
       kind: "text",
+      required: false,
     },
   ],
 }

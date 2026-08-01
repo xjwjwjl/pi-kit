@@ -16,14 +16,28 @@ const MIN_CHOICE_OPTIONS = 2;
 const MAX_CHOICE_OPTIONS = 5;
 const MAX_QUESTION_LABEL_LENGTH = 24;
 const MAX_OPTION_LABEL_LENGTH = 120;
-const RESERVED_OPTION_LABELS = ["Other", "Type something.", "Chat about this", "Next →"] as const;
+const RESERVED_OPTION_LABELS = ["Other", "Type something.", "Skip", "Next →"] as const;
 type QuestionKind = (typeof QUESTION_KINDS)[number];
 type AnswerStatus = "answered";
+
+const ANSI_RESET = "\x1b[0m";
+
+function truncatePlainText(text: string, width: number, ellipsis = "…"): string {
+	return truncateToWidth(text.replace(/[\x00-\x1f\x7f-\x9f]/g, ""), width, ellipsis).replaceAll(ANSI_RESET, "");
+}
+
+function truncateStyledText(text: string, width: number, ellipsis = "..."): string {
+	if (width <= visibleWidth(ellipsis)) return truncateToWidth(text, width, "");
+	const truncated = truncateToWidth(text, width, ellipsis);
+	const suffix = `${ANSI_RESET}${ellipsis}${ANSI_RESET}`;
+	return truncated.endsWith(suffix) ? `${truncated.slice(0, -suffix.length)}${ellipsis}${ANSI_RESET}` : truncated;
+}
 
 type ActionOption =
 	| (AskUserOption & { type: "option"; index: number })
 	| { type: "custom"; value: "__custom__"; label: string; index: number }
-	| { type: "chat"; value: "__chat__"; label: string; index: number };
+	| { type: "customValue"; value: string; label: string; index: number }
+	| { type: "skip"; value: "__skip__"; label: string; index: number };
 
 interface AskUserOption {
 	value: string;
@@ -40,6 +54,8 @@ interface NormalizedQuestion {
 	description?: string;
 	options: AskUserOption[];
 	allowCustom: boolean;
+	required: boolean;
+	defaultValue?: string;
 }
 
 interface AskUserAnswer {
@@ -51,6 +67,7 @@ interface AskUserAnswer {
 	values?: string[];
 	labels?: string[];
 	wasCustom?: boolean;
+	wasDefault?: boolean;
 	customValues?: string[];
 	index?: number;
 }
@@ -61,8 +78,8 @@ interface AskUserResult {
 	questions: NormalizedQuestion[];
 	answers: AskUserAnswer[];
 	cancelled: boolean;
+	skippedIds?: string[];
 	error?: string;
-	chatRedirect?: boolean;
 }
 
 // Schema
@@ -99,6 +116,8 @@ const AskUserQuestionSchema = Type.Object({
 		}),
 	),
 	allowCustom: Type.Optional(Type.Boolean({ description: "Allow a custom free-text answer for choice questions (default: true)" })),
+	required: Type.Optional(Type.Boolean({ description: "Whether an answer is required (default: true)" })),
+	defaultValue: Type.Optional(Type.String({ description: "Option value selected by default for single or multi questions" })),
 });
 
 const AskUserParams = Type.Object({
@@ -144,6 +163,8 @@ function normalizeQuestions(params: AskUserParamsType): NormalizedQuestion[] {
 			description: q.description,
 			options: q.options || [],
 			allowCustom: kind === "text" ? true : q.allowCustom !== false,
+			required: q.required !== false,
+			defaultValue: q.defaultValue,
 		};
 	});
 }
@@ -166,6 +187,7 @@ function validateQuestions(questions: NormalizedQuestion[]): string | undefined 
 
 		if (q.kind === "text") {
 			if (q.options.length > 0) return `Question '${q.id}' is text but also provides options`;
+			if (q.defaultValue !== undefined) return `Question '${q.id}' is text but provides defaultValue`;
 			continue;
 		}
 
@@ -195,6 +217,9 @@ function validateQuestions(questions: NormalizedQuestion[]): string | undefined 
 			optionValues.add(opt.value);
 			optionLabels.add(opt.label);
 		}
+		if (q.defaultValue !== undefined && !optionValues.has(q.defaultValue)) {
+			return `Question '${q.id}' defaultValue must match an option value`;
+		}
 	}
 	return undefined;
 }
@@ -209,23 +234,22 @@ function answerDisplay(answer: AskUserAnswer): string {
 
 function formatAnswerForModel(answer: AskUserAnswer): string {
 	if (answer.kind === "multi") {
-		const labels = answer.labels || [];
-		if (labels.length === 0) return "(none)";
-		return `[${labels.map((l) => `"${l}"`).join(", ")}]`;
+		const values = answer.values || [];
+		if (values.length === 0) return "(none)";
+		return JSON.stringify({ values, labels: answer.labels || [], typed: answer.wasCustom || undefined, default: answer.wasDefault || undefined });
 	}
-	const value = answer.label || answer.value || "(empty)";
-	return answer.wasCustom ? `"${value}" (typed)` : `"${value}"`;
+	const value = answer.value || answer.label || "(empty)";
+	return JSON.stringify({ value, label: answer.label || value, typed: answer.wasCustom || undefined, default: answer.wasDefault || undefined });
 }
 
 function summarizeResult(result: AskUserResult): string {
 	if (result.cancelled) return result.error ? `Question flow failed: ${result.error}` : "User cancelled the questions";
-	if (result.chatRedirect) return "User chose to chat about this instead of answering the questions. Continue the conversation.";
 	const segments: string[] = [];
 	for (const answer of result.answers) {
 		const q = result.questions.find((question) => question.id === answer.id);
-		const name = q?.label || answer.id;
-		segments.push(`"${name}"=${formatAnswerForModel(answer)}`);
+		segments.push(`${answer.id}=${formatAnswerForModel(answer)} (label: ${JSON.stringify(q?.label || answer.id)})`);
 	}
+	if (result.skippedIds?.length) segments.push(`skipped=${JSON.stringify(result.skippedIds)}`);
 	if (segments.length === 0) return "User did not answer any questions.";
 	return `User answers: ${segments.join(". ")}. You can continue with the user's answers in mind.`;
 }
@@ -264,21 +288,22 @@ export default function askUser(pi: ExtensionAPI) {
 		name: "ask_user",
 		label: "Ask User",
 		description:
-			"Ask the user concise follow-up questions only when user input is necessary to continue. Supports free text, single choice, multiple choice, and custom answers.",
+			"Ask the user concise follow-up questions in interactive TUI mode when user input is necessary to continue. Supports free text, single choice, multiple choice, and custom answers.",
 		promptSnippet:
-			`Use ask_user when the user's request is underspecified and you need a small number of focused follow-up questions to continue. Prefer 1-${MAX_QUESTIONS} questions with stable ids, concise labels, and clear options. Do not ask questions whose answers can be inferred or discovered with available tools.`,
+			`Use ask_user only in interactive TUI when a user decision, preference, or approval is required and cannot be inferred from context or discovered with tools. Batch related questions (up to ${MAX_QUESTIONS}). Do not use it for status updates, quizzes, or information already available.`,
 		promptGuidelines: [
-			"Call ask_user only when user input is genuinely needed to continue with a good answer, design, or implementation.",
-			`Ask a small number of focused questions in one call. Prefer 1-${MAX_QUESTIONS} questions and avoid repeated back-to-back ask_user calls when one grouped questionnaire will do.`,
+			"Outside interactive TUI mode, do not call ask_user; state the limitation or proceed with a safe explicit assumption.",
 			"Use kind='text' for open-ended answers only when structured options would be premature or too constraining. Omit options entirely for text questions; never send options: [] for text input.",
 			`Use kind='single' when exactly one option should be chosen. When providing options, write ${MIN_CHOICE_OPTIONS}-${MAX_CHOICE_OPTIONS} concise, mutually exclusive choices with stable values and short labels (max ${MAX_OPTION_LABEL_LENGTH} characters). Use options[].preview to attach code snippets, config samples, or ASCII diagrams when visual comparison helps the user decide.`,
-			`Use kind='multi' only when multiple options may all be valid at the same time. When providing options, write ${MIN_CHOICE_OPTIONS}-${MAX_CHOICE_OPTIONS} concise, non-overlapping choices with stable values and short labels (max ${MAX_OPTION_LABEL_LENGTH} characters). Do not use multi-select for mutually exclusive choices.`, 
-			"Do not author reserved labels such as 'Other' or 'Type something.' yourself; the UI adds the custom-answer affordance automatically when allowed.",
+			`Use kind='multi' only when multiple options may all be valid at the same time. When providing options, write ${MIN_CHOICE_OPTIONS}-${MAX_CHOICE_OPTIONS} concise, non-overlapping choices with stable values and short labels (max ${MAX_OPTION_LABEL_LENGTH} characters). Do not use multi-select for mutually exclusive choices.`,
+			"Use required: false only when a question can safely be skipped. Set defaultValue only for a reusable preference the user has already stated; it must equal an existing single or multi option value and must not bypass a new decision.",
+			"Do not author reserved labels such as 'Other', 'Type something.', or 'Skip' yourself; the UI adds these affordances automatically when appropriate.",
 		],
 		prepareArguments(args: unknown) {
 			return prepareAskUserArguments(args);
 		},
 		parameters: AskUserParams,
+		executionMode: "sequential",
 
 		async execute(_toolCallId: string, params: AskUserParamsType, _signal: AbortSignal, _onUpdate: unknown, ctx: Record<string, unknown>) {
 			const title = params.title || "Ask user";
@@ -306,9 +331,11 @@ export default function askUser(pi: ExtensionAPI) {
 				let inputQuestionId: string | null = null;
 				let inputPurpose: "text" | "custom" | null = null;
 				let cachedLines: string[] | undefined;
+				let cachedWidth: number | undefined;
 				let notice: string | undefined;
 
 				const answers = new Map<string, AskUserAnswer>();
+				const skippedIds = new Set<string>();
 				const multiSelections = new Map<string, Set<string>>();
 				const multiCustomValues = new Map<string, string[]>();
 
@@ -326,11 +353,12 @@ export default function askUser(pi: ExtensionAPI) {
 
 				function refresh() {
 					cachedLines = undefined;
+					cachedWidth = undefined;
 					tui.requestRender();
 				}
 
-				function submit(cancelled: boolean, chatRedirect = false) {
-					done({ title, description, questions, answers: Array.from(answers.values()), cancelled, chatRedirect });
+				function submit(cancelled: boolean) {
+					done({ title, description, questions, answers: Array.from(answers.values()), cancelled, skippedIds: Array.from(skippedIds) });
 				}
 
 				function currentQuestion(): NormalizedQuestion | undefined {
@@ -344,13 +372,16 @@ export default function askUser(pi: ExtensionAPI) {
 				function currentOptions(): ActionOption[] {
 					const q = currentQuestion();
 					if (!q) return [];
-					if (q.kind === "text") return [
-						{ type: "custom", value: "__custom__", label: "Type something.", index: 1 },
-						{ type: "chat", value: "__chat__", label: "Chat about this", index: 2 },
-					];
-					const opts: ActionOption[] = q.options.map((opt, i) => ({ ...opt, type: "option", index: i + 1 }));
-					if (q.allowCustom) opts.push({ type: "custom", value: "__custom__", label: "Type something.", index: opts.length + 1 });
-					opts.push({ type: "chat", value: "__chat__", label: "Chat about this", index: opts.length + 1 });
+					const opts: ActionOption[] = q.kind === "text"
+						? [{ type: "custom", value: "__custom__", label: "Type something.", index: 1 }]
+						: q.options.map((opt, i) => ({ ...opt, type: "option", index: i + 1 }));
+					if (q.kind !== "text" && q.allowCustom) opts.push({ type: "custom", value: "__custom__", label: "Type something.", index: opts.length + 1 });
+					if (q.kind === "multi") {
+						for (const value of multiCustomValues.get(q.id) || []) {
+							opts.push({ type: "customValue", value, label: value, index: opts.length + 1 });
+						}
+					}
+					if (!q.required) opts.push({ type: "skip", value: "__skip__", label: "Skip", index: opts.length + 1 });
 					return opts;
 				}
 
@@ -373,12 +404,11 @@ export default function askUser(pi: ExtensionAPI) {
 					if (!answer) return "";
 					if (purpose === "text") return answer.value || answer.label || "";
 					if (q.kind === "single" && answer.wasCustom) return answer.value || answer.label || "";
-					if (q.kind === "multi") return (answer.customValues && answer.customValues[0]) || (multiCustomValues.get(q.id) || [])[0] || "";
 					return "";
 				}
 
 				function allResolved(): boolean {
-					return questions.every((q) => answers.has(q.id));
+					return questions.every((q) => !q.required || answers.has(q.id));
 				}
 
 				function ensureMultiSelection(questionId: string): Set<string> {
@@ -406,6 +436,7 @@ export default function askUser(pi: ExtensionAPI) {
 				}
 
 				function saveTextAnswer(q: NormalizedQuestion, value: string) {
+					skippedIds.delete(q.id);
 					multiSelections.delete(q.id);
 					multiCustomValues.delete(q.id);
 					answers.set(q.id, { id: q.id, kind: q.kind, status: "answered", value, label: value, wasCustom: true });
@@ -413,6 +444,7 @@ export default function askUser(pi: ExtensionAPI) {
 
 				function saveSingleAnswer(q: NormalizedQuestion, opt: ActionOption) {
 					if (opt.type !== "option") return;
+					skippedIds.delete(q.id);
 					multiSelections.delete(q.id);
 					multiCustomValues.delete(q.id);
 					answers.set(q.id, {
@@ -427,6 +459,7 @@ export default function askUser(pi: ExtensionAPI) {
 				}
 
 				function saveCustomSingleAnswer(q: NormalizedQuestion, value: string) {
+					skippedIds.delete(q.id);
 					multiSelections.delete(q.id);
 					multiCustomValues.delete(q.id);
 					answers.set(q.id, {
@@ -448,6 +481,7 @@ export default function askUser(pi: ExtensionAPI) {
 						return false;
 					}
 
+					skippedIds.delete(q.id);
 					const selectedOptions = q.options.filter((opt) => selected.has(opt.value));
 					answers.set(q.id, {
 						id: q.id,
@@ -462,8 +496,36 @@ export default function askUser(pi: ExtensionAPI) {
 				}
 
 				function setCustomMultiValue(q: NormalizedQuestion, value: string) {
-					multiCustomValues.set(q.id, [value]);
+					const values = multiCustomValues.get(q.id) || [];
+					if (!values.includes(value)) multiCustomValues.set(q.id, [...values, value]);
 					syncMultiAnswer(q);
+				}
+
+				function removeCustomMultiValue(q: NormalizedQuestion, value: string) {
+					multiCustomValues.set(q.id, (multiCustomValues.get(q.id) || []).filter((item) => item !== value));
+					syncMultiAnswer(q);
+				}
+
+				function skipQuestion(q: NormalizedQuestion) {
+					skippedIds.add(q.id);
+					answers.delete(q.id);
+					multiSelections.delete(q.id);
+					multiCustomValues.delete(q.id);
+				}
+
+				for (const q of questions) {
+					if (q.defaultValue === undefined) continue;
+					const index = q.options.findIndex((option) => option.value === q.defaultValue);
+					const option = q.options[index];
+					if (index < 0 || !option) continue;
+					if (q.kind === "multi") {
+						ensureMultiSelection(q.id).add(option.value);
+						syncMultiAnswer(q);
+					} else {
+						saveSingleAnswer(q, { ...option, type: "option", index: index + 1 });
+					}
+					const answer = answers.get(q.id);
+					if (answer) answer.wasDefault = true;
 				}
 
 				function saveMultiAnswer(q: NormalizedQuestion): boolean {
@@ -509,7 +571,6 @@ export default function askUser(pi: ExtensionAPI) {
 					} else if (q.kind === "multi") {
 						setCustomMultiValue(q, trimmed);
 						cancelInput();
-						advanceAfterAnswer();
 						return;
 					} else {
 						saveCustomSingleAnswer(q, trimmed);
@@ -565,7 +626,11 @@ export default function askUser(pi: ExtensionAPI) {
 
 					if (q.kind === "text") {
 						if (matchesKey(data, Key.enter)) {
-							if (optionIndex > 0) { submit(false, true); return; }
+							if (currentOptions()[optionIndex]?.type === "skip") {
+								skipQuestion(q);
+								advanceAfterAnswer();
+								return;
+							}
 							startInput(q, "text");
 							return;
 						}
@@ -584,13 +649,13 @@ export default function askUser(pi: ExtensionAPI) {
 					const opts = currentOptions();
 					optionIndex = clampOptionIndex(optionIndex, opts.length);
 
-					if (matchesKey(data, Key.up)) {
+					if (matchesKey(data, Key.up) || (q.kind !== "text" && data === "k")) {
 						optionIndex = Math.max(0, optionIndex - 1);
 						notice = undefined;
 						refresh();
 						return;
 					}
-					if (matchesKey(data, Key.down)) {
+					if (matchesKey(data, Key.down) || (q.kind !== "text" && data === "j")) {
 						optionIndex = Math.min(opts.length - 1, optionIndex + 1);
 						notice = undefined;
 						refresh();
@@ -604,17 +669,21 @@ export default function askUser(pi: ExtensionAPI) {
 							if (selection.has(selected.value)) selection.delete(selected.value);
 							else selection.add(selected.value);
 							syncMultiAnswer(q);
-							notice = undefined;
-							refresh();
+						} else if (selected?.type === "customValue") {
+							removeCustomMultiValue(q, selected.value);
 						}
+						notice = undefined;
+						refresh();
 						return;
 					}
 
 					if (matchesKey(data, Key.enter)) {
 						if (!selected) return;
 
-						if (selected.type === "chat") {
-							submit(false, true);
+
+						if (selected.type === "skip") {
+							skipQuestion(q);
+							advanceAfterAnswer();
 							return;
 						}
 
@@ -640,7 +709,7 @@ export default function askUser(pi: ExtensionAPI) {
 				}
 
 				function render(width: number): string[] {
-					if (cachedLines) return cachedLines;
+					if (cachedLines && cachedWidth === width) return cachedLines;
 
 					const lines: string[] = [];
 					const q = currentQuestion();
@@ -652,53 +721,71 @@ export default function askUser(pi: ExtensionAPI) {
 						// refreshes appear as duplicated/jittery blocks in the terminal.
 						const physicalLines = s.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
 						for (const line of physicalLines) {
-							lines.push(truncateToWidth(line, width));
+							lines.push(truncateStyledText(line, width));
 						}
 					};
+					const addWrapped = (prefix: string, text: string) => {
+						const prefixWidth = visibleWidth(prefix);
+						const chunks = wrapTextWithAnsi(text, Math.max(1, width - prefixWidth));
+						for (let i = 0; i < chunks.length; i++) {
+							add(`${i === 0 ? prefix : " ".repeat(prefixWidth)}${chunks[i]}`);
+						}
+					};
+
+					function questionStatus(question: NormalizedQuestion) {
+						const answer = answers.get(question.id);
+						const isAnswered = !!answer;
+						const isSkipped = skippedIds.has(question.id);
+						return {
+							box: isSkipped ? "–" : answer?.wasDefault ? "◇" : isAnswered ? "■" : !question.required ? "○" : "□",
+							color: isSkipped || !question.required ? "dim" : answer?.wasDefault ? "accent" : isAnswered ? "success" : "muted",
+						};
+					}
 
 					add(theme.fg("accent", "─".repeat(width)));
 
 					if (isMulti) {
-						const tabs: string[] = ["← "];
-						const tabLabelWidth = 10;
-						for (let i = 0; i < questions.length; i++) {
-							const tabQuestion = questions[i];
-							const isActive = i === currentTab;
-							const isAnswered = answers.has(tabQuestion.id);
-							const box = isAnswered ? "■" : "□";
-							const color = isAnswered ? "success" : "muted";
-							const label = truncateToWidth(tabQuestion.label, tabLabelWidth, "…");
-							const text = ` ${box} ${label} `;
-							const styled = isActive ? theme.bg("selectedBg", theme.fg("text", text)) : theme.fg(color, text);
-							tabs.push(`${styled} `);
+						const tabLabels = questions.map((question) => truncatePlainText(question.label, width));
+						const tabWidth = 15 + questions.length * 5 + tabLabels.reduce((total, label) => total + visibleWidth(label), 0); // navigation, Submit, boxes, and padding
+						if (tabWidth > width) {
+							const label = currentTab === questions.length ? "Submit" : currentQuestion()?.label || "";
+							const progress = currentTab === questions.length ? "Submit" : `${currentTab + 1}/${questions.length}`;
+							add(theme.fg("muted", ` ${progress} ${truncatePlainText(label, Math.max(1, width - visibleWidth(progress) - 2))}`));
+						} else {
+							const tabs: string[] = ["← "];
+							for (let i = 0; i < questions.length; i++) {
+								const tabQuestion = questions[i];
+								const status = questionStatus(tabQuestion);
+								const text = ` ${status.box} ${tabLabels[i]} `;
+								const styled = i === currentTab ? theme.bg("selectedBg", theme.fg("text", text)) : theme.fg(status.color, text);
+								tabs.push(`${styled} `);
+							}
+							const canSubmit = allResolved();
+							const submitText = " ✓ Submit ";
+							const submitStyled = currentTab === questions.length
+								? theme.bg("selectedBg", theme.fg("text", submitText))
+								: theme.fg(canSubmit ? "success" : "dim", submitText);
+							tabs.push(`${submitStyled} →`);
+							add(` ${tabs.join("")}`);
 						}
-						const canSubmit = allResolved();
-						const isSubmitTab = currentTab === questions.length;
-						const submitText = " ✓ Submit ";
-						const submitStyled = isSubmitTab
-							? theme.bg("selectedBg", theme.fg("text", submitText))
-							: theme.fg(canSubmit ? "success" : "dim", submitText);
-						tabs.push(`${submitStyled} →`);
-						add(` ${tabs.join("")}`);
 						lines.push("");
 					}
 
 					function renderPrompt(question: NormalizedQuestion) {
-						add(theme.fg("text", ` ${question.prompt}`));
-						if (question.description) add(theme.fg("muted", ` ${question.description}`));
+						addWrapped(" ", theme.fg("text", `${question.prompt}${question.required ? "" : " (optional)"}`));
+						if (question.description) addWrapped(" ", theme.fg("muted", question.description));
 					}
 
-					function renderAnswerPreview(value: string) {
+					function renderTypedAnswer(value: string) {
 						const previewLines = value.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
 						for (let i = 0; i < previewLines.length; i++) {
-							const marker = i === 0 ? theme.fg("dim", "· ") : "  ";
-							add(`     ${marker}${theme.fg("muted", previewLines[i])}`);
+							addWrapped("     ", theme.fg("muted", `${i === 0 ? "↳ " : "  "}${previewLines[i]}`));
 						}
 					}
 
 					function renderWrappedAnswer(label: string, answer: AskUserAnswer) {
-						const custom = answer.wasCustom ? theme.fg("muted", "(typed) ") : "";
-						const prefix = `${theme.fg("muted", ` ${label}: `)}${custom}`;
+						const source = answer.wasDefault ? theme.fg("muted", "(default) ") : answer.wasCustom ? theme.fg("muted", "(typed) ") : "";
+						const prefix = `${theme.fg("muted", ` ${label}: `)}${source}`;
 						const availableWidth = Math.max(10, width - 1 - visibleWidth(prefix));
 						const rawLines = answerDisplay(answer).replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
 						let isFirst = true;
@@ -722,15 +809,20 @@ export default function askUser(pi: ExtensionAPI) {
 							const opt = opts[i];
 							const selected = i === optionIndex;
 							const isOther = opt.type === "custom";
+							const isSkipped = opt.type === "skip" && skippedIds.has(question.id);
 							const isChosenOption = question.kind === "single" && opt.type === "option" && existing?.value === opt.value && !existing?.wasCustom;
 							const isChosenCustom = isOther && !!existing?.wasCustom && (question.kind === "text" || question.kind === "single");
 							const prefix = selected ? theme.fg("accent", "> ") : "  ";
-							const color = selected ? "accent" : isChosenOption || isChosenCustom ? "success" : "text";
-							const chosenSuffix = isChosenOption || isChosenCustom ? theme.fg("success", " ✓") : "";
+							const color = selected ? "accent" : isSkipped ? "dim" : isChosenOption || isChosenCustom ? "success" : "text";
+							const chosenSuffix = isSkipped ? theme.fg("dim", " (skipped)") : isChosenOption || isChosenCustom ? theme.fg("success", existing?.wasDefault ? " ✓ (default)" : " ✓") : "";
 
 							if (question.kind === "multi" && opt.type === "option") {
-								const checked = ensureMultiSelection(question.id).has(opt.value) ? theme.fg("success", "[x]") : theme.fg("dim", "[ ]");
-								add(prefix + `${checked} ` + theme.fg(color, opt.label));
+								const isChecked = ensureMultiSelection(question.id).has(opt.value);
+								const checked = isChecked ? theme.fg("success", "[x]") : theme.fg("dim", "[ ]");
+								const defaultMark = isChecked && existing?.wasDefault ? theme.fg("muted", " (default)") : "";
+								add(prefix + `${checked} ` + theme.fg(color, opt.label) + defaultMark);
+							} else if (question.kind === "multi" && opt.type === "customValue") {
+								add(prefix + `${theme.fg("success", "[x]")} ` + theme.fg(color, `(typed) ${opt.label}`));
 							} else if (question.kind === "text" && isOther && inputMode) {
 								add(prefix + theme.fg("accent", `${opt.label} ✎`));
 							} else if (question.kind === "text" && isOther) {
@@ -741,58 +833,50 @@ export default function askUser(pi: ExtensionAPI) {
 								add(prefix + theme.fg(color, `${opt.index}. ${opt.label}`) + chosenSuffix);
 							}
 
+							if (isOther && existing?.wasCustom && !inputMode) {
+								renderTypedAnswer(answerDisplay(existing));
+							}
 							if ("description" in opt && opt.description) {
-								add(`     ${theme.fg("muted", opt.description)}`);
+								addWrapped("     ", theme.fg("muted", opt.description));
 							}
-						}
-
-						if (question.kind === "multi") {
-							const customValues = multiCustomValues.get(question.id) || [];
-							if (customValues.length) {
-								renderAnswerPreview(customValues.join(", "));
-							}
-						} else if (question.kind === "text" && existing) {
-							renderAnswerPreview(answerDisplay(existing));
-						} else if (question.kind === "single" && existing?.wasCustom) {
-							renderAnswerPreview(answerDisplay(existing));
 						}
 					}
 
 					function renderPreviewBlock() {
 						const q = currentQuestion();
 						if (!q || q.kind !== "single") return;
-						const opts = currentOptions();
-						const focused = opts[optionIndex];
-						if (!focused || focused.type !== "option") return;
-						const { preview } = focused as { preview?: string };
-						if (!preview) return;
+						const focused = currentOptions()[optionIndex];
+						if (!focused || focused.type !== "option" || !focused.preview) return;
 
 						const maxLines = 15;
-						const innerWidth = Math.max(20, width - 6);
-						const rawLines = preview.replace(/\r/g, "").split("\n");
-
+						const innerWidth = Math.max(1, width - 4);
+						const rendered: Array<{ text: string; code: boolean }> = [];
 						let inCode = false;
-						const rendered: string[] = [];
-						for (const raw of rawLines.slice(0, maxLines)) {
+						for (const raw of focused.preview.replace(/\r/g, "").split("\n")) {
 							if (raw.trimStart().startsWith("```")) {
 								inCode = !inCode;
 								continue;
 							}
-							const line = truncateToWidth(inCode ? `  ${raw}` : raw, innerWidth);
-							rendered.push(inCode ? theme.fg("dim", ` │ ${line}`) : theme.fg("muted", ` ${line}`));
-						}
-						if (rawLines.length > maxLines) {
-							rendered.push(theme.fg("dim", ` … (${rawLines.length - maxLines} more lines)`));
+							const wrapped = wrapTextWithAnsi(inCode ? `  ${raw}` : raw, innerWidth);
+							for (const text of wrapped.length ? wrapped : [""]) rendered.push({ text, code: inCode });
 						}
 						if (rendered.length === 0) return;
 
-						const border = "─".repeat(Math.max(1, width - 2));
+						function addPreviewLine(text: string) {
+							const line = truncateStyledText(text, innerWidth);
+							const padding = " ".repeat(Math.max(0, innerWidth - visibleWidth(line)));
+							add(theme.fg("accent", "│ ") + line + padding + theme.fg("accent", " │"));
+						}
+
+						const border = "─".repeat(Math.max(0, width - 2));
 						lines.push("");
 						add(theme.fg("accent", `┌${border}┐`));
-						add(theme.fg("muted", "│ Preview:" + " ".repeat(Math.max(0, width - 11)) + "│"));
-						for (const line of rendered) {
-							add(line);
+						addPreviewLine(theme.fg("muted", "Preview:"));
+						for (const { text, code } of rendered.slice(0, maxLines)) {
+							addPreviewLine(theme.fg(code ? "dim" : "muted", text));
 						}
+						const hidden = rendered.length - maxLines;
+						if (hidden > 0) addPreviewLine(theme.fg("dim", `… (${hidden} more lines)`));
 						add(theme.fg("accent", `└${border}┘`));
 					}
 
@@ -818,12 +902,14 @@ export default function askUser(pi: ExtensionAPI) {
 							const answer = answers.get(question.id);
 							if (answer) {
 								renderWrappedAnswer(question.label, answer);
+							} else if (skippedIds.has(question.id)) {
+								add(theme.fg("dim", ` ${question.label}: (skipped)`));
 							}
 						}
 						lines.push("");
 						if (!allResolved()) {
 							const missing = questions
-								.filter((question) => !answers.has(question.id))
+								.filter((question) => question.required && !answers.has(question.id))
 								.map((question) => question.label)
 								.join(", ");
 							add(theme.fg("warning", ` Missing: ${missing}`));
@@ -845,13 +931,14 @@ export default function askUser(pi: ExtensionAPI) {
 						let help: string;
 						if (currentTab === questions.length) help = " Enter submit • Esc cancel";
 						else if (q?.kind === "text") help = isMulti ? " Tab/←→ switch • Enter/type answer • Esc cancel" : " Enter/type answer • Esc cancel";
-						else if (q?.kind === "multi") help = isMulti ? " Tab/←→ switch • ↑↓ move • Space toggle • Enter submit • Esc cancel" : " ↑↓ move • Space toggle • Enter submit • Esc cancel";
-						else help = isMulti ? " Tab/←→ switch • ↑↓ move • Enter select • Esc cancel" : " ↑↓ move • Enter select • Esc cancel";
+						else if (q?.kind === "multi") help = isMulti ? " Tab/←→ switch • ↑↓/jk move • Space toggle/remove • Enter submit • Esc cancel" : " ↑↓/jk move • Space toggle/remove • Enter submit • Esc cancel";
+						else help = isMulti ? " Tab/←→ switch • ↑↓/jk move • Enter select • Esc cancel" : " ↑↓/jk move • Enter select • Esc cancel";
 						add(theme.fg("dim", help));
 					}
 					add(theme.fg("accent", "─".repeat(width)));
 
 					cachedLines = lines;
+					cachedWidth = width;
 					return lines;
 				}
 
@@ -859,6 +946,7 @@ export default function askUser(pi: ExtensionAPI) {
 					render,
 					invalidate: () => {
 						cachedLines = undefined;
+						cachedWidth = undefined;
 					},
 					handleInput,
 				};
@@ -878,21 +966,11 @@ export default function askUser(pi: ExtensionAPI) {
 		},
 
 		renderCall(args: Record<string, unknown>, theme: any) {
-			const qs = (args.questions as Array<{ id?: string; label?: string }> | undefined) || [];
-			const count = qs.length;
-			const labels = qs.map((q, i) => q.label || q.id || `Q${i + 1}`);
+			const count = (args.questions as unknown[] | undefined)?.length || 0;
 			const rawTitle = typeof args.title === "string" ? args.title : "Ask user";
 			const titleHasCount = count > 0 && new RegExp(`${count}\\s*(题|questions?)`, "i").test(rawTitle);
-			const genericLabels = labels.length > 0 && labels.every((label, i) => label === `Q${i + 1}`);
 			const title = !titleHasCount && count > 0 ? `${rawTitle}（${count}题）` : rawTitle;
-			let text = theme.fg("muted", title);
-			if (labels.length && !genericLabels) {
-				const previewCount = Math.min(5, labels.length);
-				const preview = labels.slice(0, previewCount).map((label) => truncateToWidth(label, 12, "…"));
-				const remaining = labels.length - previewCount;
-				text += theme.fg("dim", ` (${preview.join(", ")}${remaining > 0 ? `, +${remaining} more` : ""})`);
-			}
-			return new Text(text, 0, 0);
+			return new Text(theme.fg("muted", title), 0, 0);
 		},
 
 		renderResult(result: Record<string, unknown>, _options: unknown, theme: any) {
@@ -904,22 +982,22 @@ export default function askUser(pi: ExtensionAPI) {
 			if (details.cancelled) {
 				return new Text(theme.fg("warning", details.error ? `Error: ${details.error}` : "Cancelled"), 0, 0);
 			}
-			if (details.chatRedirect) {
-				return new Text(theme.fg("accent", "💬 Chat about this — continuing conversation"), 0, 0);
-			}
-
 			const lines: string[] = [];
 			for (const answer of details.answers) {
 				const question = details.questions.find((q) => q.id === answer.id);
 				const displayName = question?.label || answer.id;
-				const custom = answer.wasCustom ? theme.fg("muted", "(typed) ") : "";
-				const prefix = `${theme.fg("success", "✓ ")}${theme.fg("accent", displayName)}: ${custom}`;
+				const source = answer.wasDefault ? theme.fg("muted", "(default) ") : answer.wasCustom ? theme.fg("muted", "(typed) ") : "";
+				const prefix = `${theme.fg("success", "✓ ")}${theme.fg("accent", displayName)}: ${source}`;
 				const valueLines = answerDisplay(answer).replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
 				lines.push(prefix + theme.fg("text", valueLines[0] || ""));
 				const continuation = " ".repeat(Math.max(0, visibleWidth(prefix)));
 				for (const line of valueLines.slice(1)) {
 					lines.push(`${continuation}${theme.fg("text", line)}`);
 				}
+			}
+			for (const id of details.skippedIds || []) {
+				const question = details.questions.find((q) => q.id === id);
+				lines.push(`${theme.fg("dim", "– ")}${theme.fg("accent", question?.label || id)}${theme.fg("dim", ": (skipped)")}`);
 			}
 			return new Text(lines.join("\n"), 0, 0);
 		},
