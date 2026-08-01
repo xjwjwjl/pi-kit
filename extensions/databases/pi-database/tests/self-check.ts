@@ -14,6 +14,7 @@ import {
 import { clickhouseAdapter } from "../src/clickhouse.ts";
 import { mysqlAdapter } from "../src/mysql.ts";
 import { boundItems, boundRows, boundTableNames, resultLimits, truncateText } from "../src/results.ts";
+import databaseExtension, { __test__ } from "../index.ts";
 import { firstKeyword, hasMultipleStatements, hasTopLevelKeyword, normalizeSql } from "../src/sql.ts";
 
 function writeConfig(dir: string, value: unknown): string {
@@ -110,6 +111,35 @@ function testSourceSelection() {
   assert.equal(ambiguousConfig.sources[0]?.allowWrite, true);
   assert.equal(ambiguousConfig.sources[0]?.writeConfirm, false);
   assert.throws(() => selectSource(ambiguousConfig), /Multiple database sources/);
+}
+
+async function testDynamicRegistration() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-dynamic-"));
+  const handlers = new Map<string, Array<(event: any, ctx: any) => Promise<unknown> | unknown>>();
+  const tools: string[] = [];
+  const commands: string[] = [];
+  const statuses: Array<string | undefined> = [];
+  databaseExtension({
+    on(event: string, handler: (event: any, ctx: any) => Promise<unknown> | unknown) {
+      handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+    },
+    registerTool(tool: { name?: string }) {
+      if (tool.name) tools.push(tool.name);
+    },
+    registerCommand(name: string) {
+      commands.push(name);
+    }
+  } as never);
+  const ctx = { cwd: dir, ui: { setStatus(_name: string, value: string | undefined) { statuses.push(value); } } };
+  await handlers.get("session_start")![0]!({}, ctx);
+  assert.deepEqual(tools, []);
+  assert.deepEqual(commands, []);
+  assert.deepEqual(statuses, [undefined]);
+
+  writeConfig(dir, { version: 1, sources: [{ name: "app", dialect: "mysql", options: { host: "localhost", user: "app" } }] });
+  await handlers.get("before_agent_start")![0]!({ cwd: dir, systemPrompt: "base" }, ctx);
+  assert.equal(tools.length, 8);
+  assert.deepEqual(commands, ["database-init", "database-migrate"]);
 }
 
 function testDatabaseContextPrompt() {
@@ -530,6 +560,7 @@ testSqlScanner();
 testResultLimits();
 testInitializeConfig();
 testSourceSelection();
+await testDynamicRegistration();
 testDatabaseContextPrompt();
 await testToolPromptMetadata();
 testWriteBoundaries();

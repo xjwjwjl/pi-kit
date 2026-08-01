@@ -1255,15 +1255,26 @@ function registerTools(pi: ExtensionAPI): void {
 }
 
 export default function databaseExtension(pi: ExtensionAPI) {
-  registerCommands(pi);
-  registerTools(pi);
+  let registered = false;
+  const registerIfConfigured = (cwd: string): boolean => {
+    if (registered || !findProjectConfigPath(cwd)) return registered;
+    registerCommands(pi);
+    registerTools(pi);
+    registered = true;
+    return true;
+  };
 
   pi.on("before_agent_start", async (event, ctx) => {
+    if (!registerIfConfigured(event.cwd ?? getContextCwd(ctx))) return undefined;
     const prompt = buildDatabaseContextPrompt(event.cwd ?? getContextCwd(ctx));
     return prompt ? { systemPrompt: `${event.systemPrompt}\n\n${prompt}` } : undefined;
   });
 
   pi.on("session_start", async (_event, ctx) => {
+    if (!registerIfConfigured(getContextCwd(ctx))) {
+      ctx.ui.setStatus("pi-database", undefined);
+      return;
+    }
     try {
       const config = loadProjectConfig(getContextCwd(ctx));
       ctx.ui.setStatus("pi-database", `database: ${config.sources.length} source${config.sources.length === 1 ? "" : "s"}`);
@@ -1272,7 +1283,8 @@ export default function databaseExtension(pi: ExtensionAPI) {
     }
   });
 
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (_event, ctx) => {
+    ctx.ui.setStatus("pi-database", undefined);
     writeQueues.clear();
     await Promise.all([mysqlAdapter.close(), clickhouseAdapter.close()]);
   });
