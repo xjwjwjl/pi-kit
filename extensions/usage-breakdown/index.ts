@@ -161,9 +161,12 @@ function bold(text: string): string {
 
 function formatCount(n: number): string {
 	if (!Number.isFinite(n) || n === 0) return "0";
-	if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
-	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-	if (n >= 10_000) return `${(n / 1_000).toFixed(1)}K`;
+	if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}十亿`;
+	if (n >= 100_000_000) return `${(n / 100_000_000).toFixed(1)}亿`;
+	if (n >= 10_000_000) return `${(n / 10_000_000).toFixed(1)}千万`;
+	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}百万`;
+	if (n >= 100_000) return `${(n / 100_000).toFixed(1)}十万`;
+	if (n >= 10_000) return `${(n / 10_000).toFixed(1)}万`;
 	return n.toLocaleString("en-US");
 }
 
