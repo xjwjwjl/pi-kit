@@ -1,38 +1,48 @@
 # deepseek-websearch
 
-Register a local Pi tool named `deepseek_websearch` that always uses a fixed DeepSeek Web Search backend, regardless of the model currently driving Pi.
+A local Pi extension that provides DeepSeek-backed web research without changing Pi's active model.
 
-## What it does
+## Tools
 
-This extension does not change Pi's active model.
+### `deepseek_websearch`
 
-Instead, it adds one local tool:
+Searches the web through DeepSeek's Anthropic-compatible endpoint using fixed `deepseek-v4-flash` and server-side `web_search_20250305`.
 
-- `deepseek_websearch`
+- Retries once with a stricter prompt when no usable sources are returned.
+- Caps total server-side search steps at two.
+- Injects the current date and IANA time zone into relative-time requests such as “today”, “tomorrow”, and “latest”, preventing stale model-memory dates from steering the search.
+- Requires time-sensitive answers to prefer primary/official sources, report an as-of date/time when available, and label freshness as unverified when it cannot be established.
+- Fails closed when sources are still absent.
 
-When any Pi model calls that tool, the extension:
+### `deepseek_webfetch`
 
-1. sends the search request to DeepSeek's Anthropic-compatible endpoint
-2. uses the fixed DeepSeek model `deepseek-v4-flash`
-3. enables DeepSeek server-side `web_search_20250305`
-4. returns the final answer and source list back to the current Pi model as a tool result
+Mirrors Claude Code's client-side WebFetch flow:
 
-If DeepSeek answers without any web-search sources, the extension retries once with a stricter force-search prompt. If sources are still missing, the tool fails instead of returning an unsourced answer.
+```text
+URL + extraction prompt
+→ local HTTP GET and controlled redirects
+→ HTML → Markdown
+→ DeepSeek Flash applies the prompt to fetched content
+→ HTTP metadata + concise result
+```
 
-That means your main Pi model can be `gpt-5`, `gemini`, normal `deepseek`, or anything else, while web search is always handled by this extension's DeepSeek backend.
+Behavior:
+
+- Requires `url` and `prompt`.
+- Fetches only public HTTP/HTTPS URLs explicitly present in a user message or a prior `deepseek_websearch` / `deepseek_webfetch` result.
+- Upgrades HTTP to HTTPS; follows only same-host or `www` redirects (up to 10); returns a cross-host redirect for a deliberate second call.
+- Uses a 15-minute, 50MB LRU page cache; limits HTTP content to 10MB and requests to 60 seconds.
+- Converts HTML with Turndown, requests compact terminal-friendly Markdown (short headings and bullets, no tables by default), injects the current date and time zone for relative-time extraction prompts, and requires page publication/data/forecast dates to be checked before describing content as current; it truncates page content to 100,000 characters before Flash processing and caps returned tool output to Pi's standard 2,000 lines / 50KB.
+- In Pi TUI, expanded WebFetch results use Pi's native Markdown renderer; collapsed results show a compact plain-text preview.
+- Blocks credentialed, localhost, private-IP, and common intranet URLs. Authenticated pages are unsupported.
+- Persists binary content such as PDFs and images under the system temp directory, then reports the saved path in the tool result.
 
 ## Usage
 
-Quick test:
-
 ```powershell
-pi -e ./index.ts --provider ve-openai --model gpt-5.5 -p "Use deepseek_websearch to find the latest Rust stable release and answer with sources."
-```
+pi -e ./index.ts -p "Use deepseek_websearch to find the latest Rust stable release and answer with sources."
 
-Real network smoke test:
-
-```powershell
-npm run smoke -- "latest Rust stable release"
+pi -e ./index.ts -p "Read https://example.com/ with deepseek_webfetch and explain the page's purpose."
 ```
 
 Project-local install:
@@ -43,31 +53,24 @@ pi install D:\code\my-pi\extensions\websearch -l
 
 ## Configuration
 
-This extension does not expose a model setting anymore.
-
-It always uses:
-
-- search model: `deepseek-v4-flash`
-- finalizer model: `deepseek-v4-flash`
-
-Configure the DeepSeek Web Search API key in `~/.pi/agent/settings.json`:
+Both tools use fixed `deepseek-v4-flash` requests. Configure the DeepSeek key in Pi's global `settings.json` (default: `~/.pi/agent/settings.json`; `PI_CODING_AGENT_DIR` is respected):
 
 ```json
 {
   "deepseek-websearch": {
-    "apiKey": "sk-..."
+    "apiKey": "sk-...",
+    "timeZone": "Asia/Shanghai"
   }
 }
 ```
 
-Only `deepseek-websearch.apiKey` in `~/.pi/agent/settings.json` is used. The extension intentionally does not read Pi's `models.json` or `auth.json` DeepSeek provider credentials, so the web search backend stays independent from the active Pi model configuration.
+`deepseek-websearch.timeZone` is optional and must be an IANA time-zone name such as `Asia/Shanghai`; when omitted or invalid, the extension uses the host system time zone. The extension intentionally does not reuse Pi `models.json` or `auth.json` provider credentials, keeping these tools independent from the active Pi model configuration.
 
-The smoke test prints whether the key was found in settings, but never prints the key itself.
+## Verification
 
-## Notes
+```powershell
+npm test
+npm run smoke -- "latest Rust stable release"
+```
 
-- This extension is now a local Pi tool implementation, not a custom provider.
-- The active Pi model does not need to be DeepSeek.
-- The internal DeepSeek Web Search request uses a fixed `max_uses: 2`, so each tool call can perform up to two server-side web search steps when the DeepSeek backend decides it is useful.
-- If DeepSeek returns an incomplete intermediate output such as DSML tool-call markup instead of a final answer, the extension attempts one extra no-tool finalization pass using `deepseek-v4-flash`. If that still does not produce a clean answer, the extension returns a brief fallback note plus the gathered sources instead of leaking intermediate markup.
-- If DeepSeek does not return any web-search sources, the extension retries once with a stricter prompt and then fails closed instead of returning an unsourced answer.
+The smoke script exercises Web Search and never prints the key.

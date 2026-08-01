@@ -2,6 +2,7 @@ import { access } from "node:fs/promises";
 
 const STUBS = new Map([
 	["@earendil-works/pi-coding-agent", new URL("./stubs/pi-coding-agent.ts", import.meta.url).href],
+	["@earendil-works/pi-tui", new URL("./stubs/pi-tui.ts", import.meta.url).href],
 	["typebox", new URL("./stubs/typebox.ts", import.meta.url).href],
 ]);
 

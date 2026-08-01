@@ -5,19 +5,22 @@ import path from "node:path";
 import test from "node:test";
 import deepSeekWebSearchExtension from "../index.ts";
 import { executeDeepSeekWebSearchQuery } from "../runtime.ts";
+import { getCurrentLocalDate } from "../temporal.ts";
 
-function captureRegisteredTool() {
-	let tool;
+function captureRegisteredTool(name: string) {
+	const tools: Array<{ name?: string }> = [];
 	deepSeekWebSearchExtension({
+		on() {},
 		registerTool(definition) {
-			tool = definition;
+			tools.push(definition as { name?: string });
 		},
 	});
-	assert.ok(tool, "extension should register a tool");
-	return tool;
+	const tool = tools.find((definition) => definition.name === name);
+	assert.ok(tool, `extension should register ${name}`);
+	return tool as { execute: (...args: unknown[]) => Promise<unknown> };
 }
 
-const tool = captureRegisteredTool();
+const tool = captureRegisteredTool("deepseek_websearch");
 
 async function withTempHome(fn: (home: string) => Promise<void>) {
 	const root = await mkdtemp(path.join(os.tmpdir(), "deepseek-websearch-test-"));
@@ -113,14 +116,83 @@ test("throws when the DeepSeek request is rejected", async () => {
 		});
 
 		await withMockFetch(
-			(async () => new Response("upstream unavailable", { status: 503 })) as typeof fetch,
+			(async () => new Response("invalid request", { status: 400 })) as typeof fetch,
 			async () => {
 				await assert.rejects(
 					() => tool.execute("call-2", { query: "latest rust stable release" }),
-					/HTTP 503/i,
+					/HTTP 400/i,
 				);
 			},
 		);
+	});
+});
+
+test("retries one transient DeepSeek overload response", async () => {
+	await withTempHome(async (home) => {
+		await writeAgentJson(home, "settings.json", {
+			"deepseek-websearch": {
+				apiKey: "settings-key",
+			},
+		});
+
+		let requestCount = 0;
+		const progress: string[] = [];
+		await withMockFetch(
+			(async () => {
+				requestCount += 1;
+				if (requestCount === 1) {
+					return new Response("overloaded", { status: 503, headers: { "retry-after": "0" } });
+				}
+				return jsonResponse({
+					content: [
+						{ type: "text", text: "Recovered answer." },
+						{ type: "web_search_tool_result", content: [{ title: "Example", url: "https://example.com/recovered" }] },
+					],
+				});
+			}) as typeof fetch,
+			async () => {
+				const result = await executeDeepSeekWebSearchQuery("latest example", undefined, (message) => progress.push(message));
+				assert.equal(result.details?.ok, true);
+			},
+		);
+
+		assert.equal(requestCount, 2);
+		assert.deepEqual(progress, [
+			"Searching the web with DeepSeek...",
+			"DeepSeek returned HTTP 503; retrying in 0ms...",
+		]);
+	});
+});
+
+test("adds the configured current date and time zone to relative-time web searches", async () => {
+	await withTempHome(async (home) => {
+		await writeAgentJson(home, "settings.json", {
+			"deepseek-websearch": { apiKey: "settings-key", timeZone: "Asia/Shanghai" },
+		});
+		let requestBody: Record<string, unknown> | undefined;
+
+		await withMockFetch(
+			(async (_input, init) => {
+				requestBody = parseJsonBody({ init });
+				return jsonResponse({
+					content: [
+						{ type: "text", text: "Current weather result." },
+						{ type: "web_search_tool_result", content: [{ title: "Example", url: "https://example.com/weather" }] },
+					],
+				});
+			}) as typeof fetch,
+			async () => {
+				const result = await executeDeepSeekWebSearchQuery("武汉 2025年7月 今日天气");
+				assert.equal(result.details?.ok, true);
+				if (result.details?.ok) assert.equal(result.details.query, "武汉 2025年7月 今日天气");
+			},
+		);
+
+		assert.match(
+			String(requestBody?.messages?.[0]?.content ?? ""),
+			new RegExp(`Current date and time zone: ${getCurrentLocalDate(new Date(), "Asia/Shanghai")} \\(Asia/Shanghai\\)`),
+		);
+		assert.match(String(requestBody?.system?.[0]?.text ?? ""), /freshness cannot be verified/i);
 	});
 });
 
@@ -225,10 +297,10 @@ test("returns direct answers, sends DeepSeek web search tool, and normalizes sou
 
 				const body = parseJsonBody(requests[0]);
 				assert.equal(body.model, "deepseek-v4-flash");
-				assert.equal(body.messages?.[0]?.content, "latest rust stable release");
+				assert.match(String(body.messages?.[0]?.content ?? ""), /^latest rust stable release\n\nCurrent date and time zone:/);
 				assert.equal(body.tools?.[0]?.type, "web_search_20250305");
 				assert.equal(body.tools?.[0]?.name, "web_search");
-				assert.equal(body.tools?.[0]?.max_uses, 2);
+				assert.equal(body.tools?.[0]?.max_uses, 1);
 
 				assert.equal(result.details?.ok, true);
 				assert.equal(result.details?.path, "direct");
@@ -288,7 +360,9 @@ test("retries with a stricter search prompt when DeepSeek answers without source
 				const firstBody = parseJsonBody(requests[0]);
 				const secondBody = parseJsonBody(requests[1]);
 
-				assert.equal(firstBody.messages?.[0]?.content, "latest rust stable release");
+				assert.match(String(firstBody.messages?.[0]?.content ?? ""), /^latest rust stable release\n\nCurrent date and time zone:/);
+				assert.equal(firstBody.tools?.[0]?.max_uses, 1);
+				assert.equal(secondBody.tools?.[0]?.max_uses, 1);
 				assert.match(String(secondBody.system?.[0]?.text ?? ""), /must use the web search tool for every request/i);
 				assert.match(String(secondBody.messages?.[0]?.content ?? ""), /Important: you must use the web search tool/i);
 				assert.equal(result.details?.ok, true);
@@ -544,5 +618,120 @@ test("resolves API keys only from deepseek-websearch settings", async () => {
 		);
 
 		assert.deepEqual(seenKeys, ["settings-key"]);
+	});
+});
+
+test("reads the API key from PI_CODING_AGENT_DIR when configured", async () => {
+	await withTempHome(async (home) => {
+		const configDir = path.join(home, "portable-pi-config");
+		const previousConfigDir = process.env.PI_CODING_AGENT_DIR;
+		process.env.PI_CODING_AGENT_DIR = configDir;
+
+		try {
+			await mkdir(configDir, { recursive: true });
+			await writeFile(
+				path.join(configDir, "settings.json"),
+				JSON.stringify({ "deepseek-websearch": { apiKey: "override-key" } }),
+			);
+
+			await withMockFetch(
+				(async (_input, init) => {
+					const headers = init?.headers as Record<string, string> | undefined;
+					assert.equal(headers?.["x-api-key"], "override-key");
+					return jsonResponse({
+						content: [
+							{ type: "text", text: "ok" },
+							{ type: "web_search_tool_result", content: [{ title: "Example", url: "https://example.com/config" }] },
+						],
+					});
+				}) as typeof fetch,
+				async () => {
+					const result = await executeDeepSeekWebSearchQuery("config override");
+					assert.equal(result.details?.ok, true);
+				},
+			);
+		} finally {
+			if (previousConfigDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = previousConfigDir;
+		}
+	});
+});
+
+test("caps total server-side search uses at two across the source retry and reports progress", async () => {
+	await withTempHome(async (home) => {
+		await writeAgentJson(home, "settings.json", { "deepseek-websearch": { apiKey: "settings-key" } });
+		const requests: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+		const progress: string[] = [];
+
+		await withMockFetch(
+			(async (input, init) => {
+				requests.push({ input, init });
+				if (requests.length === 1) return jsonResponse({ content: [{ type: "text", text: "No sources yet." }] });
+				return jsonResponse({
+					content: [
+						{ type: "text", text: "Sourced answer." },
+						{ type: "web_search_tool_result", content: [{ title: "Example", url: "https://example.com/result" }] },
+					],
+				});
+			}) as typeof fetch,
+			async () => {
+				const result = await executeDeepSeekWebSearchQuery("latest example", undefined, (message) => progress.push(message));
+				assert.equal(result.details?.ok, true);
+			},
+		);
+
+		assert.deepEqual(requests.map((request) => parseJsonBody(request).tools?.[0]?.max_uses), [1, 1]);
+		assert.deepEqual(progress, [
+			"Searching the web with DeepSeek...",
+			"No usable sources returned; retrying the web search...",
+		]);
+	});
+});
+
+test("forwards runtime progress through Pi tool updates", async () => {
+	await withTempHome(async (home) => {
+		await writeAgentJson(home, "settings.json", { "deepseek-websearch": { apiKey: "settings-key" } });
+		const updates: unknown[] = [];
+
+		await withMockFetch(
+			(async () =>
+				jsonResponse({
+					content: [
+						{ type: "text", text: "Sourced answer." },
+						{ type: "web_search_tool_result", content: [{ title: "Example", url: "https://example.com/progress" }] },
+					],
+				})) as typeof fetch,
+			async () => {
+				const result = await tool.execute("call-progress", { query: "latest example" }, undefined, (update: unknown) => updates.push(update));
+				assert.equal(result.details?.ok, true);
+			},
+		);
+
+		assert.deepEqual(updates, [
+			{ content: [{ type: "text", text: "Searching the web with DeepSeek..." }] },
+		]);
+	});
+});
+
+test("truncates oversized rendered tool output", async () => {
+	await withTempHome(async (home) => {
+		await writeAgentJson(home, "settings.json", { "deepseek-websearch": { apiKey: "settings-key" } });
+		const oversizedAnswer = Array.from({ length: 700 }, () => "x".repeat(100)).join("\n");
+
+		await withMockFetch(
+			(async () =>
+				jsonResponse({
+					content: [
+						{ type: "text", text: oversizedAnswer },
+						{ type: "web_search_tool_result", content: [{ title: "Example", url: "https://example.com/large" }] },
+					],
+				})) as typeof fetch,
+			async () => {
+				const result = await executeDeepSeekWebSearchQuery("large result");
+				const rendered = textResultText(result);
+				assert.match(rendered, /Output truncated:/);
+				assert.ok(Buffer.byteLength(rendered) < 52 * 1024);
+			},
+		);
 	});
 });

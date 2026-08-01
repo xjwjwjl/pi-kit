@@ -1,35 +1,43 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from "@earendil-works/pi-coding-agent";
+import { addCurrentDateContext, resolveTimeZone } from "./temporal.js";
 
 const SETTINGS_KEY = "deepseek-websearch";
 const DEFAULT_BASE_URL = "https://api.deepseek.com/anthropic/v1/messages";
 const DEFAULT_MODEL = "deepseek-v4-flash";
 const WEB_SEARCH_TOOL_TYPE = "web_search_20250305";
 const WEB_SEARCH_TOOL_NAME = "web_search";
-const DEFAULT_SYSTEM_PROMPT = "You are a web research assistant. Use web search when needed and answer concisely with sources.";
+const DEFAULT_SYSTEM_PROMPT =
+	"You are a web research assistant. Use web search when needed and answer concisely with sources. For time-sensitive requests, prefer primary or official sources and identify each material source's as-of date/time when available. For requests about today, the evidence must match the requested date and time zone. For current or latest requests, establish recency from the gathered evidence and report the source's as-of date/time; do not claim freshness when it is missing, stale, or contradicted. If freshness cannot be verified, say so plainly.";
 const STRICT_WEB_SEARCH_SYSTEM_PROMPT =
-	"You are a web research assistant. You must use the web search tool for every request. Do not answer from prior knowledge. Return a concise answer grounded in the gathered web results and include source URLs.";
+	"You are a web research assistant. You must use the web search tool for every request. Do not answer from prior knowledge. Return a concise answer grounded in the gathered web results and include source URLs. For time-sensitive requests, prefer primary or official sources and state each material source's as-of date/time when available. For today, require evidence matching the requested date and time zone; for current or latest, establish recency from the gathered evidence and say freshness cannot be verified when it is missing, stale, or contradicted.";
 const STRICT_WEB_SEARCH_RETRY_INSTRUCTION =
-	"Important: you must use the web search tool for this request. Do not answer from prior knowledge. Return a concise answer grounded in fetched web results and cite source URLs.";
+	"Important: you must use the web search tool for this request. Do not answer from prior knowledge. Return a concise answer grounded in fetched web results and cite source URLs. For a time-sensitive request, verify that today matches the requested date/time zone, or establish recency for current/latest from source as-of dates; do not call stale or undated evidence current.";
 const FINALIZER_SYSTEM_PROMPT =
-	"You are a concise answer finalizer. You already have web search results. Do not emit tool calls, DSML markup, XML-like tags, or thinking. Answer in plain text and rely only on the gathered evidence.";
-const DEFAULT_MAX_USES = 2;
+	"You are a concise answer finalizer. You already have web search results. Do not emit tool calls, DSML markup, XML-like tags, or thinking. Answer in plain text and rely only on the gathered evidence. For time-sensitive requests, state the source's as-of date/time when available. For today, require evidence matching the requested date/time zone; for current/latest, establish recency from the gathered evidence. If freshness is missing, stale, or contradicted, say it cannot be verified instead of calling the result current or latest.";
+const DEFAULT_MAX_USES = 1;
 const REQUEST_TIMEOUT_MS = 60_000;
+const MAX_HTTP_RETRIES = 1;
+const DEFAULT_HTTP_RETRY_DELAY_MS = 500;
+const MAX_HTTP_RETRY_DELAY_MS = 5_000;
 const MAX_ERROR_TEXT_LENGTH = 4_000;
 const MAX_RENDERED_SOURCES = 10;
 
 type JsonObject = Record<string, unknown>;
+export type ProgressReporter = (message: string) => void;
 
 interface ExtensionSettings {
 	apiKey?: string;
+	timeZone?: string;
 }
 
 interface ResolvedConfig {
 	apiKey: string;
-	baseUrl: string;
 	model: string;
 	systemPrompt: string;
+	timeZone: string;
 }
 
 interface ApiKeyResolution {
@@ -95,6 +103,7 @@ export function resolveApiKeyInfo(): ApiKeyResolution {
 export async function executeDeepSeekWebSearchQuery(
 	rawQuery: string,
 	signal?: AbortSignal,
+	onProgress?: ProgressReporter,
 ): Promise<WebSearchToolResult> {
 	const config = resolveConfig();
 	const query = normalizeQuery(rawQuery);
@@ -119,7 +128,9 @@ export async function executeDeepSeekWebSearchQuery(
 	}
 
 	try {
-		return await runWebSearchPipeline(query, config, signal);
+		const result = await runWebSearchPipeline(addCurrentDateContext(query, new Date(), config.timeZone), config, signal, onProgress);
+		if (result.details.ok) result.details.query = query;
+		return result;
 	} catch (error) {
 		const message = formatErrorMessage(error);
 		return {
@@ -136,12 +147,17 @@ export async function executeDeepSeekWebSearchQuery(
 // Configuration
 
 function resolveConfig(): ResolvedConfig {
+	const settings = readSettingsConfig();
 	return {
-		apiKey: resolveApiKeyInfo().apiKey,
-		baseUrl: DEFAULT_BASE_URL,
+		apiKey: settings.apiKey ?? "",
 		model: DEFAULT_MODEL,
 		systemPrompt: DEFAULT_SYSTEM_PROMPT,
+		timeZone: resolveTimeZone(settings.timeZone),
 	};
+}
+
+export function resolveConfiguredTimeZone(): string {
+	return resolveTimeZone(readSettingsConfig().timeZone);
 }
 
 function readSettingsConfig(): ExtensionSettings {
@@ -153,11 +169,13 @@ function readSettingsConfig(): ExtensionSettings {
 
 	return {
 		apiKey: typeof section.apiKey === "string" && section.apiKey.trim().length > 0 ? section.apiKey.trim() : undefined,
+		timeZone: typeof section.timeZone === "string" && section.timeZone.trim().length > 0 ? section.timeZone.trim() : undefined,
 	};
 }
 
 function getAgentConfigPath(fileName: string): string {
-	return join(homedir(), ".pi", "agent", fileName);
+	const configuredDir = process.env.PI_CODING_AGENT_DIR?.trim();
+	return join(configuredDir || join(homedir(), ".pi", "agent"), fileName);
 }
 
 function readJsonFile(path: string): unknown {
@@ -176,8 +194,9 @@ async function runWebSearchPipeline(
 	query: string,
 	config: ResolvedConfig,
 	signal?: AbortSignal,
+	onProgress?: ProgressReporter,
 ): Promise<WebSearchToolResult> {
-	const sourcedResponse = await requestResponseWithSources(query, config, signal);
+	const sourcedResponse = await requestResponseWithSources(query, config, signal, onProgress);
 	if (!sourcedResponse) return buildMissingSourcesError();
 
 	const { answer, path } = await resolveAnswerFromSourcedResponse(
@@ -186,6 +205,7 @@ async function runWebSearchPipeline(
 		sourcedResponse.results,
 		config,
 		signal,
+		onProgress,
 	);
 
 	return buildSuccessfulWebSearchResult(query, config, sourcedResponse, answer, path);
@@ -195,12 +215,15 @@ async function requestResponseWithSources(
 	query: string,
 	config: ResolvedConfig,
 	signal?: AbortSignal,
+	onProgress?: ProgressReporter,
 ): Promise<SourcedDeepSeekResponse | undefined> {
-	let response = await callDeepSeekWebSearch(query, config, signal);
+	onProgress?.("Searching the web with DeepSeek...");
+	let response = await callDeepSeekWebSearch(query, config, signal, DEFAULT_MAX_USES, onProgress);
 	let results = extractSearchResults(response);
 
 	if (results.length === 0) {
-		response = await retryDeepSeekWebSearchForSources(query, config, signal);
+		onProgress?.("No usable sources returned; retrying the web search...");
+		response = await retryDeepSeekWebSearchForSources(query, config, signal, onProgress);
 		results = extractSearchResults(response);
 	}
 
@@ -214,10 +237,11 @@ async function resolveAnswerFromSourcedResponse(
 	results: WebSearchResultItem[],
 	config: ResolvedConfig,
 	signal?: AbortSignal,
+	onProgress?: ProgressReporter,
 ): Promise<{ answer: string; path: WebSearchAnswerPath }> {
 	const initialAnswer = extractResponseText(response);
 	const needsFinalizer = isIncompleteAnswer(initialAnswer);
-	const finalizedAnswer = needsFinalizer ? await finalizeIncompleteAnswer(query, response, config, signal) : "";
+	const finalizedAnswer = needsFinalizer ? await finalizeIncompleteAnswer(query, response, config, signal, onProgress) : "";
 	const answer = needsFinalizer ? finalizedAnswer || buildIncompleteAnswerFallback(results) : initialAnswer;
 	const path = !needsFinalizer ? "direct" : finalizedAnswer ? "finalized" : "fallback";
 
@@ -232,7 +256,7 @@ function buildSuccessfulWebSearchResult(
 	path: WebSearchAnswerPath,
 ): WebSearchToolResult {
 	const sources = formatSources(sourcedResponse.results);
-	const contentText = [answer || "DeepSeek returned no final answer text.", sources].join("\n\n");
+	const contentText = truncateToolOutput([answer || "DeepSeek returned no final answer text.", sources].join("\n\n"));
 
 	return {
 		content: [{ type: "text", text: contentText }],
@@ -246,6 +270,16 @@ function buildSuccessfulWebSearchResult(
 			usage: sourcedResponse.response.usage ?? {},
 		},
 	};
+}
+
+export function truncateToolOutput(content: string): string {
+	const truncation = truncateHead(content, {
+		maxLines: DEFAULT_MAX_LINES,
+		maxBytes: DEFAULT_MAX_BYTES,
+	});
+	if (!truncation.truncated) return truncation.content;
+
+	return `${truncation.content}\n\n[Output truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)}).]`;
 }
 
 function buildMissingSourcesError(): WebSearchToolResult {
@@ -262,31 +296,25 @@ function buildMissingSourcesError(): WebSearchToolResult {
 
 // DeepSeek requests
 
-async function callDeepSeekWebSearch(
-	query: string,
-	config: ResolvedConfig,
+export async function postDeepSeekMessage<T>(
+	body: unknown,
+	apiKey: string,
 	signal?: AbortSignal,
-): Promise<DeepSeekResponse> {
-	const body = {
-		model: config.model,
-		max_tokens: 4096,
-		system: [{ type: "text", text: config.systemPrompt }],
-		messages: [{ role: "user", content: query }],
-		tools: [buildWebSearchTool()],
-	};
-
-	const response = await fetchWithRequestSignal(
-		config.baseUrl,
+	onProgress?: ProgressReporter,
+): Promise<T> {
+	const response = await fetchWithRetry(
+		DEFAULT_BASE_URL,
 		{
 			method: "POST",
 			headers: {
 				"Content-Type": "application/json",
-				"x-api-key": config.apiKey,
+				"x-api-key": apiKey,
 				"anthropic-version": "2023-06-01",
 			},
 			body: JSON.stringify(body),
 		},
 		signal,
+		onProgress,
 	);
 
 	if (!response.ok) {
@@ -294,18 +322,39 @@ async function callDeepSeekWebSearch(
 		throw new Error(`HTTP ${response.status}: ${errorText}`);
 	}
 
-	return (await response.json()) as DeepSeekResponse;
+	return (await response.json()) as T;
+}
+
+async function callDeepSeekWebSearch(
+	query: string,
+	config: ResolvedConfig,
+	signal?: AbortSignal,
+	maxUses = DEFAULT_MAX_USES,
+	onProgress?: ProgressReporter,
+): Promise<DeepSeekResponse> {
+	const body = {
+		model: config.model,
+		max_tokens: 4096,
+		system: [{ type: "text", text: config.systemPrompt }],
+		messages: [{ role: "user", content: query }],
+		tools: [buildWebSearchTool(maxUses)],
+	};
+
+	return postDeepSeekMessage<DeepSeekResponse>(body, config.apiKey, signal, onProgress);
 }
 
 async function retryDeepSeekWebSearchForSources(
 	query: string,
 	config: ResolvedConfig,
 	signal?: AbortSignal,
+	onProgress?: ProgressReporter,
 ): Promise<DeepSeekResponse> {
 	return callDeepSeekWebSearch(
 		`${query}\n\n${STRICT_WEB_SEARCH_RETRY_INSTRUCTION}`,
 		{ ...config, systemPrompt: STRICT_WEB_SEARCH_SYSTEM_PROMPT },
 		signal,
+		DEFAULT_MAX_USES,
+		onProgress,
 	);
 }
 
@@ -314,8 +363,10 @@ async function finalizeIncompleteAnswer(
 	response: DeepSeekResponse,
 	config: ResolvedConfig,
 	signal?: AbortSignal,
+	onProgress?: ProgressReporter,
 ): Promise<string> {
 	try {
+		onProgress?.("Finalizing the sourced answer...");
 		const assistantContent = buildFinalizerAssistantContent(response);
 		if (assistantContent.length === 0) return "";
 
@@ -334,23 +385,12 @@ async function finalizeIncompleteAnswer(
 			],
 		};
 
-		const response2 = await fetchWithRequestSignal(
-			config.baseUrl,
-			{
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					"x-api-key": config.apiKey,
-					"anthropic-version": "2023-06-01",
-				},
-				body: JSON.stringify(body),
-			},
+		const finalized = await postDeepSeekMessage<DeepSeekResponse>(
+			body,
+			config.apiKey,
 			signal,
+			onProgress,
 		);
-
-		if (!response2.ok) return "";
-
-		const finalized = (await response2.json()) as DeepSeekResponse;
 		const text = extractResponseText(finalized).trim();
 		if (!text || hasDsmlMarkup(text)) return "";
 		return text;
@@ -360,11 +400,11 @@ async function finalizeIncompleteAnswer(
 	}
 }
 
-function buildWebSearchTool(): JsonObject {
+function buildWebSearchTool(maxUses: number): JsonObject {
 	return {
 		type: WEB_SEARCH_TOOL_TYPE,
 		name: WEB_SEARCH_TOOL_NAME,
-		max_uses: DEFAULT_MAX_USES,
+		max_uses: maxUses,
 	};
 }
 
@@ -503,6 +543,60 @@ async function fetchWithRequestSignal(
 	} finally {
 		requestSignal.cleanup();
 	}
+}
+
+async function fetchWithRetry(
+	input: RequestInfo | URL,
+	init: RequestInit,
+	signal?: AbortSignal,
+	onProgress?: ProgressReporter,
+): Promise<Response> {
+	for (let attempt = 0; ; attempt += 1) {
+		const response = await fetchWithRequestSignal(input, init, signal);
+		if (!isRetryableStatus(response.status) || attempt >= MAX_HTTP_RETRIES) return response;
+
+		const delayMs = getRetryDelayMs(response.headers);
+		onProgress?.(`DeepSeek returned HTTP ${response.status}; retrying in ${delayMs}ms...`);
+		try {
+			await response.body?.cancel();
+		} catch {
+			// The retry is still safe when the error body cannot be cancelled.
+		}
+		await waitForRetryDelay(delayMs, signal);
+	}
+}
+
+function isRetryableStatus(status: number): boolean {
+	return status === 429 || status === 503;
+}
+
+function getRetryDelayMs(headers: Headers): number {
+	const retryAfter = headers.get("retry-after")?.trim();
+	if (retryAfter && /^\d+(?:\.\d+)?$/.test(retryAfter)) {
+		return Math.min(Math.max(Number(retryAfter) * 1_000, 0), MAX_HTTP_RETRY_DELAY_MS);
+	}
+	return DEFAULT_HTTP_RETRY_DELAY_MS;
+}
+
+function waitForRetryDelay(delayMs: number, signal?: AbortSignal): Promise<void> {
+	if (delayMs <= 0) return Promise.resolve();
+
+	return new Promise((resolve, reject) => {
+		const timeout = setTimeout(() => {
+			signal?.removeEventListener("abort", abort);
+			resolve();
+		}, delayMs);
+		const abort = () => {
+			clearTimeout(timeout);
+			reject(signal?.reason ?? new Error("DeepSeek Web Search request was aborted."));
+		};
+
+		if (signal?.aborted) {
+			abort();
+			return;
+		}
+		signal?.addEventListener("abort", abort, { once: true });
+	});
 }
 
 function createRequestSignal(parentSignal?: AbortSignal): { signal: AbortSignal; cleanup: () => void } {

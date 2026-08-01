@@ -1,6 +1,6 @@
 {
   "name": "deepseek-websearch",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "main": "./index.ts",
@@ -10,6 +10,8 @@
   "files": [
     "index.ts",
     "runtime.ts",
+    "temporal.ts",
+    "webfetch.ts",
     "README.md"
   ],
   "scripts": {
@@ -20,5 +22,10 @@
     "extensions": [
       "./index.ts"
     ]
+  },
+  "dependencies": {
+    "axios": "^1.18.1",
+    "lru-cache": "^11.5.2",
+    "turndown": "^7.2.4"
   }
 }
