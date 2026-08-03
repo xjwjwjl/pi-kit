@@ -4,10 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import {
   buildDatabaseContextPrompt,
-  findProjectConfigPath,
   initializeProjectConfig,
   loadProjectConfig,
-  migrateLegacyProjectConfig,
   selectSource,
   sourceWithDatabase
 } from "../src/config.ts";
@@ -131,7 +129,7 @@ async function testDynamicRegistration() {
     }
   } as never);
   const ctx = { cwd: dir, ui: { setStatus(_name: string, value: string | undefined) { statuses.push(value); } } };
-  assert.deepEqual(commands, ["database-init", "database-migrate"]);
+  assert.deepEqual(commands, ["database-init"]);
   await handlers.get("session_start")![0]!({}, ctx);
   assert.deepEqual(tools, []);
   assert.deepEqual(statuses, [undefined]);
@@ -139,7 +137,7 @@ async function testDynamicRegistration() {
   writeConfig(dir, { version: 1, sources: [{ name: "app", dialect: "mysql", options: { host: "localhost", user: "app" } }] });
   await handlers.get("before_agent_start")![0]!({ cwd: dir, systemPrompt: "base" }, ctx);
   assert.equal(tools.length, 8);
-  assert.deepEqual(commands, ["database-init", "database-migrate"]);
+  assert.deepEqual(commands, ["database-init"]);
 }
 
 function testDatabaseContextPrompt() {
@@ -536,26 +534,6 @@ function testWriteBoundaries() {
   assert.throws(() => clickhouseAdapter.validateWrite(clickhouse, "CREATE TABLE events ON CLUSTER c (id UInt64)"), /ON CLUSTER/);
 }
 
-function testMigration() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-migrate-"));
-  const configPath = writeConfig(dir, {
-    mysql: { host: "127.0.0.1", user: "root", database: "app_db", allow_write: true, query_timeout_ms: 12_000, max_rows: 25 },
-    clickhouse: { url: "http://localhost:8123", username: "default", database: "analytics", allow_write: false, send_receive_timeout: 45 }
-  });
-  assert.equal(findProjectConfigPath(dir), configPath);
-  const migrated = migrateLegacyProjectConfig(dir);
-  assert.equal(migrated.migrated, true);
-  const config = loadProjectConfig(dir);
-  assert.deepEqual(config.sources.map((source) => source.name), ["mysql_default", "clickhouse_default"]);
-  assert.equal(config.sources[0]?.allowWrite, true);
-  assert.equal(config.sources[0]?.writeConfirm, false);
-  assert.equal(config.sources[0]?.queryTimeoutMs, 12_000);
-  assert.equal(config.sources[0]?.maxRows, 25);
-  assert.equal(config.sources[1]?.queryTimeoutMs, 45_000);
-  assert.equal(config.sources[1]?.maxRows, 100);
-  assert.equal(migrateLegacyProjectConfig(dir).migrated, false);
-}
-
 testSqlScanner();
 testResultLimits();
 testInitializeConfig();
@@ -564,5 +542,4 @@ await testDynamicRegistration();
 testDatabaseContextPrompt();
 await testToolPromptMetadata();
 testWriteBoundaries();
-testMigration();
 console.log("pi-database self-check OK");

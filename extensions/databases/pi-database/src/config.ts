@@ -142,7 +142,7 @@ export function loadProjectConfig(cwd: string): ResolvedProjectConfig {
   }
   const root = parseConfig(configPath);
   if (root.version !== 1 || !Array.isArray(root.sources)) {
-    throw new Error(`Invalid ${configPath}: expected version 1 with a sources array. Run /database-migrate for the legacy format.`);
+    throw new Error(`Invalid ${configPath}: expected a version 1 config with a sources array. Run /database-init for a fresh template.`);
   }
   const sources = root.sources.map((source) => resolveSource(source, configPath));
   if (sources.length === 0) throw new Error(`Invalid ${configPath}: sources must not be empty.`);
@@ -216,50 +216,4 @@ export function initializeProjectConfig(cwd: string): { created: boolean; config
   }
   writeProjectConfig(targetPath, TEMPLATE);
   return { created: true, configPath: targetPath };
-}
-
-function legacySource(name: string, dialect: SqlDialect, value: JsonRecord): JsonRecord {
-  const {
-    allow_write,
-    write_confirm,
-    allow_drop: _allowDrop,
-    query_timeout_ms,
-    request_timeout_ms,
-    send_receive_timeout,
-    max_rows,
-    ...options
-  } = value;
-  const timeoutValue = dialect === "mysql"
-    ? query_timeout_ms
-    : request_timeout_ms ?? (typeof send_receive_timeout === "number" || typeof send_receive_timeout === "string"
-      ? asPositiveInteger(send_receive_timeout, 30) * 1000
-      : undefined);
-  return {
-    name,
-    dialect,
-    allow_write: asBoolean(allow_write, true),
-    write_confirm: asBoolean(write_confirm, false),
-    query_timeout_ms: asPositiveInteger(timeoutValue, 30_000),
-    max_rows: asPositiveInteger(max_rows, 100, 500),
-    options
-  };
-}
-
-export function migrateLegacyProjectConfig(cwd: string): { migrated: boolean; configPath: string; reason?: string } {
-  const configPath = findProjectConfigPath(cwd);
-  if (!configPath) throw new Error(`No database config found for ${cwd}. Run /database-init first.`);
-  const root = parseConfig(configPath);
-  if (root.version === 1 && Array.isArray(root.sources)) {
-    return { migrated: false, configPath, reason: "The config already uses the version 1 source format." };
-  }
-  const sources: JsonRecord[] = [];
-  if (isRecord(root.mysql)) sources.push(legacySource("mysql_default", "mysql", root.mysql));
-  if (isRecord(root.clickhouse)) sources.push(legacySource("clickhouse_default", "clickhouse", root.clickhouse));
-  if (sources.length === 0) throw new Error(`Cannot migrate ${configPath}: no legacy mysql or clickhouse config was found.`);
-  writeProjectConfig(configPath, {
-    version: 1,
-    default_source: sources[0]!.name,
-    sources
-  });
-  return { migrated: true, configPath };
 }

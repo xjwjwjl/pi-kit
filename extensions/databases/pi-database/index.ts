@@ -9,7 +9,6 @@ import {
   getContextCwd,
   initializeProjectConfig,
   loadProjectConfig,
-  migrateLegacyProjectConfig,
   selectSource
 } from "./src/config.js";
 import { mysqlAdapter } from "./src/mysql.js";
@@ -914,25 +913,6 @@ function registerCommands(pi: ExtensionAPI): void {
       ctx.ui.notify(`${result.reason} Using ${result.configPath}`, "warning");
     }
   });
-
-  pi.registerCommand("database-migrate", {
-    description: "Convert a legacy single-connection databases.json to the version 1 source format",
-    handler: async (_args, ctx) => {
-      const configPath = findProjectConfigPath(getContextCwd(ctx));
-      if (!configPath) {
-        ctx.ui.notify("No database config found. Run /database-init first.", "warning");
-        return;
-      }
-      if (ctx.hasUI !== true) {
-        ctx.ui.notify("Interactive confirmation is required to migrate database config.", "warning");
-        return;
-      }
-      const confirmed = await ctx.ui.confirm("Migrate database config", `Convert ${configPath} to version 1 multi-source format?`);
-      if (!confirmed) return;
-      const result = migrateLegacyProjectConfig(getContextCwd(ctx));
-      ctx.ui.notify(result.migrated ? `Migrated ${result.configPath}` : result.reason ?? "No migration performed.", result.migrated ? "info" : "warning");
-    }
-  });
 }
 
 function registerTools(pi: ExtensionAPI): void {
@@ -1264,7 +1244,7 @@ export default function databaseExtension(pi: ExtensionAPI) {
   };
 
   // Commands are always available: /database-init exists precisely to create the
-  // config when none exists, and /database-migrate warns when no config is found.
+  // config when none exists, so it must not be gated behind config presence.
   registerCommands(pi);
 
   pi.on("before_agent_start", async (event, ctx) => {
