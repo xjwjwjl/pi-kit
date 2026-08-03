@@ -131,9 +131,9 @@ async function testDynamicRegistration() {
     }
   } as never);
   const ctx = { cwd: dir, ui: { setStatus(_name: string, value: string | undefined) { statuses.push(value); } } };
+  assert.deepEqual(commands, ["database-init", "database-migrate"]);
   await handlers.get("session_start")![0]!({}, ctx);
   assert.deepEqual(tools, []);
-  assert.deepEqual(commands, []);
   assert.deepEqual(statuses, [undefined]);
 
   writeConfig(dir, { version: 1, sources: [{ name: "app", dialect: "mysql", options: { host: "localhost", user: "app" } }] });

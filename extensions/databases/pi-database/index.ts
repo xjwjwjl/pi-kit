@@ -1255,23 +1255,27 @@ function registerTools(pi: ExtensionAPI): void {
 }
 
 export default function databaseExtension(pi: ExtensionAPI) {
-  let registered = false;
-  const registerIfConfigured = (cwd: string): boolean => {
-    if (registered || !findProjectConfigPath(cwd)) return registered;
-    registerCommands(pi);
+  let toolsRegistered = false;
+  const registerToolsIfConfigured = (cwd: string): boolean => {
+    if (toolsRegistered || !findProjectConfigPath(cwd)) return toolsRegistered;
     registerTools(pi);
-    registered = true;
+    toolsRegistered = true;
     return true;
   };
 
+  // Commands are always available: /database-init exists precisely to create the
+  // config when none exists, and /database-migrate warns when no config is found.
+  registerCommands(pi);
+
   pi.on("before_agent_start", async (event, ctx) => {
-    if (!registerIfConfigured(event.cwd ?? getContextCwd(ctx))) return undefined;
-    const prompt = buildDatabaseContextPrompt(event.cwd ?? getContextCwd(ctx));
+    const cwd = event.cwd ?? getContextCwd(ctx);
+    registerToolsIfConfigured(cwd);
+    const prompt = buildDatabaseContextPrompt(cwd);
     return prompt ? { systemPrompt: `${event.systemPrompt}\n\n${prompt}` } : undefined;
   });
 
   pi.on("session_start", async (_event, ctx) => {
-    if (!registerIfConfigured(getContextCwd(ctx))) {
+    if (!registerToolsIfConfigured(getContextCwd(ctx))) {
       ctx.ui.setStatus("pi-database", undefined);
       return;
     }

@@ -53,7 +53,7 @@ When a tool omits `source`, it uses `default_source`; a single configured source
 - `/database-init`: creates a version 1 template only when no local or inherited config exists.
 - `/database-migrate`: after confirmation, converts the legacy `{ "mysql": { ... }, "clickhouse": { ... } }` format to version 1.
 
-Neither command overwrites an existing config without an explicit migration confirmation.
+Both commands are always available, even before a `.pi/databases.json` exists; the `database_*` tools are registered only when a config file is found. Neither command overwrites an existing config without an explicit migration confirmation.
 
 ## Tools
 
