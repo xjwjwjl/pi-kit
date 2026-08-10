@@ -8,6 +8,7 @@ Each extension is an independent Pi package with its own `package.json` and depe
 
 - `extensions/<name>/index.ts`: Pi extension entrypoints
 - `skills/<name>/SKILL.md`: Pi skills
+- `themes/`: Pi TUI 主题文件，由全局 `settings.json` 的 `themes` 数组加载
 - `shared/`: code shared across extensions
 - `tests/`: focused tests
 - `work/`: scratch files
