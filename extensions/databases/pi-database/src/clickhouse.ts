@@ -1,6 +1,6 @@
 import { ClickHouseLogLevel, ResultSet, createClient, type ClickHouseClient } from "@clickhouse/client";
 import { sourceWithDatabase } from "./config.js";
-import { firstKeyword, hasMultipleStatements, normalizeSql } from "./sql.js";
+import { firstKeyword, hasMultipleStatements, hasTopLevelComma, normalizeSql } from "./sql.js";
 import { DatabasePolicyError } from "./types.js";
 import { boundItems, boundRows, boundTableNames, truncateText } from "./results.js";
 import type { DatabaseAdapter, DescribeTableResult, ListDatabasesResult, PingResult, QueryResult, ResolvedSource, SearchTablesResult, TableResult, ValidatedWrite, WriteResult } from "./types.js";
@@ -9,10 +9,22 @@ const clients = new Map<string, ClickHouseClient>();
 const clientCacheKeyBySource = new Map<string, string>();
 const IDENTIFIER = "(?:`(?:``|[^`])+`|[A-Za-z_][A-Za-z0-9_$]*)";
 const TABLE_IDENTIFIER = `${IDENTIFIER}(?:\\.${IDENTIFIER})?`;
-const INSERT_PATTERN = new RegExp(`^INSERT\\s+INTO\\s+${TABLE_IDENTIFIER}(?:\\s*\\([^)]*\\))?\\s+VALUES\\s*\\(`, "i");
+const INSERT_VALUES_PATTERN = new RegExp(`^INSERT\\s+INTO\\s+${TABLE_IDENTIFIER}(?:\\s*\\([^)]*\\))?\\s+VALUES\\s*\\(`, "i");
+const INSERT_SELECT_PATTERN = new RegExp(`^INSERT\\s+INTO\\s+${TABLE_IDENTIFIER}(?:\\s*\\([^)]*\\))?\\s+SELECT\\b`, "i");
+const DELETE_PATTERN = new RegExp(`^DELETE\\s+FROM\\s+${TABLE_IDENTIFIER}\\s+WHERE`, "i");
 const CREATE_TABLE_PATTERN = new RegExp(`^CREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${TABLE_IDENTIFIER}\\s*\\(`, "i");
 const CREATE_DATABASE_PATTERN = new RegExp(`^CREATE\\s+DATABASE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${IDENTIFIER}$`, "i");
+const CREATE_MATERIALIZED_VIEW_PREFIX = /^CREATE\s+(?:OR\s+REPLACE\s+)?MATERIALIZED\s+VIEW\b/i;
+const CREATE_MATERIALIZED_VIEW_OR_REPLACE = /^CREATE\s+OR\s+REPLACE\s+MATERIALIZED\s+VIEW\b/i;
+const MATERIALIZED_VIEW_NAME_AND_CLUSTER = `${TABLE_IDENTIFIER}(?:\\s+ON\\s+CLUSTER\\s+${IDENTIFIER})?`;
+const CREATE_MATERIALIZED_VIEW_TO_PATTERN = new RegExp(`^CREATE\\s+(?:OR\\s+REPLACE\\s+)?MATERIALIZED\\s+VIEW\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${MATERIALIZED_VIEW_NAME_AND_CLUSTER}\\s+TO\\s+${TABLE_IDENTIFIER}(?:\\s*\\([^)]*\\))?\\s+AS\\s+SELECT\\b`, "i");
+const CREATE_MATERIALIZED_VIEW_ENGINE_PATTERN = new RegExp(`^CREATE\\s+(?:OR\\s+REPLACE\\s+)?MATERIALIZED\\s+VIEW\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${MATERIALIZED_VIEW_NAME_AND_CLUSTER}\\s+ENGINE\\s*=\\s+([\\s\\S]+?)\\s+AS\\s+SELECT\\b`, "i");
 const ALTER_ADD_COLUMN_PATTERN = new RegExp(`^ALTER\\s+TABLE\\s+${TABLE_IDENTIFIER}\\s+ADD\\s+COLUMN\\b`, "i");
+const ALTER_DELETE_PATTERN = new RegExp(`^ALTER\\s+TABLE\\s+${TABLE_IDENTIFIER}\\s+DELETE\\s+WHERE`, "i");
+const TRUNCATE_PATTERN = new RegExp(`^TRUNCATE\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?${TABLE_IDENTIFIER}$`, "i");
+const DROP_TABLE_PATTERN = new RegExp(`^DROP\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?${TABLE_IDENTIFIER}$`, "i");
+const DROP_DATABASE_PATTERN = new RegExp(`^DROP\\s+DATABASE\\s+(?:IF\\s+EXISTS\\s+)?${IDENTIFIER}$`, "i");
+const RENAME_TABLE_PATTERN = new RegExp(`^RENAME\\s+TABLE\\s+${TABLE_IDENTIFIER}\\s+TO\\s+${TABLE_IDENTIFIER}$`, "i");
 
 function asString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
@@ -97,23 +109,69 @@ function validateRead(statement: string): string {
   return normalized;
 }
 
+function validateMaterializedView(normalized: string): ValidatedWrite | undefined {
+  if (!CREATE_MATERIALIZED_VIEW_PREFIX.test(normalized)) return undefined;
+  if (/^CREATE\s+OR\s+REPLACE\s+MATERIALIZED\s+VIEW\s+IF\s+NOT\s+EXISTS\b/i.test(normalized)) {
+    throw new DatabasePolicyError("ClickHouse materialized view writes cannot combine OR REPLACE with IF NOT EXISTS.");
+  }
+  const forceConfirm = CREATE_MATERIALIZED_VIEW_OR_REPLACE.test(normalized);
+  if (CREATE_MATERIALIZED_VIEW_TO_PATTERN.test(normalized)) {
+    return { statement: normalized, statementKind: "create", databaseRequired: true, forceConfirm: forceConfirm || undefined };
+  }
+  const engineMatch = CREATE_MATERIALIZED_VIEW_ENGINE_PATTERN.exec(normalized);
+  if (engineMatch) {
+    const definition = engineMatch[1] ?? "";
+    if (/\b(?:POPULATE|REFRESH|DEFINER)\b|\bSQL\s+SECURITY\b/i.test(definition)) {
+      throw new DatabasePolicyError("ClickHouse materialized view writes do not support POPULATE, REFRESH, DEFINER, or SQL SECURITY.");
+    }
+    return { statement: normalized, statementKind: "create", databaseRequired: true, forceConfirm: forceConfirm || undefined };
+  }
+  throw new DatabasePolicyError("ClickHouse materialized view writes support only CREATE MATERIALIZED VIEW ... TO ... AS SELECT and CREATE MATERIALIZED VIEW ... ENGINE = ... AS SELECT.");
+}
+
 function validateWrite(source: ResolvedSource, statement: string): ValidatedWrite {
   const normalized = normalizeSql(statement);
   if (!normalized) throw new DatabasePolicyError("Statement is empty.");
   if (!source.allowWrite) throw new DatabasePolicyError(`Writes are disabled for source "${source.name}".`);
   if (hasMultipleStatements(statement)) throw new DatabasePolicyError("database_write expects a single SQL statement.");
-  if (/\bON\s+CLUSTER\b/i.test(normalized)) throw new DatabasePolicyError("ClickHouse writes do not support ON CLUSTER.");
-  if (/^ALTER\s+TABLE\b[\s\S]*\b(DELETE|DROP|MODIFY|CLEAR|REPLACE|MOVE|FETCH|FREEZE|REMOVE)\b/i.test(normalized)) {
+  const materializedView = validateMaterializedView(normalized);
+  if (/\bON\s+CLUSTER\b/i.test(normalized) && !materializedView) throw new DatabasePolicyError("ClickHouse writes do not support ON CLUSTER outside standard materialized view creation.");
+  if (/^ALTER\s+TABLE\b[\s\S]*\b(DROP|MODIFY|CLEAR|REPLACE|MOVE|FETCH|FREEZE|REMOVE)\b/i.test(normalized)) {
     throw new DatabasePolicyError("ClickHouse writes do not support destructive or mutation ALTER TABLE statements.");
   }
-  if (INSERT_PATTERN.test(normalized)) return { statement: normalized, statementKind: "insert", databaseRequired: true };
+  if (INSERT_VALUES_PATTERN.test(normalized)) return { statement: normalized, statementKind: "insert", databaseRequired: true };
+  if (INSERT_SELECT_PATTERN.test(normalized)) return { statement: normalized, statementKind: "insert", databaseRequired: true, forceConfirm: true };
+  if (firstKeyword(normalized) === "DELETE") {
+    if (!DELETE_PATTERN.test(normalized)) throw new DatabasePolicyError("ClickHouse writes support only DELETE ... FROM ... WHERE ... statements.");
+    return { statement: normalized, statementKind: "delete", databaseRequired: true };
+  }
+  if (ALTER_DELETE_PATTERN.test(normalized)) {
+    if (hasTopLevelComma(normalized)) {
+      throw new DatabasePolicyError("ClickHouse ALTER TABLE ... DELETE WHERE must be a single command without additional ALTER commands.");
+    }
+    return { statement: normalized, statementKind: "delete", databaseRequired: true };
+  }
+  if (firstKeyword(normalized) === "TRUNCATE") {
+    if (!TRUNCATE_PATTERN.test(normalized)) throw new DatabasePolicyError("ClickHouse writes support only single-table TRUNCATE TABLE statements.");
+    return { statement: normalized, statementKind: "truncate", databaseRequired: true };
+  }
+  if (firstKeyword(normalized) === "DROP") {
+    if (DROP_TABLE_PATTERN.test(normalized)) return { statement: normalized, statementKind: "drop", databaseRequired: true };
+    if (DROP_DATABASE_PATTERN.test(normalized)) return { statement: normalized, statementKind: "drop", databaseRequired: false };
+    throw new DatabasePolicyError("ClickHouse writes support only single-object DROP TABLE and DROP DATABASE statements.");
+  }
+  if (firstKeyword(normalized) === "RENAME") {
+    if (!RENAME_TABLE_PATTERN.test(normalized)) throw new DatabasePolicyError("ClickHouse writes support only single-pair RENAME TABLE statements.");
+    return { statement: normalized, statementKind: "rename", databaseRequired: true };
+  }
   if (CREATE_DATABASE_PATTERN.test(normalized)) return { statement: normalized, statementKind: "create", databaseRequired: false };
+  if (materializedView) return materializedView;
   if (CREATE_TABLE_PATTERN.test(normalized)) {
     if (/\bAS\s+SELECT\b/i.test(normalized)) throw new DatabasePolicyError("Derived CREATE TABLE statements are not supported.");
     return { statement: normalized, statementKind: "create", databaseRequired: true };
   }
   if (ALTER_ADD_COLUMN_PATTERN.test(normalized)) return { statement: normalized, statementKind: "alter", databaseRequired: true };
-  throw new DatabasePolicyError("ClickHouse writes support only INSERT ... VALUES, CREATE DATABASE, CREATE TABLE, and ALTER TABLE ... ADD COLUMN.");
+  throw new DatabasePolicyError("ClickHouse writes support only INSERT ... VALUES, INSERT ... SELECT, DELETE ... WHERE, TRUNCATE, DROP, RENAME, CREATE DATABASE, CREATE TABLE, CREATE MATERIALIZED VIEW, and ALTER TABLE ... ADD COLUMN.");
 }
 
 async function selectJson<T extends Record<string, unknown>>(source: ResolvedSource, query: string, signal?: AbortSignal): Promise<T[]> {
@@ -286,7 +344,7 @@ export const clickhouseAdapter: DatabaseAdapter = {
     const response = await getClient(writeSource).command({
       query: write.statement,
       abort_signal: signal,
-      clickhouse_settings: { readonly: "0" }
+      clickhouse_settings: { readonly: "0", mutations_sync: "1" }
     });
     return {
       source: source.name,

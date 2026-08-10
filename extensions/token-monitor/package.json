@@ -1,0 +1,25 @@
+{
+  "name": "token-monitor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Offline token and cost monitor for Pi sessions.",
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/**/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.80.7",
+    "@earendil-works/pi-tui": "0.80.7",
+    "@types/node": "24.12.4",
+    "typescript": "5.9.3"
+  }
+}

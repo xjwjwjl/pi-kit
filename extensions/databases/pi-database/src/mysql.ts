@@ -10,11 +10,18 @@ const pools = new Map<string, Pool>();
 const poolCacheKeyBySource = new Map<string, string>();
 const IDENTIFIER = "(?:`(?:``|[^`])+`|[A-Za-z_][A-Za-z0-9_$]*)";
 const TABLE_IDENTIFIER = `${IDENTIFIER}(?:\\.${IDENTIFIER})?`;
-const INSERT_PATTERN = new RegExp(`^INSERT\\s+INTO\\s+${TABLE_IDENTIFIER}(?:\\s*\\([^)]*\\))?\\s+VALUES\\s*\\(`, "i");
+const INSERT_VALUES_PATTERN = new RegExp(`^INSERT\\s+INTO\\s+${TABLE_IDENTIFIER}(?:\\s*\\([^)]*\\))?\\s+VALUES\\s*\\(`, "i");
+const INSERT_SELECT_PATTERN = new RegExp(`^INSERT\\s+INTO\\s+${TABLE_IDENTIFIER}(?:\\s*\\([^)]*\\))?\\s+SELECT\\b`, "i");
 const UPDATE_PATTERN = new RegExp(`^UPDATE\\s+${TABLE_IDENTIFIER}\\s+SET\\s+`, "i");
+const DELETE_PATTERN = new RegExp(`^DELETE\\s+FROM\\s+${TABLE_IDENTIFIER}(?:\\s+(?:WHERE\\b|ORDER\\s+BY\\b|LIMIT\\b)|$)`, "i");
 const CREATE_TABLE_PATTERN = new RegExp(`^CREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${TABLE_IDENTIFIER}\\s*\\(`, "i");
 const CREATE_DATABASE_PATTERN = new RegExp(`^CREATE\\s+DATABASE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${IDENTIFIER}$`, "i");
 const ALTER_ADD_PATTERN = new RegExp(`^ALTER\\s+TABLE\\s+${TABLE_IDENTIFIER}\\s+ADD\\s+(?:COLUMN|INDEX)\\b`, "i");
+const TRUNCATE_PATTERN = new RegExp(`^TRUNCATE\\s+(?:TABLE\\s+)?${TABLE_IDENTIFIER}$`, "i");
+const DROP_TABLE_PATTERN = new RegExp(`^DROP\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?${TABLE_IDENTIFIER}$`, "i");
+const DROP_DATABASE_PATTERN = new RegExp(`^DROP\\s+DATABASE\\s+(?:IF\\s+EXISTS\\s+)?${IDENTIFIER}$`, "i");
+const RENAME_TABLE_PATTERN = new RegExp(`^RENAME\\s+TABLE\\s+${TABLE_IDENTIFIER}\\s+TO\\s+${TABLE_IDENTIFIER}$`, "i");
+const REPLACE_PATTERN = new RegExp(`^REPLACE\\s+INTO\\s+${TABLE_IDENTIFIER}(?:\\s*\\([^)]*\\))?\\s+VALUES\\s*\\(`, "i");
 
 function asString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
@@ -113,10 +120,33 @@ function validateWrite(source: ResolvedSource, statement: string): ValidatedWrit
   if (hasMultipleStatements(statement)) throw new DatabasePolicyError("database_write expects a single SQL statement.");
   if (/\/\*!/.test(statement)) throw new DatabasePolicyError("MySQL executable comments are not allowed.");
   const keyword = firstKeyword(normalized);
-  if (keyword === "INSERT" && INSERT_PATTERN.test(normalized)) return { statement: normalized, statementKind: "insert", databaseRequired: true };
+  if (keyword === "INSERT" && INSERT_VALUES_PATTERN.test(normalized)) return { statement: normalized, statementKind: "insert", databaseRequired: true };
+  if (keyword === "INSERT" && INSERT_SELECT_PATTERN.test(normalized)) return { statement: normalized, statementKind: "insert", databaseRequired: true, forceConfirm: true };
   if (keyword === "UPDATE" && UPDATE_PATTERN.test(normalized)) {
     if (!hasTopLevelKeyword(normalized, "WHERE")) throw new DatabasePolicyError("MySQL UPDATE statements require a top-level WHERE clause.");
     return { statement: normalized, statementKind: "update", databaseRequired: true };
+  }
+  if (keyword === "DELETE") {
+    if (!DELETE_PATTERN.test(normalized)) throw new DatabasePolicyError("MySQL writes support only single-table DELETE ... FROM ... statements.");
+    if (!hasTopLevelKeyword(normalized, "WHERE")) throw new DatabasePolicyError("MySQL DELETE statements require a top-level WHERE clause.");
+    return { statement: normalized, statementKind: "delete", databaseRequired: true };
+  }
+  if (keyword === "TRUNCATE") {
+    if (!TRUNCATE_PATTERN.test(normalized)) throw new DatabasePolicyError("MySQL writes support only single-table TRUNCATE statements.");
+    return { statement: normalized, statementKind: "truncate", databaseRequired: true };
+  }
+  if (keyword === "DROP") {
+    if (DROP_TABLE_PATTERN.test(normalized)) return { statement: normalized, statementKind: "drop", databaseRequired: true };
+    if (DROP_DATABASE_PATTERN.test(normalized)) return { statement: normalized, statementKind: "drop", databaseRequired: false };
+    throw new DatabasePolicyError("MySQL writes support only single-object DROP TABLE and DROP DATABASE statements.");
+  }
+  if (keyword === "RENAME") {
+    if (!RENAME_TABLE_PATTERN.test(normalized)) throw new DatabasePolicyError("MySQL writes support only single-pair RENAME TABLE statements.");
+    return { statement: normalized, statementKind: "rename", databaseRequired: true };
+  }
+  if (keyword === "REPLACE") {
+    if (!REPLACE_PATTERN.test(normalized)) throw new DatabasePolicyError("MySQL writes support only REPLACE ... INTO ... VALUES statements.");
+    return { statement: normalized, statementKind: "replace", databaseRequired: true };
   }
   if (keyword === "CREATE" && CREATE_DATABASE_PATTERN.test(normalized)) return { statement: normalized, statementKind: "create", databaseRequired: false };
   if (keyword === "CREATE" && CREATE_TABLE_PATTERN.test(normalized)) {
@@ -132,7 +162,7 @@ function validateWrite(source: ResolvedSource, statement: string): ValidatedWrit
     }
     return { statement: normalized, statementKind: "alter", databaseRequired: true };
   }
-  throw new DatabasePolicyError("MySQL writes support only INSERT ... VALUES, UPDATE ... WHERE, CREATE DATABASE, CREATE TABLE, and ALTER TABLE ... ADD COLUMN/INDEX.");
+  throw new DatabasePolicyError("MySQL writes support only INSERT ... VALUES, INSERT ... SELECT, UPDATE ... WHERE, DELETE ... WHERE, TRUNCATE, DROP, RENAME, REPLACE, CREATE DATABASE, CREATE TABLE, and ALTER TABLE ... ADD COLUMN/INDEX.");
 }
 
 function rowValues(row: unknown, columns: string[]): unknown[] {

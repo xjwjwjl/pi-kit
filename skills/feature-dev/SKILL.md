@@ -5,15 +5,15 @@ description: "Structured feature development workflow covering requirements, cod
 
 # Feature Dev
 
-Pi adaptation of Anthropic's feature-dev plugin: the multi-agent workflow is converted into a **single-agent, sequential, multi-pass workflow**.
+Adaptation of Anthropic's feature-dev plugin: the multi-agent workflow is converted into a **single-agent, sequential, multi-pass workflow**.
 
 ## Boundary
 
 This skill guides feature development. It does not edit code until Phase 5 (Implementation). Each phase must complete before the next begins. Do not skip Phase 3 (Clarifying Questions).
 
-## Pi-specific behavior
+## Runtime behavior
 
-- Pi has no subagents. Run exploration/design/review as sequential passes with different lenses.
+- No subagents are available. Run exploration/design/review as sequential passes with different lenses.
 - Use `codegraph` (via the codegraph skill) for codebase exploration when available.
 - Use `code-review` skill for Phase 6 quality review when available.
 - Use project-specific skills (e.g., `autosync-api`, `autosync-menu`) when their conventions apply.
@@ -37,7 +37,7 @@ Goal: understand existing patterns, related code, and architectural context.
 
 1. If `codegraph` is available: run `codegraph sync`, then use `codegraph explore "<feature keywords>"` and `codegraph callers/callees` on related symbols.
 2. If codegraph unavailable: use `grep` to find related files, then `read` key files.
-3. Read at minimum: similar existing features, routing/entry points, data models, service layer patterns, and project conventions (AGENTS.md, .pi/ files).
+3. Read at minimum: similar existing features, routing/entry points, data models, service layer patterns, and project conventions (e.g., AGENTS.md).
 4. Identify: naming conventions, file layout, DI patterns, error handling style, test placement.
 
 Output:
@@ -63,7 +63,7 @@ Ask concise, specific questions. Group related questions together. Wait for user
 
 Goal: design the approach before coding.
 
-Since Pi has no subagents, run three sequential design passes:
+Since no subagents are available, run three sequential design passes:
 
 1. **Minimal Changes Lens**: Smallest diff. Maximum reuse of existing patterns. Fewest new files. What's the simplest thing that works?
 2. **Clean Architecture Lens**: Best maintainability. Clear separation of concerns. Testable design. What would a principled approach look like?

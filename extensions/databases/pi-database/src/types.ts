@@ -103,8 +103,9 @@ export type DescribeTableResult = {
 
 export type ValidatedWrite = {
   statement: string;
-  statementKind: "insert" | "update" | "create" | "alter";
+  statementKind: "insert" | "update" | "delete" | "create" | "alter" | "drop" | "truncate" | "rename" | "replace";
   databaseRequired: boolean;
+  forceConfirm?: boolean;
 };
 
 export class DatabasePolicyError extends Error {
@@ -123,6 +124,7 @@ export type WriteResult = {
   statement_kind: ValidatedWrite["statementKind"] | "unknown";
   allow_write?: boolean;
   write_confirm?: boolean;
+  forced_confirm?: boolean;
   database?: string;
   requested_statement?: string;
   next_action?: string;

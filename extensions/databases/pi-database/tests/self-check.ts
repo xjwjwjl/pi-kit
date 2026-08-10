@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   buildDatabaseContextPrompt,
+  databaseStatusText,
   initializeProjectConfig,
   loadProjectConfig,
   selectSource,
@@ -11,9 +12,11 @@ import {
 } from "../src/config.ts";
 import { clickhouseAdapter } from "../src/clickhouse.ts";
 import { mysqlAdapter } from "../src/mysql.ts";
+import { createSourceTreeComponent } from "../src/source-tree.ts";
+import type { SourceTreeNode } from "../src/source-tree.ts";
 import { boundItems, boundRows, boundTableNames, resultLimits, truncateText } from "../src/results.ts";
 import databaseExtension, { __test__ } from "../index.ts";
-import { firstKeyword, hasMultipleStatements, hasTopLevelKeyword, normalizeSql } from "../src/sql.ts";
+import { firstKeyword, hasMultipleStatements, hasTopLevelComma, hasTopLevelKeyword, normalizeSql } from "../src/sql.ts";
 
 function writeConfig(dir: string, value: unknown): string {
   const configPath = path.join(dir, ".pi", "databases.json");
@@ -31,6 +34,11 @@ function testSqlScanner() {
   assert.equal(firstKeyword("WITH source AS (SELECT 1) SELECT * FROM source"), "SELECT");
   assert.equal(hasTopLevelKeyword("UPDATE users SET note = 'WHERE' WHERE id = 1", "WHERE"), true);
   assert.equal(hasTopLevelKeyword("UPDATE users SET note = 'WHERE'", "WHERE"), false);
+  assert.equal(hasTopLevelComma("ALTER TABLE events DELETE WHERE id = 1"), false);
+  assert.equal(hasTopLevelComma("ALTER TABLE events DELETE WHERE id = 1, UPDATE flag = 1 WHERE id = 2"), true);
+  assert.equal(hasTopLevelComma("ALTER TABLE events DELETE WHERE name = 'a,b'"), false);
+  assert.equal(hasTopLevelComma("ALTER TABLE events DELETE WHERE id IN (1, 2)"), false);
+  assert.equal(hasTopLevelComma("ALTER TABLE events DELETE WHERE id = 1 -- , UPDATE flag = 1"), false);
 }
 
 function testResultLimits() {
@@ -109,6 +117,10 @@ function testSourceSelection() {
   assert.equal(ambiguousConfig.sources[0]?.allowWrite, true);
   assert.equal(ambiguousConfig.sources[0]?.writeConfirm, false);
   assert.throws(() => selectSource(ambiguousConfig), /Multiple database sources/);
+
+  const dotted = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-dotted-"));
+  writeConfig(dotted, { version: 1, sources: [{ name: "mysql-192.168.27.148", dialect: "mysql", options: { host: "localhost", user: "u" } }] });
+  assert.equal(selectSource(loadProjectConfig(dotted)).name, "mysql-192.168.27.148");
 }
 
 async function testDynamicRegistration() {
@@ -128,8 +140,8 @@ async function testDynamicRegistration() {
       commands.push(name);
     }
   } as never);
-  const ctx = { cwd: dir, ui: { setStatus(_name: string, value: string | undefined) { statuses.push(value); } } };
-  assert.deepEqual(commands, ["database-init"]);
+  const ctx = { cwd: dir, ui: { setStatus(_name: string, value: string | undefined) { statuses.push(value); }, theme: { fg: (_color: string, text: string) => text } } };
+  assert.deepEqual(commands, ["database-init", "database-status"]);
   await handlers.get("session_start")![0]!({}, ctx);
   assert.deepEqual(tools, []);
   assert.deepEqual(statuses, [undefined]);
@@ -137,7 +149,14 @@ async function testDynamicRegistration() {
   writeConfig(dir, { version: 1, sources: [{ name: "app", dialect: "mysql", options: { host: "localhost", user: "app" } }] });
   await handlers.get("before_agent_start")![0]!({ cwd: dir, systemPrompt: "base" }, ctx);
   assert.equal(tools.length, 8);
-  assert.deepEqual(commands, ["database-init"]);
+  assert.deepEqual(commands, ["database-init", "database-status"]);
+
+  // A config file that fails to load keeps tools registered but surfaces the
+  // config error in the status instead of claiming there is no config.
+  writeConfig(dir, { version: 1, sources: [{ name: "bad", dialect: "unsupported", options: {} }] });
+  await handlers.get("session_start")![0]!({}, ctx);
+  assert.equal(tools.length, 8);
+  assert.deepEqual(statuses, [undefined, "database: config error"]);
 }
 
 function testDatabaseContextPrompt() {
@@ -163,6 +182,8 @@ function testDatabaseContextPrompt() {
   assert.match(prompt, /default source selects only the connection, never a database/);
   assert.match(prompt, /database_query and database_list_tables, always pass database/);
   assert.match(prompt, /If the database is unknown, call database_list_databases first/);
+  assert.match(prompt, /CREATE MATERIALIZED VIEW/);
+  assert.match(prompt, /INSERT \.\.\. SELECT/);
   const noConfigDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-no-prompt-"));
   assert.equal(buildDatabaseContextPrompt(noConfigDir), undefined);
 }
@@ -197,7 +218,7 @@ async function testToolPromptMetadata() {
   assert.equal(__test__.formatWriteSqlForUi("INSERT INTO users (id, name) VALUES (1, 'Lin'), (2, 'Pi')"), "INSERT INTO users (id, name)\nVALUES\n  (1, 'Lin'),\n  (2, 'Pi')");
   assert.equal(__test__.formatWriteSqlForUi("CREATE TABLE audit_log (id bigint, created_at timestamp)"), "CREATE TABLE audit_log (\n  id bigint,\n  created_at timestamp\n)");
   const confirmationSource = { name: "app_mysql", dialect: "mysql" } as never;
-  for (const statementKind of ["insert", "update", "create", "alter"] as const) {
+  for (const statementKind of ["insert", "update", "delete", "create", "alter"] as const) {
     const confirmation = __test__.buildWriteConfirmation(confirmationSource, { statement: "UPDATE users SET enabled = 0 WHERE id = 42", statementKind, databaseRequired: true });
     assert.equal(confirmation.title, `Database Write · ${statementKind.toUpperCase()} · MySQL`);
     assert.match(confirmation.message, new RegExp(`Action: ${statementKind.toUpperCase()}`));
@@ -341,9 +362,17 @@ async function testToolPromptMetadata() {
     tools.find((tool) => tool.name === "database_write")?.promptGuidelines?.join(" ") ?? "",
     /requires database for table-scoped writes/
   );
+  assert.match(
+    tools.find((tool) => tool.name === "database_write")?.promptGuidelines?.join(" ") ?? "",
+    /CREATE MATERIALIZED VIEW/
+  );
+  assert.match(
+    tools.find((tool) => tool.name === "database_write")?.promptGuidelines?.join(" ") ?? "",
+    /INSERT \.\.\. SELECT/
+  );
   assert.equal(
     (tools.find((tool) => tool.name === "database_write")?.parameters?.database as { description?: unknown } | undefined)?.description,
-    "Database for table-scoped writes; omit only for CREATE DATABASE"
+    "Database for table-scoped writes; omit only for CREATE DATABASE and DROP DATABASE"
   );
 
   const callTitleDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-call-title-"));
@@ -471,8 +500,197 @@ async function testToolPromptMetadata() {
     const createDatabaseWrite = await writeTool!.execute!("test", { statement: "CREATE DATABASE smoke_test" }, undefined, () => {}, { cwd: noConfirmationDir, hasUI: false });
     assert.equal((createDatabaseWrite as { details: Record<string, unknown> }).details.executed, true);
     assert.deepEqual(writeDatabases, ["app_db", undefined]);
+
+    const unconfirmedInsertSelect = await writeTool!.execute!("test", { database: "app_db", statement: "INSERT INTO users (id) SELECT id FROM archived_users" }, undefined, () => {}, { cwd: noConfirmationDir, hasUI: false });
+    const unconfirmedInsertSelectDetails = (unconfirmedInsertSelect as { details: Record<string, unknown> }).details;
+    assert.equal(writes, 2);
+    assert.equal(unconfirmedInsertSelectDetails.executed, false);
+    assert.equal(unconfirmedInsertSelectDetails.forced_confirm, true);
+    assert.match(String(unconfirmedInsertSelectDetails.reason), /Interactive confirmation is required/);
+
+    let insertSelectConfirmation: { title?: string; message?: string } = {};
+    const confirmedInsertSelect = await writeTool!.execute!("test", { database: "app_db", statement: "INSERT INTO users (id) SELECT id FROM archived_users" }, undefined, () => {}, {
+      cwd: noConfirmationDir,
+      hasUI: true,
+      ui: {
+        confirm(title: string, message: string) {
+          insertSelectConfirmation = { title, message };
+          return true;
+        }
+      }
+    });
+    const confirmedInsertSelectDetails = (confirmedInsertSelect as { details: Record<string, unknown> }).details;
+    assert.equal(writes, 3);
+    assert.equal(confirmedInsertSelectDetails.executed, true);
+    assert.equal(confirmedInsertSelectDetails.forced_confirm, true);
+    assert.equal(insertSelectConfirmation.title, "Database Write · INSERT · MySQL");
   } finally {
     mysqlAdapter.write = originalWrite;
+  }
+
+  const materializedViewDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-materialized-view-"));
+  writeConfig(materializedViewDir, {
+    version: 1,
+    default_source: "analytics",
+    sources: [
+      { name: "analytics", dialect: "clickhouse", allow_write: true, write_confirm: false, options: { url: "http://localhost:8123", username: "writer" } }
+    ]
+  });
+  const originalClickHouseWrite = clickhouseAdapter.write;
+  let materializedViewWrites = 0;
+  clickhouseAdapter.write = async (source, database, write) => {
+    materializedViewWrites += 1;
+    return {
+      source: source.name,
+      dialect: source.dialect,
+      database,
+      executed: true,
+      cancelled: false,
+      statement_kind: write.statementKind
+    };
+  };
+  try {
+    const materializedViewWrite = await writeTool!.execute!("test", {
+      database: "analytics",
+      statement: "CREATE MATERIALIZED VIEW event_counts TO event_counts_target AS SELECT event_type, count() AS total FROM events GROUP BY event_type"
+    }, undefined, () => {}, { cwd: materializedViewDir, hasUI: false });
+    const materializedViewDetails = (materializedViewWrite as { details: Record<string, unknown> }).details;
+    assert.equal(materializedViewWrites, 1);
+    assert.equal(materializedViewDetails.executed, true);
+    assert.equal(materializedViewDetails.statement_kind, "create");
+    assert.equal(materializedViewDetails.write_confirm, false);
+    assert.equal(materializedViewDetails.forced_confirm, undefined);
+
+    const clusteredMaterializedView = await writeTool!.execute!("test", {
+      database: "analytics",
+      statement: "CREATE MATERIALIZED VIEW event_counts_cluster ON CLUSTER analytics_cluster TO event_counts_target AS SELECT event_type FROM events"
+    }, undefined, () => {}, { cwd: materializedViewDir, hasUI: false });
+    const clusteredMaterializedViewDetails = (clusteredMaterializedView as { details: Record<string, unknown> }).details;
+    assert.equal(materializedViewWrites, 2);
+    assert.equal(clusteredMaterializedViewDetails.executed, true);
+    assert.equal(clusteredMaterializedViewDetails.write_confirm, false);
+    assert.equal(clusteredMaterializedViewDetails.forced_confirm, undefined);
+
+    const unconfirmedClickHouseInsertSelect = await writeTool!.execute!("test", {
+      database: "analytics",
+      statement: "INSERT INTO event_counts_target SELECT event_type FROM events"
+    }, undefined, () => {}, { cwd: materializedViewDir, hasUI: false });
+    const unconfirmedClickHouseInsertSelectDetails = (unconfirmedClickHouseInsertSelect as { details: Record<string, unknown> }).details;
+    assert.equal(materializedViewWrites, 2);
+    assert.equal(unconfirmedClickHouseInsertSelectDetails.executed, false);
+    assert.equal(unconfirmedClickHouseInsertSelectDetails.forced_confirm, true);
+    assert.match(String(unconfirmedClickHouseInsertSelectDetails.reason), /Interactive confirmation is required/);
+
+    let replacementConfirmation: { title?: string; message?: string } = {};
+    const replacementMaterializedView = await writeTool!.execute!("test", {
+      database: "analytics",
+      statement: "CREATE OR REPLACE MATERIALIZED VIEW event_counts TO event_counts_target AS SELECT event_type FROM events"
+    }, undefined, () => {}, {
+      cwd: materializedViewDir,
+      hasUI: true,
+      ui: {
+        confirm(title: string, message: string) {
+          replacementConfirmation = { title, message };
+          return true;
+        }
+      }
+    });
+    const replacementMaterializedViewDetails = (replacementMaterializedView as { details: Record<string, unknown> }).details;
+    assert.equal(materializedViewWrites, 3);
+    assert.equal(replacementMaterializedViewDetails.executed, true);
+    assert.equal(replacementMaterializedViewDetails.forced_confirm, true);
+    assert.equal(replacementConfirmation.title, "Database Write · CREATE · ClickHouse");
+  } finally {
+    clickhouseAdapter.write = originalClickHouseWrite;
+  }
+
+  const deletePolicyDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-delete-confirmation-"));
+  writeConfig(deletePolicyDir, {
+    version: 1,
+    default_source: "cleanup_mysql",
+    sources: [
+      { name: "cleanup_mysql", dialect: "mysql", allow_write: true, write_confirm: false, options: { host: "localhost", user: "writer" } }
+    ]
+  });
+  const originalDeleteWrite = mysqlAdapter.write;
+  let deleteWrites = 0;
+  mysqlAdapter.write = async (source, database, write) => {
+    deleteWrites += 1;
+    return {
+      source: source.name,
+      dialect: source.dialect,
+      database,
+      executed: true,
+      cancelled: false,
+      statement_kind: write.statementKind,
+      affected_rows: 3
+    };
+  };
+  try {
+    // DELETE always requires interactive confirmation even when write_confirm is off.
+    const unconfirmedDelete = await writeTool!.execute!("test", { database: "app_db", statement: "DELETE FROM users WHERE id = 42" }, undefined, () => {}, { cwd: deletePolicyDir, hasUI: false });
+    const unconfirmedDeleteDetails = (unconfirmedDelete as { details: Record<string, unknown> }).details;
+    assert.equal(deleteWrites, 0);
+    assert.equal(unconfirmedDeleteDetails.executed, false);
+    assert.equal(unconfirmedDeleteDetails.cancelled, false);
+    assert.equal(unconfirmedDeleteDetails.statement_kind, "delete");
+    assert.equal(unconfirmedDeleteDetails.forced_confirm, true);
+    assert.match(String(unconfirmedDeleteDetails.reason), /Interactive confirmation is required/);
+    // Confirmed DELETE executes and reports the destructive policy confirmation.
+    let deleteConfirmation: { title?: string; message?: string } = {};
+    const confirmedDelete = await writeTool!.execute!("test", { database: "app_db", statement: "DELETE FROM users WHERE id = 42" }, undefined, () => {}, {
+      cwd: deletePolicyDir,
+      hasUI: true,
+      ui: {
+        confirm(title: string, message: string) {
+          deleteConfirmation = { title, message };
+          return true;
+        }
+      }
+    });
+    const confirmedDeleteDetails = (confirmedDelete as { details: Record<string, unknown>; content: Array<{ text?: string }> }).details;
+    assert.equal(deleteWrites, 1);
+    assert.equal(confirmedDeleteDetails.executed, true);
+    assert.equal(confirmedDeleteDetails.statement_kind, "delete");
+    assert.equal(confirmedDeleteDetails.write_confirm, false);
+    assert.equal(confirmedDeleteDetails.forced_confirm, true);
+    assert.equal(deleteConfirmation.title, "Database Write · DELETE · MySQL");
+    assert.match(String((confirmedDelete as { content: Array<{ text?: string }> }).content[0]?.text), /Confirmation: required by operation safety policy/);
+    // Other destructive kinds (TRUNCATE) follow the same forced-confirmation policy.
+    let truncateConfirmation: { title?: string; message?: string } = {};
+    const confirmedTruncate = await writeTool!.execute!("test", { database: "app_db", statement: "TRUNCATE TABLE users" }, undefined, () => {}, {
+      cwd: deletePolicyDir,
+      hasUI: true,
+      ui: {
+        confirm(title: string, message: string) {
+          truncateConfirmation = { title, message };
+          return true;
+        }
+      }
+    });
+    const confirmedTruncateDetails = (confirmedTruncate as { details: Record<string, unknown> }).details;
+    assert.equal(deleteWrites, 2);
+    assert.equal(confirmedTruncateDetails.executed, true);
+    assert.equal(confirmedTruncateDetails.statement_kind, "truncate");
+    assert.equal(confirmedTruncateDetails.forced_confirm, true);
+    assert.equal(truncateConfirmation.title, "Database Write · TRUNCATE · MySQL");
+    // Destructive statements are blocked entirely when allow_write is false.
+    const readonlyDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-destructive-readonly-"));
+    writeConfig(readonlyDir, {
+      version: 1,
+      default_source: "readonly_mysql",
+      sources: [
+        { name: "readonly_mysql", dialect: "mysql", allow_write: false, options: { host: "localhost", user: "reader" } }
+      ]
+    });
+    const blockedDelete = await writeTool!.execute!("test", { database: "app_db", statement: "DELETE FROM users WHERE id = 42" }, undefined, () => {}, { cwd: readonlyDir, hasUI: false });
+    const blockedDeleteDetails = (blockedDelete as { details: Record<string, unknown> }).details;
+    assert.equal(blockedDeleteDetails.blocked, true);
+    assert.equal(blockedDeleteDetails.statement_kind, "unknown");
+    assert.equal(blockedDeleteDetails.allow_write, false);
+    assert.match(String(blockedDeleteDetails.reason), /Writes are disabled/);
+  } finally {
+    mysqlAdapter.write = originalDeleteWrite;
   }
 
   const events: string[] = [];
@@ -496,6 +714,58 @@ async function testToolPromptMetadata() {
   assert.deepEqual(events, ["first-start", "other", "first-end", "second"]);
 }
 
+function testDatabaseStatusText() {
+  const single = { defaultSource: "", sources: [{ name: "mysql-192.168.27.148" }] };
+  assert.equal(databaseStatusText(single), "database: mysql-192.168.27.148");
+  assert.equal(databaseStatusText({ defaultSource: "app", sources: [{ name: "app" }, { name: "analytics" }] }), "database: app +1");
+  assert.equal(databaseStatusText({ defaultSource: "", sources: [{ name: "app" }, { name: "analytics" }, { name: "logs" }] }), "database: 3 sources");
+}
+
+function testSourceTree() {
+  const nodes: SourceTreeNode[] = [
+    { name: "mysql-a", dialect: "mysql", default: true, host: "127.0.0.1:3306", database: "app", allow_write: true, write_confirm: false, query_timeout_ms: 30_000, max_rows: 100 },
+    { name: "ch-b", dialect: "clickhouse", default: false, host: "http://127.0.0.1:8123", database: "analytics", allow_write: false, write_confirm: true, query_timeout_ms: 30_000, max_rows: 100 }
+  ];
+  const validColors = new Set(["border", "accent", "dim", "muted", "success", "text"]);
+  const usedColors = new Set<string>();
+  const theme = {
+    fg: (color: string, text: string) => {
+      usedColors.add(color);
+      return text;
+    },
+    bold: (text: string) => text
+  };
+  let renders = 0;
+  let closed = false;
+  const tui = { requestRender() { renders++; } };
+  const component = createSourceTreeComponent(tui, "cfg.json", nodes, theme, () => { closed = true; });
+
+  const collapsed = component.render(80).join("\n");
+  assert.match(collapsed, /Database Sources · 2/);
+  assert.match(collapsed, /mysql-a \(mysql\) · default/);
+  assert.match(collapsed, /host\s+127\.0\.0\.1:3306/);
+  assert.match(collapsed, /▼ mysql-a/);
+  assert.match(collapsed, /▶ ch-b/);
+  assert.doesNotMatch(collapsed, /http:\/\/127\.0\.0\.1:8123/);
+  assert.equal([...usedColors].every((color) => validColors.has(color)), true);
+  assert.equal(usedColors.has("text"), true);
+
+  component.handleInput("down");
+  component.handleInput("enter");
+  assert.ok(renders >= 2);
+  const expanded = component.render(80).join("\n");
+  assert.match(expanded, /▼ ch-b/);
+  assert.match(expanded, /http:\/\/127\.0\.0\.1:8123/);
+  assert.match(expanded, /confirm on/);
+
+  component.handleInput("up");
+  component.handleInput("enter");
+  assert.doesNotMatch(component.render(80).join("\n"), /127\.0\.0\.1:3306/);
+
+  component.handleInput("escape");
+  assert.equal(closed, true);
+}
+
 function testWriteBoundaries() {
   const mysql = {
     name: "mysql",
@@ -513,9 +783,33 @@ function testWriteBoundaries() {
   assert.equal(mysqlAdapter.validateWrite(mysql, "CREATE TABLE audit_log (id bigint)").databaseRequired, true);
   assert.equal(mysqlAdapter.validateWrite(mysql, "ALTER TABLE users ADD COLUMN nickname varchar(32)").statementKind, "alter");
   assert.throws(() => mysqlAdapter.validateWrite(mysql, "UPDATE users SET name = 'a'"), /WHERE clause/);
-  assert.throws(() => mysqlAdapter.validateWrite(mysql, "INSERT INTO users SELECT id FROM archived"), /support only/);
-  assert.throws(() => mysqlAdapter.validateWrite(mysql, "DELETE FROM users WHERE id = 1"), /support only/);
+  assert.equal(mysqlAdapter.validateWrite(mysql, "INSERT INTO users SELECT id FROM archived").statementKind, "insert");
+  assert.equal(mysqlAdapter.validateWrite(mysql, "INSERT INTO users (id) SELECT id FROM archived").forceConfirm, true);
+  assert.throws(() => mysqlAdapter.validateWrite(mysql, "INSERT INTO users SET id = 1"), /support only/);
   assert.throws(() => mysqlAdapter.validateWrite(mysql, "ALTER TABLE users ADD COLUMN nickname varchar(32), DROP COLUMN old_name"), /destructive ALTER/);
+  assert.equal(mysqlAdapter.validateWrite(mysql, "DELETE FROM users WHERE id = 1").statementKind, "delete");
+  assert.equal(mysqlAdapter.validateWrite(mysql, "DELETE FROM users WHERE id = 1").databaseRequired, true);
+  assert.equal(mysqlAdapter.validateWrite(mysql, "DELETE FROM audit_log WHERE created_at < '2024-01-01' ORDER BY id LIMIT 10").statementKind, "delete");
+  assert.equal(mysqlAdapter.validateWrite(mysql, "DELETE FROM users WHERE id = 1 LIMIT 1").statementKind, "delete");
+  assert.throws(() => mysqlAdapter.validateWrite(mysql, "DELETE FROM users"), /WHERE clause/);
+  assert.throws(() => mysqlAdapter.validateWrite(mysql, "DELETE FROM users ORDER BY id"), /WHERE clause/);
+  assert.throws(() => mysqlAdapter.validateWrite(mysql, "DELETE u FROM users u JOIN orders o ON o.user_id = u.id WHERE u.name = 'a'"), /single-table/);
+  assert.throws(() => mysqlAdapter.validateWrite(mysql, "DELETE FROM users, orders USING users JOIN orders WHERE users.id = orders.user_id"), /single-table/);
+  assert.equal(mysqlAdapter.validateWrite(mysql, "TRUNCATE users").statementKind, "truncate");
+  assert.equal(mysqlAdapter.validateWrite(mysql, "TRUNCATE TABLE users").statementKind, "truncate");
+  assert.equal(mysqlAdapter.validateWrite(mysql, "TRUNCATE TABLE users").databaseRequired, true);
+  assert.throws(() => mysqlAdapter.validateWrite(mysql, "TRUNCATE TABLE users, orders"), /single-table/);
+  assert.equal(mysqlAdapter.validateWrite(mysql, "DROP TABLE IF EXISTS users").statementKind, "drop");
+  assert.equal(mysqlAdapter.validateWrite(mysql, "DROP TABLE IF EXISTS users").databaseRequired, true);
+  assert.equal(mysqlAdapter.validateWrite(mysql, "DROP DATABASE IF EXISTS app_db").statementKind, "drop");
+  assert.equal(mysqlAdapter.validateWrite(mysql, "DROP DATABASE IF EXISTS app_db").databaseRequired, false);
+  assert.throws(() => mysqlAdapter.validateWrite(mysql, "DROP TABLE users, orders"), /single-object/);
+  assert.throws(() => mysqlAdapter.validateWrite(mysql, "DROP VIEW IF EXISTS v"), /single-object/);
+  assert.equal(mysqlAdapter.validateWrite(mysql, "RENAME TABLE users TO users_archive").statementKind, "rename");
+  assert.equal(mysqlAdapter.validateWrite(mysql, "RENAME TABLE app_db.users TO archive.users").databaseRequired, true);
+  assert.throws(() => mysqlAdapter.validateWrite(mysql, "RENAME TABLE a TO b, c TO d"), /single-pair/);
+  assert.equal(mysqlAdapter.validateWrite(mysql, "REPLACE INTO users (id) VALUES (1)").statementKind, "replace");
+  assert.throws(() => mysqlAdapter.validateWrite(mysql, "REPLACE INTO users SELECT id FROM archived"), /support only/);
 
   const clickhouse = {
     name: "clickhouse",
@@ -528,10 +822,47 @@ function testWriteBoundaries() {
   };
   assert.equal(clickhouseAdapter.validateWrite(clickhouse, "INSERT INTO events (id) VALUES (1)").statementKind, "insert");
   assert.equal(clickhouseAdapter.validateWrite(clickhouse, "CREATE DATABASE IF NOT EXISTS analytics").databaseRequired, false);
+  assert.equal(clickhouseAdapter.validateWrite(clickhouse, "CREATE MATERIALIZED VIEW event_counts TO event_counts_target AS SELECT event_type, count() AS total FROM events GROUP BY event_type").statementKind, "create");
+  assert.equal(clickhouseAdapter.validateWrite(clickhouse, "CREATE MATERIALIZED VIEW event_counts TO event_counts_target AS SELECT event_type FROM events").databaseRequired, true);
+  assert.equal(clickhouseAdapter.validateWrite(clickhouse, "CREATE MATERIALIZED VIEW IF NOT EXISTS event_rollup ENGINE = SummingMergeTree() ORDER BY event_type AS SELECT event_type, count() AS total FROM events GROUP BY event_type").statementKind, "create");
+  assert.equal(clickhouseAdapter.validateWrite(clickhouse, "CREATE MATERIALIZED VIEW event_counts_cluster ON CLUSTER analytics_cluster TO event_counts_target AS SELECT event_type FROM events").forceConfirm, undefined);
+  assert.equal(clickhouseAdapter.validateWrite(clickhouse, "CREATE OR REPLACE MATERIALIZED VIEW event_counts TO event_counts_target AS SELECT event_type FROM events").forceConfirm, true);
+  assert.throws(() => clickhouseAdapter.validateWrite(clickhouse, "CREATE OR REPLACE MATERIALIZED VIEW IF NOT EXISTS event_counts TO event_counts_target AS SELECT event_type FROM events"), /cannot combine OR REPLACE/);
+  assert.throws(() => clickhouseAdapter.validateWrite(clickhouse, "CREATE MATERIALIZED VIEW event_counts POPULATE TO event_counts_target AS SELECT event_type FROM events"), /materialized view writes support only/);
+  assert.throws(() => clickhouseAdapter.validateWrite(clickhouse, "CREATE MATERIALIZED VIEW event_counts REFRESH EVERY 1 HOUR TO event_counts_target AS SELECT event_type FROM events"), /materialized view writes support only/);
+  assert.throws(() => clickhouseAdapter.validateWrite(clickhouse, "CREATE MATERIALIZED VIEW event_rollup ENGINE = MergeTree() ORDER BY event_type POPULATE AS SELECT event_type FROM events"), /do not support POPULATE/);
+  assert.equal(clickhouseAdapter.validateWrite(clickhouse, "CREATE MATERIALIZED VIEW event_counts ON CLUSTER c TO event_counts_target AS SELECT event_type FROM events").forceConfirm, undefined);
+  assert.equal(clickhouseAdapter.validateWrite(clickhouse, "CREATE OR REPLACE MATERIALIZED VIEW event_counts ON CLUSTER c TO event_counts_target AS SELECT event_type FROM events").forceConfirm, true);
   assert.equal(clickhouseAdapter.validateWrite(clickhouse, "ALTER TABLE events ADD COLUMN name String").statementKind, "alter");
-  assert.throws(() => clickhouseAdapter.validateWrite(clickhouse, "INSERT INTO events SELECT id FROM other_events"), /support only/);
-  assert.throws(() => clickhouseAdapter.validateWrite(clickhouse, "ALTER TABLE events DELETE WHERE id = 1"), /destructive or mutation/);
+  assert.equal(clickhouseAdapter.validateWrite(clickhouse, "INSERT INTO events SELECT id FROM other_events").statementKind, "insert");
+  assert.equal(clickhouseAdapter.validateWrite(clickhouse, "INSERT INTO events (id) SELECT id FROM other_events").forceConfirm, true);
+  assert.throws(() => clickhouseAdapter.validateWrite(clickhouse, "INSERT INTO events FORMAT JSONEachRow"), /support only/);
   assert.throws(() => clickhouseAdapter.validateWrite(clickhouse, "CREATE TABLE events ON CLUSTER c (id UInt64)"), /ON CLUSTER/);
+  assert.equal(clickhouseAdapter.validateWrite(clickhouse, "DELETE FROM events WHERE id = 1").statementKind, "delete");
+  assert.equal(clickhouseAdapter.validateWrite(clickhouse, "DELETE FROM analytics.events WHERE created_at < now() - INTERVAL 30 DAY").statementKind, "delete");
+  assert.throws(() => clickhouseAdapter.validateWrite(clickhouse, "DELETE FROM events"), /support only/);
+  assert.throws(() => clickhouseAdapter.validateWrite(clickhouse, "DELETE FROM events ON CLUSTER c WHERE id = 1"), /ON CLUSTER/);
+  assert.equal(clickhouseAdapter.validateWrite(clickhouse, "ALTER TABLE events DELETE WHERE id = 1").statementKind, "delete");
+  assert.equal(clickhouseAdapter.validateWrite(clickhouse, "ALTER TABLE events DELETE WHERE id = 1").databaseRequired, true);
+  assert.equal(clickhouseAdapter.validateWrite(clickhouse, "ALTER TABLE events DELETE WHERE name = 'a,b'").statementKind, "delete");
+  assert.equal(clickhouseAdapter.validateWrite(clickhouse, "ALTER TABLE events DELETE WHERE id IN (1, 2)").statementKind, "delete");
+  assert.throws(() => clickhouseAdapter.validateWrite(clickhouse, "ALTER TABLE events DELETE WHERE id = 1, UPDATE flag = 1 WHERE id = 2"), /single command/);
+  assert.throws(() => clickhouseAdapter.validateWrite(clickhouse, "ALTER TABLE events DELETE WHERE id = 1, DROP COLUMN name"), /destructive or mutation/);
+  assert.equal(clickhouseAdapter.validateWrite(clickhouse, "TRUNCATE TABLE IF EXISTS events").statementKind, "truncate");
+  assert.throws(() => clickhouseAdapter.validateWrite(clickhouse, "TRUNCATE events"), /support only/);
+  assert.equal(clickhouseAdapter.validateWrite(clickhouse, "DROP TABLE IF EXISTS events").statementKind, "drop");
+  assert.equal(clickhouseAdapter.validateWrite(clickhouse, "DROP DATABASE IF EXISTS analytics").databaseRequired, false);
+  assert.throws(() => clickhouseAdapter.validateWrite(clickhouse, "DROP TABLE events, other"), /single-object/);
+  assert.equal(clickhouseAdapter.validateWrite(clickhouse, "RENAME TABLE events TO events_archive").statementKind, "rename");
+  assert.throws(() => clickhouseAdapter.validateWrite(clickhouse, "RENAME TABLE a TO b, c TO d"), /single-pair/);
+  assert.throws(() => clickhouseAdapter.validateWrite(clickhouse, "ALTER TABLE events DROP COLUMN name"), /destructive or mutation/);
+  const readonlyMysql = { ...mysql, name: "readonly-mysql", allowWrite: false };
+  assert.throws(() => mysqlAdapter.validateWrite(readonlyMysql, "INSERT INTO users (id) VALUES (1)"), /Writes are disabled/);
+  assert.throws(() => mysqlAdapter.validateWrite(readonlyMysql, "INSERT INTO users (id) SELECT id FROM archived"), /Writes are disabled/);
+  assert.throws(() => mysqlAdapter.validateWrite(readonlyMysql, "DELETE FROM users WHERE id = 1"), /Writes are disabled/);
+  const readonlyClickHouse = { ...clickhouse, name: "readonly-clickhouse", allowWrite: false };
+  assert.throws(() => clickhouseAdapter.validateWrite(readonlyClickHouse, "INSERT INTO events (id) SELECT id FROM archived_events"), /Writes are disabled/);
+  assert.throws(() => mysqlAdapter.validateWrite(readonlyMysql, "TRUNCATE TABLE users"), /Writes are disabled/);
 }
 
 testSqlScanner();
@@ -542,4 +873,6 @@ await testDynamicRegistration();
 testDatabaseContextPrompt();
 await testToolPromptMetadata();
 testWriteBoundaries();
+testDatabaseStatusText();
+testSourceTree();
 console.log("pi-database self-check OK");

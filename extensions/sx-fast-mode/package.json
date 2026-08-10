@@ -1,0 +1,13 @@
+{
+  "name": "sx-fast-mode",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "check": "node --experimental-strip-types --check index.ts && npm test"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}

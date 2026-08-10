@@ -112,8 +112,8 @@ export function sourceWithDatabase(source: ResolvedSource, database: string): Re
 function resolveSource(value: unknown, configPath: string): ResolvedSource {
   if (!isRecord(value)) throw new Error(`Invalid ${configPath}: every source must be an object.`);
   const name = asString(value.name);
-  if (!name || !/^[a-z][a-z0-9_-]*$/i.test(name)) {
-    throw new Error(`Invalid ${configPath}: source names must use letters, digits, underscores, or hyphens.`);
+  if (!name || !/^[a-z][a-z0-9_.-]*$/i.test(name)) {
+    throw new Error(`Invalid ${configPath}: source names must use letters, digits, underscores, dots, or hyphens.`);
   }
   if (!isDialect(value.dialect)) throw new Error(`Invalid ${configPath}: source "${name}" has an unsupported dialect.`);
   if (!isRecord(value.options)) throw new Error(`Invalid ${configPath}: source "${name}" requires an options object.`);
@@ -169,6 +169,13 @@ export function selectSource(config: ResolvedProjectConfig, requested?: string):
   throw new Error("Multiple database sources are configured without default_source. Pass source or call database_list_sources.");
 }
 
+export function databaseStatusText(config: { defaultSource?: string; sources: readonly { name: string }[] }): string {
+  const { sources, defaultSource } = config;
+  if (sources.length === 1) return `database: ${sources[0]!.name}`;
+  if (defaultSource) return `database: ${defaultSource} +${sources.length - 1}`;
+  return `database: ${sources.length} sources`;
+}
+
 export function buildDatabaseContextPrompt(cwd: string): string | undefined {
   try {
     const config = loadProjectConfig(cwd);
@@ -182,7 +189,8 @@ export function buildDatabaseContextPrompt(cwd: string): string | undefined {
       "For requests about these configured databases, use the database_* tool family.",
       "Use database_list_tables only when the database is known; use database_search_tables when the target table is unknown; use database_describe_table before guessing columns; use database_ping for connectivity; and use database_query only for read-only SQL.",
       "A default source selects only the connection, never a database. When the intended source is unclear, call database_list_sources first; omit source only for the listed default source or when exactly one source exists. For database_query and database_list_tables, always pass database. If the database is unknown, call database_list_databases first.",
-      "Use database_write only for an explicit user-requested allowed change. It requires database for table-scoped writes; omit database only for CREATE DATABASE. It follows the selected source's confirmation policy and must not be retried automatically after a timeout or connection loss.",
+      "Use database_write only for an explicit user-requested allowed change. It requires database for table-scoped writes; omit database only for CREATE DATABASE and DROP DATABASE. ClickHouse supports CREATE MATERIALIZED VIEW ... TO ... AS SELECT or ... ENGINE = ... AS SELECT forms, including ON CLUSTER. CREATE OR REPLACE and INSERT ... SELECT (INSERT INTO <table> [(columns)] SELECT ...) always require interactive confirmation; POPULATE, refreshable/window views, DEFINER, and SQL SECURITY are rejected. It follows the selected source's confirmation policy and must not be retried automatically after a timeout or connection loss.",
+      "DELETE, TRUNCATE, DROP, RENAME, and REPLACE statements always require interactive confirmation regardless of write_confirm.",
       "If database_write returns blocked or unsupported, stop. State the selected source, dialect, and allow_write setting, then ask the user what to do. If its outcome is unknown, first verify the database with database_query or metadata tools and do not retry automatically. Do not bypass this policy with non-database_* tools or config edits."
     ].join("\n");
   } catch {

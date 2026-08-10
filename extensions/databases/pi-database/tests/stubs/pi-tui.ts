@@ -24,6 +24,10 @@ export class Text {
 export const Key = {
   enter: "enter",
   escape: "escape",
+  up: "up",
+  down: "down",
+  left: "left",
+  right: "right",
   ctrl(value: string): string {
     return `ctrl+${value}`;
   }

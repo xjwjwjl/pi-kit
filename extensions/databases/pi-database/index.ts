@@ -5,6 +5,7 @@ import { Type } from "@sinclair/typebox";
 import { clickhouseAdapter } from "./src/clickhouse.js";
 import {
   buildDatabaseContextPrompt,
+  databaseStatusText,
   findProjectConfigPath,
   getContextCwd,
   initializeProjectConfig,
@@ -12,6 +13,8 @@ import {
   selectSource
 } from "./src/config.js";
 import { mysqlAdapter } from "./src/mysql.js";
+import { createSourceTreeComponent } from "./src/source-tree.js";
+import type { SourceTreeNode, SourceTreeTheme } from "./src/source-tree.js";
 import { firstKeyword } from "./src/sql.js";
 import { DatabasePolicyError } from "./src/types.js";
 import type { DatabaseAdapter, ResolvedSource, ValidatedWrite, WriteResult } from "./src/types.js";
@@ -53,12 +56,18 @@ const QueryParams = Type.Object({
 
 const WriteParams = Type.Object({
   source: Type.Optional(Type.String({ description: "Configured database source name" })),
-  database: Type.Optional(Type.String({ minLength: 1, description: "Database for table-scoped writes; omit only for CREATE DATABASE" })),
+  database: Type.Optional(Type.String({ minLength: 1, description: "Database for table-scoped writes; omit only for CREATE DATABASE and DROP DATABASE" })),
   statement: Type.String({ description: "Single supported write statement" })
 });
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const DESTRUCTIVE_KINDS: ReadonlySet<ValidatedWrite["statementKind"]> = new Set(["delete", "drop", "truncate", "rename", "replace"]);
+
+function requiresForcedConfirmation(write: ValidatedWrite): boolean {
+  return write.forceConfirm === true || DESTRUCTIVE_KINDS.has(write.statementKind);
 }
 
 function adapterFor(source: ResolvedSource): DatabaseAdapter {
@@ -772,7 +781,7 @@ function formatRowCount(value: number): string {
 }
 
 function writeMetricParts(details: WriteResult): string[] {
-  if (details.statement_kind === "insert") {
+  if (details.statement_kind === "insert" || details.statement_kind === "replace") {
     const parts: string[] = [];
     if (typeof details.affected_rows === "number") parts.push(formatRowCount(details.affected_rows));
     if (typeof details.insert_id === "number" && details.insert_id !== 0) parts.push(`insert id ${details.insert_id}`);
@@ -827,7 +836,8 @@ function formatWrite(details: WriteResult): string {
   const target = writeTarget(details);
   const lines: string[] = [["Success", ...metrics].join(" · ")];
   if (target) lines.push(`Target: ${target}`);
-  if (details.write_confirm === false) lines.push("Confirmation: skipped by source policy");
+  if (details.forced_confirm) lines.push("Confirmation: required by operation safety policy");
+  else if (details.write_confirm === false) lines.push("Confirmation: skipped by source policy");
   if (typeof details.warning_count === "number" && details.warning_count > 0) lines.push(`Warnings: ${details.warning_count}`);
   if (typeof details.query_id === "string") lines.push(`Query ID: ${details.query_id}`);
   return formatWriteWithSql(details, lines);
@@ -848,9 +858,10 @@ function createWriteResultComponent(details: WriteResult, expanded: boolean, the
       }
       lines.push(truncateToWidth(status, width));
 
-      if (expanded && (details.write_confirm === false || (details.warning_count ?? 0) > 0 || details.query_id)) {
+      if (expanded && (details.write_confirm === false || details.forced_confirm || (details.warning_count ?? 0) > 0 || details.query_id)) {
         lines.push("");
-        if (details.write_confirm === false) lines.push(theme.fg("dim", "Confirmation: skipped by source policy"));
+        if (details.forced_confirm) lines.push(theme.fg("warning", "Confirmation: required by operation safety policy"));
+        else if (details.write_confirm === false) lines.push(theme.fg("dim", "Confirmation: skipped by source policy"));
         if ((details.warning_count ?? 0) > 0) lines.push(theme.fg("warning", `Warnings: ${details.warning_count}`));
         if (details.query_id) lines.push(theme.fg("dim", `Query ID: ${details.query_id}`));
       }
@@ -911,6 +922,31 @@ function registerCommands(pi: ExtensionAPI): void {
         return;
       }
       ctx.ui.notify(`${result.reason} Using ${result.configPath}`, "warning");
+    }
+  });
+
+  pi.registerCommand("database-status", {
+    description: "Show configured database sources as an interactive tree",
+    handler: async (_args, ctx) => {
+      let nodes: SourceTreeNode[];
+      let configPath: string;
+      try {
+        const config = loadProjectConfig(getContextCwd(ctx));
+        configPath = config.configPath;
+        nodes = config.sources.map((source) => {
+          const details = sourceDetails(source, source.name === config.defaultSource);
+          return { ...details, host: details.host ?? "" };
+        });
+      } catch (error) {
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
+        return;
+      }
+      if (ctx.mode === "tui" && typeof (ctx.ui as Record<string, unknown>).custom === "function") {
+        const custom = (ctx.ui as Record<string, unknown>).custom as (factory: (tui: { requestRender(force?: boolean): void }, theme: SourceTreeTheme, keybindings: unknown, done: (result: undefined) => void) => Component) => Promise<undefined>;
+        await custom((tui, theme, _keybindings, done) => createSourceTreeComponent(tui, configPath, nodes, theme, done));
+        return;
+      }
+      ctx.ui.notify(nodes.map((node) => `${node.name} (${node.dialect})${node.default ? " · default" : ""} · ${node.host || "—"}`).join("\n"), "info");
     }
   });
 }
@@ -1109,10 +1145,10 @@ function registerTools(pi: ExtensionAPI): void {
     name: "database_write",
     label: "Database Write",
     description: "Execute one supported write statement using the selected source confirmation policy.",
-    promptSnippet: "Execute a dialect-specific data or additive schema change using source write policy",
+    promptSnippet: "Execute a dialect-specific write (data or schema change) using the selected source policy",
     promptGuidelines: [
       "Use database_write only for an explicit user-requested change after selecting the correct source; never use bash or a local database client as a write fallback.",
-      "database_write requires database for table-scoped writes; omit database only for CREATE DATABASE. It follows the selected source confirmation policy and rejects destructive, delete, replacement, rename, multi-statement, and unsupported SQL. If it returns blocked, stop and explain the selected source policy to the user.",
+      "database_write requires database for table-scoped writes; omit database only for CREATE DATABASE and DROP DATABASE. ClickHouse supports standard CREATE MATERIALIZED VIEW ... TO ... AS SELECT or ... ENGINE = ... AS SELECT forms, including ON CLUSTER. CREATE OR REPLACE variants and INSERT ... SELECT (INSERT INTO <table> [(columns)] SELECT ...) require forced interactive confirmation; POPULATE, refreshable/window views, DEFINER, and SQL SECURITY are rejected. It follows the selected source confirmation policy and rejects multi-statement and unsupported SQL. DELETE, TRUNCATE, DROP, RENAME, and REPLACE always require interactive confirmation regardless of write_confirm. If it returns blocked, stop and explain the selected source policy to the user.",
       "If database_write reports outcome unknown after a timeout or lost connection, first use database_query or metadata tools to verify database state; do not retry automatically and never use bash or a database client to bypass policy."
     ],
     parameters: WriteParams,
@@ -1155,11 +1191,13 @@ function registerTools(pi: ExtensionAPI): void {
             write_confirm: source.writeConfirm,
             requested_statement: write.statement,
             reason: "database_write requires a database argument for this statement.",
-            next_action: "Pass database for this table-scoped write. CREATE DATABASE is the only supported write that omits database."
+            next_action: "Pass database for this table-scoped write. CREATE DATABASE and DROP DATABASE are the only supported writes that omit database."
           };
           return makeResult(result, formatWrite(result));
         }
-        if (source.writeConfirm) {
+        const forcedConfirm = requiresForcedConfirmation(write);
+        const requireConfirm = source.writeConfirm || forcedConfirm;
+        if (requireConfirm) {
           const confirmation = buildWriteConfirmation(source, write, database);
           const confirmed = await confirmWrite(ctx, confirmation);
           if (confirmed === undefined) {
@@ -1170,6 +1208,7 @@ function registerTools(pi: ExtensionAPI): void {
               cancelled: false,
               statement_kind: write.statementKind,
               write_confirm: true,
+              forced_confirm: forcedConfirm || undefined,
               database,
               requested_statement: write.statement,
               reason: "Interactive confirmation is required; no write was executed."
@@ -1184,6 +1223,7 @@ function registerTools(pi: ExtensionAPI): void {
               cancelled: true,
               statement_kind: write.statementKind,
               write_confirm: true,
+              forced_confirm: forcedConfirm || undefined,
               database,
               requested_statement: write.statement
             };
@@ -1195,6 +1235,7 @@ function registerTools(pi: ExtensionAPI): void {
           const result: WriteResult = {
             ...(await adapter.write(source, database, write, signal)),
             write_confirm: source.writeConfirm,
+            forced_confirm: forcedConfirm || undefined,
             requested_statement: write.statement
           };
           return makeResult(result, formatWrite(result));
@@ -1207,6 +1248,7 @@ function registerTools(pi: ExtensionAPI): void {
             cancelled: false,
             statement_kind: write.statementKind,
             write_confirm: source.writeConfirm,
+            forced_confirm: forcedConfirm || undefined,
             database,
             requested_statement: write.statement,
             outcome: "unknown",
@@ -1261,9 +1303,12 @@ export default function databaseExtension(pi: ExtensionAPI) {
     }
     try {
       const config = loadProjectConfig(getContextCwd(ctx));
-      ctx.ui.setStatus("pi-database", `database: ${config.sources.length} source${config.sources.length === 1 ? "" : "s"}`);
+      ctx.ui.setStatus("pi-database", ctx.ui.theme.fg("accent", databaseStatusText(config)));
     } catch {
-      ctx.ui.setStatus("pi-database", "database: no config");
+      // A config file exists but failed to load; keep the badge visible so the
+      // user knows the database extension is not usable, rather than silently
+      // pretending there is no config at all.
+      ctx.ui.setStatus("pi-database", ctx.ui.theme.fg("error", "database: config error"));
     }
   });
 

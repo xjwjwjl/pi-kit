@@ -222,8 +222,8 @@ function isActiveBashExecution(state: CompactBashState, startedAt: number | unde
 	return executionStarted || compactBashStatus(state) === "running" || compactBashStatus(state) === "pending";
 }
 
-export function registerCompactBash(pi: ExtensionAPI, cwd: string, displayOptionsSource: BashDisplayOptionsSource = {}, renderShellSource?: ToolRenderShellSource) {
-	const original = createBashToolDefinition(cwd);
+export function registerCompactBash(pi: ExtensionAPI, cwd: string, displayOptionsSource: BashDisplayOptionsSource = {}, renderShellSource?: ToolRenderShellSource, shellPath?: string) {
+	const original = createBashToolDefinition(cwd, shellPath ? { shellPath } : undefined);
 	const startedAtByToolCallId = new Map<string, number>();
 	const refreshTimerByToolCallId = new Map<string, BashRefreshTimerEntry>();
 

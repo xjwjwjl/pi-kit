@@ -1,0 +1,13 @@
+{
+  "name": "codex-websearch",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --experimental-strip-types --check index.ts && node --experimental-strip-types --check src/native-search.ts",
+    "test": "node --experimental-strip-types --import ./tests/register-ts-loader.mjs --test tests/*.test.ts"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}

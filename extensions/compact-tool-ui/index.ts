@@ -5,7 +5,7 @@ import {
 	DEFAULT_TOOL_RENDER_SHELL,
 	type MutableCompactToolUiOptions,
 } from "./settings/options.js";
-import { loadCompactToolUiSettings } from "./settings/compact-tool-ui.js";
+import { loadCompactToolUiSettings, loadShellPath } from "./settings/compact-tool-ui.js";
 
 function registerLazyCompactToolUiSettingsCommand(pi: ExtensionAPI, displayOptions: MutableCompactToolUiOptions) {
 	pi.registerCommand("compact-tool-ui-settings", {
@@ -30,7 +30,14 @@ async function registerCompactRenderers(pi: ExtensionAPI, cwd: string, displayOp
 		import("./renderers/edit.js"),
 	]);
 
-	registerCompactBash(pi, cwd, () => displayOptions.bash, () => displayOptions.renderShell);
+	let shellPath: string | undefined;
+	try {
+		shellPath = await loadShellPath();
+	} catch {
+		shellPath = undefined;
+	}
+
+	registerCompactBash(pi, cwd, () => displayOptions.bash, () => displayOptions.renderShell, shellPath);
 	registerCompactWrite(pi, cwd, () => displayOptions.renderShell);
 	registerCompactRead(pi, cwd, () => displayOptions.renderShell);
 	registerCompactEdit(pi, cwd, () => displayOptions.edit, () => displayOptions.renderShell);

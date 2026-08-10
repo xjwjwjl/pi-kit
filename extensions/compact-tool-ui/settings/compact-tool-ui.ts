@@ -1,4 +1,5 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import path from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
@@ -167,4 +168,22 @@ export async function saveCompactToolUiSettings(settings: CompactToolUiSettings)
 	const root = await readSettingsFile(filePath);
 	root[SETTINGS_KEY] = mergeRawCompactToolUiSettings(root[SETTINGS_KEY], settings);
 	await writeSettingsFile(filePath, root);
+}
+
+function expandHome(p: string): string {
+	if (p === "~") return homedir();
+	if (p.startsWith("~/") || p.startsWith("~\\")) return path.join(homedir(), p.slice(2));
+	return p;
+}
+
+/**
+ * Read the configured bash shell path from pi's global settings.json.
+ * The compact-tool-ui bash renderer overrides the built-in bash tool, so it
+ * must re-apply shellPath (and tilde-expand it) or execution falls back to
+ * PATH detection and fails on machines where bash is not discoverable.
+ */
+export async function loadShellPath(): Promise<string | undefined> {
+	const root = await readSettingsFile(globalSettingsPath());
+	const value = root.shellPath;
+	return typeof value === "string" && value.trim().length > 0 ? expandHome(value.trim()) : undefined;
 }

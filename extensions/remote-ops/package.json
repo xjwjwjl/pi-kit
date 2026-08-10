@@ -1,0 +1,32 @@
+{
+  "name": "remote-ops",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Project-scoped guarded remote command execution for Pi.",
+  "scripts": {
+    "test": "node --experimental-strip-types --import ./test/register-ts-loader.mjs --test test/**/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.80.7",
+    "@earendil-works/pi-tui": "0.80.7",
+    "@types/node": "24.12.4",
+    "typebox": "1.0.51",
+    "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "unbash": "^4.0.2"
+  }
+}

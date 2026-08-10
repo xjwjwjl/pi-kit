@@ -12,6 +12,15 @@ outputs/*
 # Ignore nested .git repos inside databases
 extensions/databases/**/.git
 
+# Local pi runtime config
+.pi/
+
+# Extension archive zips
+extensions/*.zip
+
+# Compiled binaries
+extensions/remote-ops/piexec/piexec
+
 # Test and coverage output
 coverage/
 .vitest/
