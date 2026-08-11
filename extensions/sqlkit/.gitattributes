@@ -1,5 +1,0 @@
-# Keep Unix shell scripts runnable on Linux/macOS.
-*.sh text eol=lf
-*.bash text eol=lf
-*.zsh text eol=lf
-*.fish text eol=lf
