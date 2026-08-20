@@ -55,35 +55,71 @@ export function formatUsage(data: TraeEntUsageResponse): string {
         if (pack === null || typeof pack !== "object" || Array.isArray(pack)) {
             throw new TraeProtocolError("权益包条目格式不正确");
         }
-        const limit = readNonNegativeNumber(pack.entitlement_base_info?.quota?.credits_limit, "credits_limit");
-        const used = readNonNegativeNumber(pack.usage?.credits_amount, "credits_amount");
-        totalLimit += limit;
+        // 缺失语义（TRAE 服务端实测）：
+        //  - quota 无 credits_limit（免费包只有 enable_* 权限位）→ 不限额度
+        //  - usage 无 credits_amount / usage 为空对象 {}            → 未消耗，已用 0
+        // 仅对上述“缺失”宽容；负数/非 number/非 finite 仍视为脏数据报错。
+        const limit = readNonNullOrNegativeNumber(pack.entitlement_base_info?.quota?.credits_limit, "credits_limit");
+        const used = readNonNullOrNegativeNumber(pack.usage?.credits_amount, "credits_amount", 0);
+        const unlimited = limit === undefined;
+        if (typeof limit === "number") totalLimit += limit;
         totalUsed += used;
         rows.push([
             String(pack.display_desc ?? "未知权益包"),
-            integer.format(limit),
+            formatNum(unlimited ? undefined : limit!, integer),
             decimal.format(used),
-            decimal.format(limit - used),
+            formatNum(unlimited ? undefined : limit! - used, decimal),
             formatEndTime(pack.entitlement_base_info?.end_time),
         ]);
     }
-    rows.push(["合计", integer.format(totalLimit), decimal.format(totalUsed), decimal.format(totalLimit - totalUsed), ""]);
 
+    // 固定列宽：权益包(12) 额度(7) 已用(9) 剩余(11) 有效期(右侧, 前导 2 空格)
+    const div = "-".repeat(48);
     const header = ["权益包", "额度", "已用", "剩余", "有效期"];
-    const allRows = [header, ...rows];
-    const widths = header.map((_, col) => Math.max(...allRows.map((row) => displayLen(row[col] ?? ""))));
-    const lines = allRows.map((row) =>
-        row.map((cell, col) => (col === 0 ? cell.padEnd(widths[col]) : cell.padStart(widths[col]))).join("  "),
-    );
-    return ["TRAE 积分余额", ...lines].join("\n");
+    const lines: string[] = [];
+    lines.push("TRAE 积分余额");
+    lines.push(div);
+    lines.push(rowToString(header));
+    lines.push(div);
+    for (const r of rows) lines.push(rowToString(r));
+    lines.push(div);
+    const total = ["合计", integer.format(totalLimit), decimal.format(totalUsed), decimal.format(totalLimit - totalUsed), ""] as const;
+    lines.push(rowToString(total));
+    return lines.join("\n");
 }
 
-/** 按 Unicode code point 计数做对齐（不做“>0xff 宽度 2”的手工宽度猜测）。 */
-function displayLen(text: string): number {
-    return Array.from(text).length;
+/** 按显示宽度填充：中文/全角算 2 格，其余算 1 格。 */
+function padVis(s: string, w: number, right = false): string {
+    const len = [...s].reduce((n, c) => n + (c.codePointAt(0)! > 0xff ? 2 : 1), 0);
+    const pad = Math.max(0, w - len);
+    return right ? " ".repeat(pad) + s : s + " ".repeat(pad);
 }
 
-function readNonNegativeNumber(value: unknown, field: string): number {
+/** 权限数值不确定（不限额度）时按“无限/不限”显示。 */
+function formatNum(value: number | undefined, fmt: Intl.NumberFormat): string {
+    return value === undefined ? "不限" : fmt.format(value);
+}
+
+/** 固定列宽拼一行：权益包(12 左对齐) + 额度(7) + 已用(9) + 剩余(11) + 有效期(右侧 2 空格)。 */
+function rowToString(row: readonly unknown[]): string {
+    const name = String(row[0] ?? "");
+    const limit = String(row[1] ?? "");
+    const used = String(row[2] ?? "");
+    const remain = String(row[3] ?? "");
+    const end = String(row[4] ?? "");
+    return padVis(name, 12) + "  " + padVis(limit, 5, true) + "  " + padVis(used, 9, true) + "  " + padVis(remain, 11, true) + "  " + end;
+}
+
+/**
+ * 容错读取权益数字：
+ *  - missing 时返回 fallback（credits_amount 缺失=0；credits_limit 缺失=unlimited/undefined 表示不限额度）
+ *  - 负数 / 非 number / 非 finite 仍算脏数据，抛协议错误，绝不静默归零。
+ * 重载：传了 fallback 即保证返回 number；否则可能为 undefined 表示“不限”。
+ */
+function readNonNullOrNegativeNumber(value: unknown, field: string, fallback: number, ..._: never[]): number;
+function readNonNullOrNegativeNumber(value: unknown, field: string, fallback?: undefined): number | undefined;
+function readNonNullOrNegativeNumber(value: unknown, field: string, fallback?: number): number | undefined {
+    if (value === undefined || value === null) return fallback;
     if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
         throw new TraeProtocolError(`权益包字段 ${field} 非法`);
     }
@@ -97,9 +133,14 @@ function formatEndTime(value: unknown): string {
         throw new TraeProtocolError("权益包 end_time 非法");
     }
     const ms = value > 1e12 ? value : value * 1000; // 秒 → 毫秒
-    return new Intl.DateTimeFormat("zh-CN", {
+    // 输出 MM-DD（横线分隔），用 Asia/Shanghai 避免 toISOString 的 UTC 日期前移。
+    const parts = new Intl.DateTimeFormat("en-CA", {
         timeZone: "Asia/Shanghai",
+        year: "numeric",
         month: "2-digit",
         day: "2-digit",
-    }).format(new Date(ms));
+    }).formatToParts(new Date(ms));
+    const get = (type: Intl.DateTimeFormatPartTypes): string =>
+        parts.find((p) => p.type === type)?.value ?? "";
+    return `${get("month")}-${get("day")}`;
 }

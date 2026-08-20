@@ -214,12 +214,12 @@ test("无 systemPrompt / 无 tools 时省略对应字段", () => {
     assert.equal(req.tools, undefined);
 });
 
-test("thinking map: 选择 max 时发送 reasoning.effort=max（对齐 deepseek provider）", () => {
+test("思考控制: 选择 max 时发送 reasoning.effort=max（对齐 deepseek provider，用户已实测）", () => {
     const req = build([{ role: "user", content: "hi", timestamp: 1 }], undefined, { reasoning: "max" });
     assert.deepEqual(req.reasoning, { effort: "max" });
 });
 
-test("thinking map: xhigh/low/off 均不发送 reasoning 字段（map 中为 null）", () => {
+test("思考控制: xhigh/low/off 均不发送 reasoning 字段（map 中为 null）", () => {
     const xhigh = build([{ role: "user", content: "hi", timestamp: 1 }], undefined, { reasoning: "xhigh" });
     assert.equal(xhigh.reasoning, undefined);
     const low = build([{ role: "user", content: "hi", timestamp: 1 }], undefined, { reasoning: "low" });
@@ -230,7 +230,7 @@ test("thinking map: xhigh/low/off 均不发送 reasoning 字段（map 中为 nul
     assert.equal(off.reasoning, undefined);
 });
 
-test("thinking map: 未选择思考等级时不发送 reasoning 字段（默认自动思考）", () => {
+test("思考控制: 未选择思考等级时不发送 reasoning 字段（默认自动思考）", () => {
     const req = build([{ role: "user", content: "hi", timestamp: 1 }]);
     assert.equal(req.reasoning, undefined);
 });

@@ -10,7 +10,7 @@ export interface TraeChatRequest {
     config_name: string;
     model: string;
     tools?: TraeToolDefinition[];
-    /** 思考控制（对齐用户 deepseek provider 的 openai-responses 格式；待实测验证） */
+    /** 思考控制（对齐用户 deepseek provider 的 openai-responses 格式；max 已实测） */
     reasoning?: { effort: string };
 }
 
@@ -95,7 +95,8 @@ export interface TraeGetUserInfoResult {
 export interface TraeEntitlementPack {
     display_desc?: string;
     entitlement_base_info?: {
-        quota?: { credits_limit?: number };
+        // 有额度包含 credits_limit；免费包只有 enable_* 权限位，无 credits_limit
+        quota?: { credits_limit?: number } & Record<string, unknown>;
         end_time?: number;
     };
     usage?: { credits_amount?: number };

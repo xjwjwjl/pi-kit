@@ -24,7 +24,7 @@ export const THINKING_REPLAY_POLICY = "as-text";
  * 思考控制策略：与用户 deepseek provider 配置（openai-responses）一致，
  * 仅当显式选择受支持的等级（max，见 model-catalog.ts 的 thinkingLevelMap）时
  * 发送 `reasoning: { effort }`；其余等级或不选择时不发送，保持模型自动思考。
- * 该 wire 字段为待实测验证项（若 TRAE 拒绝未知字段，删掉此策略并回退自动思考即可）。
+ * max 思考经用户实测可用。
  */
 export const THINKING_CONTROL_POLICY = "reasoning-effort";
 
@@ -38,8 +38,9 @@ function mapThinkingEffort(model: Model<Api>, level: ThinkingLevel | undefined):
 }
 
 /**
- * 组装 TRAE 请求体。注意：`options.maxTokens` 的请求级控制字段未验证，
- * 本函数有意不映射它；思考控制仅按 THINKING_CONTROL_POLICY 映射受支持等级。
+ * 组装 TRAE 请求体。
+ * 思考输出（reasoning_content）已验证可展示；请求级思考控制仅按
+ * THINKING_CONTROL_POLICY 映射受支持等级（max）。max_tokens 未实测，不发送。
  */
 export function buildTraeChatRequest(
     model: Model<Api>,

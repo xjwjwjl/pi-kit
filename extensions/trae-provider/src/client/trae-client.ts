@@ -16,6 +16,9 @@ export interface TraeRequestOptions {
     onResponse?: (response: ProviderResponse) => void | Promise<void>;
 }
 
+/** 非 2xx 诊断体最大读取字节；成功响应不受此限制。 */
+const ERROR_BODY_LIMIT = 4096;
+
 export class TraeClient {
     private readonly fetchFn: FetchFunction;
 
@@ -26,8 +29,13 @@ export class TraeClient {
     /** JSON 请求；非 2xx 或非法 JSON 均抛错，绝不把坏响应当成功。 */
     async requestJson<T>(request: TraeRequestOptions): Promise<T> {
         const response = await this.doFetch(request);
-        const text = await readLimitedText(response, 4096);
-        if (!response.ok) throw httpErrorFromResponse(response.status, text);
+        if (!response.ok) {
+            // 非 2xx：只读有限字节用于诊断（脱敏处理见 errors.ts）
+            const text = await readLimitedText(response, ERROR_BODY_LIMIT);
+            throw httpErrorFromResponse(response.status, text);
+        }
+        // 成功响应读完整 body：权益包等 JSON 可能远超 4KB，不能被截断。
+        const text = await response.text();
         try {
             return JSON.parse(text) as T;
         } catch {
@@ -39,7 +47,7 @@ export class TraeClient {
     async requestStream(request: TraeRequestOptions): Promise<Response> {
         const response = await this.doFetch(request);
         if (!response.ok) {
-            const text = await readLimitedText(response, 4096);
+            const text = await readLimitedText(response, ERROR_BODY_LIMIT);
             throw httpErrorFromResponse(response.status, text);
         }
         return response;

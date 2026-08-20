@@ -1,7 +1,4 @@
 // TRAE 模型目录。
-// 思考控制：对齐用户 deepseek provider 配置（openai-responses，xhigh/max 映射到自身），
-// 仅在显式选择受支持等级时发送 reasoning.effort（见 protocol/request.ts 的 THINKING_CONTROL_POLICY）；
-// max output 控制未验证，不发送 max_tokens（见 refactor plan §8.3）。
 import type { Model } from "@earendil-works/pi-ai";
 
 /** 自定义 API 标识：llm_utils_chat 明文通道。 */
@@ -15,8 +12,8 @@ export const TRAE_MODELS: readonly Model<TraeApi>[] = [
         provider: "trae",
         baseUrl: "https://trae-api-cn.mchost.guru",
         // 已验证：output 事件持续回传 reasoning_content（模型自动思考），因此声明 reasoning: true。
-        // thinkingLevelMap 对齐用户 deepseek provider：仅 max 受支持（映射到自身），
-        // off/minimal/low/medium/high/xhigh 不支持。该请求级控制字段为待实测验证项。
+        // thinkingLevelMap 对齐用户 deepseek provider 配置：仅 max 受支持（映射到自身），
+        // off/minimal/low/medium/high/xhigh 不支持。请求级控制发送 reasoning.effort=max（用户已实测）。
         reasoning: true,
         thinkingLevelMap: {
             off: null,

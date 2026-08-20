@@ -208,14 +208,37 @@ async function waitForCallbackInput(opts: {
     const onSignalAbort = () => manualAbort.abort();
     signal.addEventListener("abort", onSignalAbort, { once: true });
     if (signal.aborted) manualAbort.abort(); // 已取消时立即生效
+
+    // 浏览器回调 / 手动粘贴竞争：任一方先 settle（resolve 或 reject）即胜出。
+    // 不用 Promise.race：race 只返回赢家，输家若随后 reject 会成为 unhandled rejection。
+    // 手动粘贴 reject 只会在用户取消/全局 abort 时发生，此时作为取消结果向上抛是正确的。
+    const callbackPromise = server.waitForCallback(manualAbort.signal);
+    const manualPromise = promptForCallbackUrl(interaction, manualAbort.signal);
+    let url: URL;
     try {
-        const callback = server.waitForCallback(manualAbort.signal);
-        const manual = promptForCallbackUrl(interaction, manualAbort.signal);
-        return await Promise.race([callback, manual]);
+        url = await new Promise<URL>((resolve, reject) => {
+            let settled = false;
+            const win = (onDone: (value: URL) => void) => (value: URL) => {
+                if (!settled) {
+                    settled = true;
+                    onDone(value);
+                }
+            };
+            const onAbort = (error: unknown) => {
+                if (!settled) {
+                    settled = true;
+                    reject(error instanceof Error ? error : abortError(manualAbort.signal));
+                }
+            };
+            void callbackPromise.then(win(resolve), onAbort);
+            void manualPromise.then(win(resolve), onAbort);
+        });
     } finally {
+        // 赢家已定：abort 输家，关闭仍在等待的手动输入 prompt / 回调监听，避免挂起。
         manualAbort.abort();
         signal.removeEventListener("abort", onSignalAbort);
     }
+    return url;
 }
 
 async function promptForCallbackUrl(interaction: ProviderAuthInteraction, signal: AbortSignal): Promise<URL> {

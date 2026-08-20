@@ -25,7 +25,7 @@ pi TUI
 |---|---|
 | `index.ts` | 入口：`pi.registerProvider(createTraeProvider())` + `trae.usage` 命令 |
 | `src/provider.ts` | 原生 Provider 组装（OAuth auth + `filterModels` + stream） |
-| `src/model-catalog.ts` | 模型目录（`reasoning:true`，**无 thinkingLevelMap**，见 §3.3） |
+| `src/model-catalog.ts` | 模型目录（`reasoning:true`，仅 `max` 请求级思考，见 §3.3） |
 | `src/auth/oauth.ts` | login / refresh / toAuth（ExchangeToken / GetUserInfo / 登录 URL） |
 | `src/auth/callback-server.ts` | 回调服务器 ready/result/close 生命周期 |
 | `src/auth/credential.ts` | `TraeCredential` 守卫、有效期归一化、迁移错误 |
@@ -90,7 +90,7 @@ npm ci && npm run check   # typecheck + 离线单测（不访问 TRAE 网络）
 | 能力 | 状态 | 处理 |
 |---|---|---|
 | 思考内容展示（`reasoning_content`） | ✅ 已验证（output 事件持续回传） | `reasoning: true`，thinking 块正常展示 |
-| 思考**请求级控制**（`max`） | ⚠️ 对齐用户 deepseek provider，待实测 | 仅 `max` → `reasoning.effort=max`；`xhigh`/`off` 等为 `null` 不发送；其余等级不发送 |
+| 思考**请求级控制**（`max`） | ✅ 用户已实测 | 仅 `max` → `reasoning.effort=max`；`xhigh`/`off` 等为 `null` 不发送；其余等级不发送 |
 | 输出长度**请求级控制**（max_tokens 字段） | ❌ 未验证 | 仅保留元数据上限，不发送 `max_tokens` |
 | 图片输入 | ❌ 不支持 | text-only，明确报错；工具返回图片用确定性占位说明 |
 | `done.finish_reason` 枚举 | 部分验证（`stop`；`length`/`max_tokens` 按映射处理） | 未知 reason 报协议错误，不伪造 stop |
