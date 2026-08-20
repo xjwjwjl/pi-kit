@@ -1,0 +1,25 @@
+{
+  "name": "trae-provider",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "TRAE CN provider for pi: use your TRAE account's models via the llm_utils_chat channel (login /login trae, usage /trae.usage).",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test",
+    "check": "npm run typecheck && npm test"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.84.2 <0.85.0",
+    "@earendil-works/pi-ai": ">=0.84.2 <0.85.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.2",
+    "@earendil-works/pi-ai": "0.84.2",
+    "@types/node": "24.12.4",
+    "typescript": "5.9.3"
+  }
+}
