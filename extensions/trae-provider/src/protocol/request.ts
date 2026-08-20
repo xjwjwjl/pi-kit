@@ -6,6 +6,7 @@ import type {
     Context,
     Model,
     SimpleStreamOptions,
+    ThinkingLevel,
     ToolResultMessage,
     UserMessage,
 } from "@earendil-works/pi-ai";
@@ -16,18 +17,34 @@ export const TRAE_FUNCTION = "solo_work_lite";
 
 /**
  * 已验证的历史回放策略：上游 assistant 历史只接受文本块，thinking 以 text 回放。
- * 保持具名常量以便测试与后续协议验证时调整。
  */
 export const THINKING_REPLAY_POLICY = "as-text";
 
 /**
- * 组装 TRAE 请求体。注意：`options.reasoning` / `options.maxTokens` 的请求级控制
- * 字段未经验证（见 docs/trae-provider-refactor-plan.md §8.3），本函数有意不映射它们。
+ * 思考控制策略：与用户 deepseek provider 配置（openai-responses）一致，
+ * 仅当显式选择受支持的等级（max，见 model-catalog.ts 的 thinkingLevelMap）时
+ * 发送 `reasoning: { effort }`；其余等级或不选择时不发送，保持模型自动思考。
+ * 该 wire 字段为待实测验证项（若 TRAE 拒绝未知字段，删掉此策略并回退自动思考即可）。
+ */
+export const THINKING_CONTROL_POLICY = "reasoning-effort";
+
+/**
+ * 把 Pi 思考等级映射为请求字段值；未受支持（null）或不选择时返回 undefined。
+ */
+function mapThinkingEffort(model: Model<Api>, level: ThinkingLevel | undefined): string | undefined {
+    if (!level) return undefined;
+    const mapped = model.thinkingLevelMap?.[level];
+    return typeof mapped === "string" && mapped.length > 0 ? mapped : undefined;
+}
+
+/**
+ * 组装 TRAE 请求体。注意：`options.maxTokens` 的请求级控制字段未验证，
+ * 本函数有意不映射它；思考控制仅按 THINKING_CONTROL_POLICY 映射受支持等级。
  */
 export function buildTraeChatRequest(
     model: Model<Api>,
     context: Context,
-    _options?: SimpleStreamOptions,
+    options?: SimpleStreamOptions,
 ): TraeChatRequest {
     const messages: TraeChatMessage[] = [];
     if (context.systemPrompt) {
@@ -50,6 +67,10 @@ export function buildTraeChatRequest(
         config_name: model.id,
         model: model.id,
     };
+    const effort = mapThinkingEffort(model, options?.reasoning);
+    if (effort) {
+        request.reasoning = { effort };
+    }
     if (context.tools && context.tools.length > 0) {
         request.tools = context.tools.map(
             (tool): TraeToolDefinition => ({

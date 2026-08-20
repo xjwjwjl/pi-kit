@@ -10,6 +10,8 @@ export interface TraeChatRequest {
     config_name: string;
     model: string;
     tools?: TraeToolDefinition[];
+    /** 思考控制（对齐用户 deepseek provider 的 openai-responses 格式；待实测验证） */
+    reasoning?: { effort: string };
 }
 
 export interface TraeTextBlock {

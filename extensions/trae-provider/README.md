@@ -15,7 +15,7 @@
 
 - JWT 约 14 天，refreshToken 由 Pi 自动刷新（`ExchangeToken` 轮换）免维护
 - 唯一模型：`DeepSeek-V4-Flash-Official`（1M 上下文 / 384K 输出元数据上限，展示思考块）
-- **思考/输出长度请求级控制未经验证**：不发送 `thinking`/`max_tokens` 私有字段，模型声明仅反映已验证行为
+- **思考控制**：对齐用户 deepseek provider 配置，仅 `max` 受支持（请求发 `reasoning.effort=max`）；`xhigh`/`off` 等不支持时不发送。**输出长度控制未验证**，不发送 `max_tokens`
 
 ## 目录
 

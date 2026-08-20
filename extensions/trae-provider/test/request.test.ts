@@ -1,7 +1,7 @@
 // Context -> TRAE 请求体映射测试（纯函数）。
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { Context, Model } from "@earendil-works/pi-ai";
+import type { Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { TraeProtocolError, TraeUnsupportedInputError } from "../src/client/errors.ts";
 import { buildTraeChatRequest, THINKING_REPLAY_POLICY, TRAE_FUNCTION } from "../src/protocol/request.ts";
 import type { TraeApi } from "../src/model-catalog.ts";
@@ -9,8 +9,12 @@ import { makeModel } from "./helpers.ts";
 
 const model: Model<TraeApi> = makeModel();
 
-function build(messages: Context["messages"], extras?: Partial<Context> & { tools?: Context["tools"] }) {
-    return buildTraeChatRequest(model, { systemPrompt: extras?.systemPrompt, messages, tools: extras?.tools }, undefined);
+function build(
+    messages: Context["messages"],
+    extras?: Partial<Context> & { tools?: Context["tools"] },
+    options?: Parameters<typeof buildTraeChatRequest>[2],
+) {
+    return buildTraeChatRequest(model, { systemPrompt: extras?.systemPrompt, messages, tools: extras?.tools }, options);
 }
 
 test("system + user 文本映射，保留文本顺序", () => {
@@ -208,4 +212,25 @@ test("无 systemPrompt / 无 tools 时省略对应字段", () => {
     const req = build([{ role: "user", content: "hi", timestamp: 1 }]);
     assert.equal(req.messages[0].role, "user");
     assert.equal(req.tools, undefined);
+});
+
+test("thinking map: 选择 max 时发送 reasoning.effort=max（对齐 deepseek provider）", () => {
+    const req = build([{ role: "user", content: "hi", timestamp: 1 }], undefined, { reasoning: "max" });
+    assert.deepEqual(req.reasoning, { effort: "max" });
+});
+
+test("thinking map: xhigh/low/off 均不发送 reasoning 字段（map 中为 null）", () => {
+    const xhigh = build([{ role: "user", content: "hi", timestamp: 1 }], undefined, { reasoning: "xhigh" });
+    assert.equal(xhigh.reasoning, undefined);
+    const low = build([{ role: "user", content: "hi", timestamp: 1 }], undefined, { reasoning: "low" });
+    assert.equal(low.reasoning, undefined);
+    const off = build([{ role: "user", content: "hi", timestamp: 1 }], undefined, {
+        reasoning: "off" as unknown as SimpleStreamOptions["reasoning"],
+    });
+    assert.equal(off.reasoning, undefined);
+});
+
+test("thinking map: 未选择思考等级时不发送 reasoning 字段（默认自动思考）", () => {
+    const req = build([{ role: "user", content: "hi", timestamp: 1 }]);
+    assert.equal(req.reasoning, undefined);
 });
