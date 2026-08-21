@@ -282,6 +282,49 @@ test("未登录（缺 apiKey）-> start 后 error", async () => {
     if (last.type === "error") assert.match(last.error.errorMessage ?? "", /\/login trae/);
 });
 
+test("正文中的累计快照只保留末帧，不放大（同一段已以前缀存在则跳过）", async () => {
+    const events = await run(
+        baseOptions(
+            sseResponse([
+                { event: "output", data: JSON.stringify({ response: "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"edit\">AA" }) },
+                { event: "output", data: JSON.stringify({ response: "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"edit\">AAB" }) },
+                { event: "output", data: JSON.stringify({ response: "leak-filter-only\n" }) },
+                { event: "done", data: JSON.stringify({ finish_reason: "stop" }) },
+            ]),
+        ),
+    );
+    const done = doneOf(events);
+    const text = done.message.content.find((b) => b.type === "text");
+    assert.ok(text && text.type === "text");
+    // DSML 泄漏段被过滤（正文不含 <｜DSML｜tool_calls>），且快照不放大多次重复
+    assert.ok(!text.text.includes("<｜DSML｜tool_calls>"));
+    assert.ok(text.text.includes("leak-filter-only"));
+});
+
+test("arguments 非法 JSON 时错误消息清空未完成工具块（不回放 arguments:{}", async () => {
+    const events = await run(
+        baseOptions(
+            sseResponse([
+                {
+                    event: "output",
+                    data: JSON.stringify({
+                        tool_calls: [{ index: 0, id: "c1", function_call: { name: "bash", arguments: "{bad" } }],
+                    }),
+                },
+                { event: "done", data: JSON.stringify({ finish_reason: "stop" }) },
+            ]),
+        ),
+    );
+    const last = events[events.length - 1];
+    assert.equal(last.type, "error");
+    if (last.type === "error") {
+        // error 消息中不应残留 toolCall 块（item 4 清理后的状态）
+        const toolCalls = last.error.content.filter((b) => b.type === "toolCall");
+        assert.equal(toolCalls.length, 0);
+        assert.match(last.error.errorMessage ?? "", /不是合法 JSON/);
+    }
+});
+
 test("parent signal abort -> aborted，且 reader/timer 清理（不悬挂）", async () => {
     const controller = new AbortController();
     const events: AssistantMessageEvent[] = [];

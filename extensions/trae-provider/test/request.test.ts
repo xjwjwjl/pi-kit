@@ -1,7 +1,7 @@
 // Context -> TRAE 请求体映射测试（纯函数）。
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { TraeProtocolError, TraeUnsupportedInputError } from "../src/client/errors.ts";
 import { buildTraeChatRequest, THINKING_REPLAY_POLICY, TRAE_FUNCTION } from "../src/protocol/request.ts";
 import type { TraeApi } from "../src/model-catalog.ts";
@@ -130,6 +130,29 @@ test("assistant 工具调用映射到顶层 tool_calls（function_call 格式）
     assert.deepEqual(asst.tool_calls, [
         { id: "call_1", type: "function", function_call: { name: "bash", arguments: '{"command":"ls"}' } },
     ]);
+});
+
+test("停止于 error/aborted 的 assistant 消息不进入回放（不回放未完成工具/异常正文）", () => {
+    const errorAsst: AssistantMessage = {
+        role: "assistant",
+        content: [
+            {
+                type: "text",
+                text: "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"edit\">\n...泄漏的 DSML 正文...",
+            },
+            { type: "toolCall", id: "call_x", name: "edit", arguments: {} },
+        ],
+        api: "trae-llm-utils-chat",
+        provider: "trae",
+        model: model.id,
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: "error",
+        errorMessage: "工具调用 0 的 arguments 不是合法 JSON",
+        timestamp: 4,
+    };
+    const req = build([errorAsst, { role: "user", content: "retry", timestamp: 5 }]);
+    // error assistant 被跳过，只剩用户消息
+    assert.deepEqual(req.messages, [{ role: "user", content: [{ type: "text", text: "retry" }] }]);
 });
 
 test("tool result: content 必须为数组；isError 加稳定前缀", () => {

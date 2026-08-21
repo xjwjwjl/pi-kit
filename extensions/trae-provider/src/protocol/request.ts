@@ -57,6 +57,9 @@ export function buildTraeChatRequest(
         if (message.role === "user") {
             pushUserMessage(messages, message);
         } else if (message.role === "assistant") {
+            // 停止于 error/aborted 的 assistant 消息不进入重放：其中可能残留未完成工具调用
+            // 与异常累计正文，回放会污染上下文并诱导模型重犯。
+            if (message.stopReason === "error" || message.stopReason === "aborted") continue;
             pushAssistantMessage(messages, message, pendingToolCallIds);
         } else {
             pushToolResultMessage(messages, message, pendingToolCallIds);

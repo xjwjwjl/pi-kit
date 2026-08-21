@@ -124,6 +124,8 @@ export function streamTrae(
             const aborted = userSignal?.aborted ?? false;
             output.stopReason = aborted ? "aborted" : "error";
             output.errorMessage = describeStreamError(error, aborted);
+            // 失败时移除占位的未完成工具块：不把 arguments:{} 的调用交给重试回放。
+            output.content = output.content.filter((block) => block.type !== "toolCall");
             stream.push({ type: "error", reason: aborted ? "aborted" : "error", error: output });
         } finally {
             if (connectTimer) clearTimeout(connectTimer);
@@ -207,7 +209,8 @@ interface ToolAccumulator {
     index: number;
     id?: string;
     name?: string;
-    rawArguments: string;
+    /** 每个输出事件里的 arguments 帧。正常 TRAE 是增量分片，异常 DSML 泄漏路径可能返回累计快照。 */
+    argumentFrames: string[];
     contentIndex: number;
 }
 
@@ -298,6 +301,9 @@ class StreamSession {
     }
 
     private pushText(delta: string): void {
+        // 过滤泄漏到正文的内部 DSML。正常流式正文不含这些标记，透传不受影响。
+        const clean = stripLeakedDsml(delta);
+        if (clean.length === 0) return;
         if (this.textIndex < 0) {
             this.output.content.push({ type: "text", text: "" });
             this.textIndex = this.output.content.length - 1;
@@ -305,19 +311,21 @@ class StreamSession {
         }
         const block = this.output.content[this.textIndex];
         if (block.type !== "text") throw new TraeProtocolError("文本块状态异常");
-        block.text += delta;
-        this.stream.push({ type: "text_delta", contentIndex: this.textIndex, delta, partial: this.output });
+        // 累计快照（下一帧是前一帧前缀重发）会放大正文：同一段已以前缀存在则跳过，避免反复追加。
+        if (block.text.startsWith(clean)) return;
+        block.text += clean;
+        this.stream.push({ type: "text_delta", contentIndex: this.textIndex, delta: clean, partial: this.output });
     }
 
     private pushToolDelta(delta: TraeToolCallDelta): void {
         let acc = this.toolCalls.get(delta.index);
         if (!acc) {
-            acc = { index: delta.index, rawArguments: "", contentIndex: -1 };
+            acc = { index: delta.index, argumentFrames: [], contentIndex: -1 };
             this.toolCalls.set(delta.index, acc);
         }
         if (delta.id !== undefined) acc.id = delta.id;
         if (delta.name !== undefined) acc.name = delta.name;
-        if (delta.arguments !== undefined) acc.rawArguments += delta.arguments;
+        if (delta.arguments !== undefined) acc.argumentFrames.push(delta.arguments);
 
         if (acc.contentIndex < 0) {
             // id/name 到齐才创建块；此前缓存的 arguments 补发为一段 delta
@@ -325,12 +333,13 @@ class StreamSession {
                 const toolCall: ToolCall = { type: "toolCall", id: acc.id, name: acc.name, arguments: {} };
                 this.output.content.push(toolCall);
                 acc.contentIndex = this.output.content.length - 1;
+                const joined = acc.argumentFrames.join("");
                 this.stream.push({ type: "toolcall_start", contentIndex: acc.contentIndex, partial: this.output });
-                if (acc.rawArguments) {
+                if (joined) {
                     this.stream.push({
                         type: "toolcall_delta",
                         contentIndex: acc.contentIndex,
-                        delta: acc.rawArguments,
+                        delta: joined,
                         partial: this.output,
                     });
                 }
@@ -364,18 +373,18 @@ class StreamSession {
             if (acc.id === undefined || acc.name === undefined) {
                 throw new TraeProtocolError(`工具调用 ${index} 缺少 id 或 name`);
             }
-            const parsed = parseToolArguments(acc.rawArguments, index);
+            const parsed = finalizeToolArguments(acc.argumentFrames, index);
             if (acc.contentIndex < 0) {
                 // id/name 直到 done 才到齐：补建块并补发 delta
                 const toolCall: ToolCall = { type: "toolCall", id: acc.id, name: acc.name, arguments: parsed };
                 this.output.content.push(toolCall);
                 acc.contentIndex = this.output.content.length - 1;
                 this.stream.push({ type: "toolcall_start", contentIndex: acc.contentIndex, partial: this.output });
-                if (acc.rawArguments) {
+                if (acc.argumentFrames.length > 0) {
                     this.stream.push({
                         type: "toolcall_delta",
                         contentIndex: acc.contentIndex,
-                        delta: acc.rawArguments,
+                        delta: acc.argumentFrames.join(""),
                         partial: this.output,
                     });
                 }
@@ -411,7 +420,47 @@ class StreamSession {
     }
 }
 
+function stripLeakedDsml(raw: string): string {
+    const marker = raw.indexOf("<｜DSML｜tool_calls>");
+    if (marker >= 0) return raw.slice(0, marker);
+    return raw;
+}
+
+/**
+ * 双候选重建 arguments。判定规则：
+ * - 正常增量分片（最后一片自己无法解析）：join 唯一可用 → 返回 join。
+ * - 泄露的累计快照（每帧是前一帧前缀的完整重发，join 会把多份 JSON 串起来而无法解析）：
+ *   用最后一片快照；若其本身就是合法对象则采用，否则报协议错误。
+ * - 两者都合法且相等：任意返回；两者都合法却不相等：以逻辑上的 join 为准，但保持可复现的报错路径。
+ * 绝不自动补括号、截断字符串或回退 {}（可能导向危险的文件操作）。
+ */
+function finalizeToolArguments(frames: string[], index: number): Record<string, any> {
+    if (frames.length === 0) {
+        throw new TraeProtocolError(`工具调用 ${index} 缺少 arguments`);
+    }
+    if (frames.length === 1) {
+        return parseToolArguments(frames[0], index);
+    }
+    const joined = frames.join("");
+    const snapshot = frames[frames.length - 1];
+    // 快照泄露路径：最后一帧是完整 JSON，且与 join 相异（join 是若干快照的串接，通常无法解析）。
+    let snapshotObj: Record<string, any> | undefined;
+    try {
+        snapshotObj = parseToolArguments(snapshot, index);
+    } catch {
+        snapshotObj = undefined;
+    }
+    // 正常增量分片：join 可解析。当且仅当 join 失败时才考虑快照泄露。
+    try {
+        return parseToolArguments(joined, index);
+    } catch {
+        if (snapshotObj) return snapshotObj;
+        throw new TraeProtocolError(`工具调用 ${index} 的 arguments 不是合法 JSON`);
+    }
+}
+
 function parseToolArguments(raw: string, index: number): Record<string, any> {
+    if (!raw) throw new TraeProtocolError(`工具调用 ${index} 缺少 arguments`);
     let parsed: unknown;
     try {
         parsed = JSON.parse(raw);

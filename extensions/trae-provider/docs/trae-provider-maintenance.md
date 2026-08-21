@@ -112,7 +112,8 @@ npm ci && npm run check   # typecheck + 离线单测（不访问 TRAE 网络）
 | JWT 过期（14 天） | refresh 为空时需手动重登 | 正常登录后 refresh 非空，Pi 自动刷新 |
 | `4001 param invalid` | **模型 ID 大小写敏感** | 只能用 `DeepSeek-V4-Flash-Official`；小写不可用 |
 | `/trae.usage` 显示已用积分为 0 | 请求缺 device_id | 0.2.0 从 resolved auth 的 X-Device-Id 提取；确认重新登录过 |
-| 扩展改了不生效 | 扩展启动时加载 | `/reload` 或重启 pi |
+| 扩展改了不生效 | 扩展启动时加载 | `/reload` 或重启 pi
+| 工具报“arguments 不是合法 JSON” | TRAE 上游在长工具（大 `edit`）中生成了未闭合的 DSML 工具参数但仍返回 `done` | 已修复：不完整工具调用不执行，正文去 DSML、快照去重，失败消息不进入重试回放（见 §五 维护坑 #21）| |
 | `pi --list-models` 无 trae | 未登录（oauth 未配置时模型不列出） | 登录后即有（不是 bug） |
 
 ---
@@ -167,6 +168,11 @@ TRAE 是无文档私有协议，客户端升级可能破坏插件。**升级 TRA
    - **arguments 非法 JSON / 缺 id/name 必须报协议错误**，不能回退 `{}`（0.1.x 曾回退空对象）。
 19. **回调服务器：先 `waitUntilReady` 再发布 auth URL；`close()` 幂等，成功/失败/超时/取消都必须调用**。close 即使 listen 未完成也能正确回收（在 `close`/`error` 事件上 resolve）。
 20. **SSE 解析必须按空行提交 record**（多 `data:` 行以 `\n` 拼接、CRLF、UTF-8 跨 chunk、EOF 冲刷），不能逐行发射 data。
+21. **上游长工具异常：未闭合 DSML 参数 + 累计快照**（实测：DeepSeek 大 `edit` 截断）——
+   - **正文里去 DSML**：`pushText` 会截到 `<｜DSML｜tool_calls>` 为止，标记后的内部结构不写入正文。
+   - **快照去重避免放大**：TRAE 异常路径会把同一段当累计快照反复重发；正文/参数已含一致前缀时跳过追加（否则 400K 字符 = 数十倍放大）。
+   - **arguments 双候选重建**：正常增量取 `join`；`join` 解析失败且末帧为自治 JSON 快照时取末帧；两者都不行才报协议错误。绝不自动补括号/截断/回退 `{}`。
+   - **失败不重放**：`stopReason ∈ {error, aborted}` 的 assistant 消息在 `buildTraeChatRequest` 的上下文中直接跳过；失败消息里残留的 `arguments:{}` 工具块也会在 `stream.ts` 的 error 路径清除。
 
 ---
 
