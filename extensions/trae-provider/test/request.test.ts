@@ -45,7 +45,7 @@ test("user 图片输入被明确拒绝（text-only 模型不伪装支持图片�
     );
 });
 
-test("assistant: 文本与 thinking（as-text 回放）映射", () => {
+test("assistant: thinking 回放到 reasoning_content，不混入 content 文本", () => {
     const req = build([
         {
             role: "assistant",
@@ -61,14 +61,30 @@ test("assistant: 文本与 thinking（as-text 回放）映射", () => {
             timestamp: 1,
         },
     ]);
-    assert.equal(THINKING_REPLAY_POLICY, "as-text");
+    assert.equal(THINKING_REPLAY_POLICY, "reasoning-content");
     assert.deepEqual(req.messages[0], {
         role: "assistant",
-        content: [
-            { type: "text", text: "推理" },
-            { type: "text", text: "答案" },
-        ],
+        content: [{ type: "text", text: "答案" }],
+        reasoning_content: "推理",
     });
+});
+
+test("assistant: 仅 thinking 无文本无工具时仍跳过", () => {
+    const req = build([
+        { role: "user", content: "hi", timestamp: 1 },
+        {
+            role: "assistant",
+            content: [{ type: "thinking", thinking: "只想不答" }],
+            api: "trae-llm-utils-chat",
+            provider: "trae",
+            model: model.id,
+            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+            stopReason: "stop",
+            timestamp: 2,
+        },
+    ]);
+    assert.equal(req.messages.length, 1);
+    assert.equal(req.messages[0].role, "user");
 });
 
 test("空 assistant 消息被跳过（TRAE 会 4001）", () => {

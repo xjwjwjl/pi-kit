@@ -16,9 +16,10 @@ import type { TraeChatMessage, TraeChatRequest, TraeTextBlock, TraeToolCall, Tra
 export const TRAE_FUNCTION = "solo_work_lite";
 
 /**
- * 已验证的历史回放策略：上游 assistant 历史只接受文本块，thinking 以 text 回放。
+ * 历史回放策略：thinking 放到 assistant.reasoning_content，不混入 content 文本。
+ * as-text 会让长对话把思考当正文，污染后续输出。
  */
-export const THINKING_REPLAY_POLICY = "as-text";
+export const THINKING_REPLAY_POLICY = "reasoning-content";
 
 /**
  * 思考控制策略：与用户 deepseek provider 配置（openai-responses）一致，
@@ -109,12 +110,13 @@ function pushAssistantMessage(
 ): void {
     const content: TraeTextBlock[] = [];
     const toolCalls: TraeToolCall[] = [];
+    const thinkingParts: string[] = [];
     for (const block of message.content) {
         if (block.type === "text") {
             content.push({ type: "text", text: block.text });
         } else if (block.type === "thinking") {
-            // THINKING_REPLAY_POLICY = as-text（已验证行为）
-            content.push({ type: "text", text: block.thinking });
+            // THINKING_REPLAY_POLICY = reasoning-content：思考不进 content 文本块
+            if (block.thinking.trim().length > 0) thinkingParts.push(block.thinking);
         } else if (block.type === "toolCall") {
             toolCalls.push({
                 id: block.id,
@@ -127,6 +129,7 @@ function pushAssistantMessage(
     // 空 assistant（无文本无工具调用）上游返回 4001 param invalid，跳过
     if (content.length === 0 && toolCalls.length === 0) return;
     const assistant: TraeChatMessage & { role: "assistant" } = { role: "assistant", content };
+    if (thinkingParts.length > 0) assistant.reasoning_content = thinkingParts.join("\n\n");
     if (toolCalls.length > 0) assistant.tool_calls = toolCalls;
     messages.push(assistant);
 }

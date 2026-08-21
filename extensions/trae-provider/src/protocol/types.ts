@@ -22,7 +22,13 @@ export interface TraeTextBlock {
 export type TraeChatMessage =
     | { role: "system"; content: TraeTextBlock[] }
     | { role: "user"; content: TraeTextBlock[] }
-    | { role: "assistant"; content: TraeTextBlock[]; tool_calls?: TraeToolCall[] }
+    | {
+          role: "assistant";
+          content: TraeTextBlock[];
+          /** 思考回放：与 SSE output.reasoning_content 对齐，不混入 content 文本块 */
+          reasoning_content?: string;
+          tool_calls?: TraeToolCall[];
+      }
     | { role: "tool"; tool_call_id: string; name?: string; content: TraeTextBlock[] };
 
 export interface TraeToolDefinition {

@@ -157,7 +157,8 @@ TRAE 是无文档私有协议，客户端升级可能破坏插件。**升级 TRA
 15. **`ide_user_ent_usage` 的 `req_source` 参数影响权益包返回完整性**：必须 `2`，否则积分统计缺块。
 16. **`extra_info.input_token` 已包含 `cache_read_token`**：input 是总数，cache 是命中部分，展示时勿并列重复。
 17. **金额 = 接口 `cost_money_float` 字段**，`credits_float ÷ 40`（1 元 = 40 积分）是固定换算比例。
-18. **llm_utils_chat 多轮工具调用回传格式（坑很深，实测验证）**：
+18. **thinking 历史回放必须走 `reasoning_content`，不能 as-text**：把思考塞进 assistant content 文本块后，长对话会把思考当正文，污染后续输出。请求侧与 SSE `output.reasoning_content` 对齐；仅 thinking、无文本无工具的 assistant 仍跳过（4001）。
+19. **llm_utils_chat 多轮工具调用回传格式（坑很深，实测验证）**：
    - assistant 工具调用必须放**顶层 `tool_calls`**：`[{id, type:"function", function_call:{name, arguments}}]`，**不能**放 content 块里。
    - toolResult 用 `{role:"tool", tool_call_id, content:[{type:"text",text}]}`，**content 必须是数组**。
    - **空 assistant 消息必须跳过**（TRAE 4001）。
