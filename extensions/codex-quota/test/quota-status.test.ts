@@ -4,7 +4,7 @@ import { formatQuotaStatus } from "../index.ts";
 
 const plain = (_color: string, text: string) => text;
 
-test("formats the short Codex quota window with its threshold color", () => {
+test("formats the short Codex quota window", () => {
   const colors: string[] = [];
   const paint = (color: string, text: string) => {
     colors.push(color);
@@ -14,7 +14,7 @@ test("formats the short Codex quota window with its threshold color", () => {
     usage: { rate_limit: { primary_window: { used_percent: 72, limit_window_seconds: 18_000 } } },
   }, paint);
 
-  assert.equal(status, "Codex·5h 72%");
+  assert.equal(status, "Codex·5h 28%");
   assert.deepEqual(colors, ["muted", "warning"]);
 });
 
@@ -26,7 +26,7 @@ test("falls back to the long window when the short window has no percentage", ()
         secondary_window: { used_percent: 12, limit_window_seconds: 604_800 },
       },
     },
-  }, plain), "Codex·7d 12%");
+  }, plain), "Codex·7d 88%");
 });
 
 test("reports unavailable quota without usage data", () => {

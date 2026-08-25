@@ -21,9 +21,6 @@ import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 
 interface UsageWindow {
 	used_percent?: number;
-	limit?: number;
-	remaining?: number;
-	used?: number;
 	limit_window_seconds?: number;
 	reset_after_seconds?: number;
 	reset_at?: number;
@@ -71,10 +68,10 @@ interface UsageViewData {
 	allowed: boolean;
 	limitReached: boolean;
 	apiError?: string;
-	primary: UsageWindow | null;
-	secondary: UsageWindow | null;
-	primaryRange: TimeRange | null;
-	secondaryRange: TimeRange | null;
+	fiveHWindow: UsageWindow | null;
+	sevenDWindow: UsageWindow | null;
+	fiveHRange: TimeRange | null;
+	sevenDRange: TimeRange | null;
 	fiveH: WindowStats;
 	sevenD: WindowStats;
 	now: Date;
@@ -99,6 +96,7 @@ const SESSIONS_DIR = path.join(
 	"sessions",
 );
 const MODEL_COLUMN_WIDTH = 16;
+const DAY_SECONDS = 24 * 60 * 60;
 
 // ---------------------------------------------------------------------------
 // Token loading
@@ -217,6 +215,29 @@ function messageTimestampMs(obj: any): number | null {
 	return null;
 }
 
+function classifyRateLimitWindows(rateLimit: UsageResponse["rate_limit"]): {
+	fiveHWindow: UsageWindow | null;
+	sevenDWindow: UsageWindow | null;
+} {
+	const windows = [rateLimit?.primary_window, rateLimit?.secondary_window]
+		.filter((window): window is UsageWindow => Boolean(window));
+	const withDuration = windows.filter((window) =>
+		typeof window.limit_window_seconds === "number" && window.limit_window_seconds > 0,
+	);
+
+	const shortWindows = withDuration
+		.filter((window) => window.limit_window_seconds! < DAY_SECONDS)
+		.sort((a, b) => a.limit_window_seconds! - b.limit_window_seconds!);
+	const longWindows = withDuration
+		.filter((window) => window.limit_window_seconds! >= DAY_SECONDS)
+		.sort((a, b) => a.limit_window_seconds! - b.limit_window_seconds!);
+
+	return {
+		fiveHWindow: shortWindows[0] ?? null,
+		sevenDWindow: longWindows[0] ?? null,
+	};
+}
+
 function resolveResetDate(window: UsageWindow | null | undefined, now: Date): Date | null {
 	if (!window) return null;
 	if (window.reset_at && window.reset_at > 0) return new Date(window.reset_at * 1000);
@@ -236,12 +257,29 @@ function inferWindowRange(window: UsageWindow | null | undefined, now: Date): Ti
 	};
 }
 
-async function scanSessionsInRange(range: TimeRange): Promise<WindowStats> {
-	const result = emptyStats();
-	if (!fs.existsSync(SESSIONS_DIR)) return result;
+function addUsageStats(stats: WindowStats, message: any, usage: any) {
+	stats.input += usage.input || 0;
+	stats.output += usage.output || 0;
+	stats.cacheRead += usage.cacheRead || 0;
+	stats.cacheWrite += usage.cacheWrite || 0;
+	stats.totalTokens += usage.totalTokens || 0;
+	stats.cost += usage.cost?.total || 0;
 
-	const startMs = range.start.getTime();
-	const endMs = range.end.getTime();
+	const modelStats = ensureModelStats(stats, String(message?.model || "unknown"));
+	modelStats.input += usage.input || 0;
+	modelStats.output += usage.output || 0;
+	modelStats.cacheRead += usage.cacheRead || 0;
+	modelStats.cacheWrite += usage.cacheWrite || 0;
+	modelStats.totalTokens += usage.totalTokens || 0;
+	modelStats.cost += usage.cost?.total || 0;
+}
+
+async function scanSessionsInRanges(ranges: Array<TimeRange | null>): Promise<WindowStats[]> {
+	const results = ranges.map(() => emptyStats());
+	const activeRanges = ranges.filter((range): range is TimeRange => Boolean(range));
+	if (activeRanges.length === 0 || !fs.existsSync(SESSIONS_DIR)) return results;
+
+	const earliestStartMs = Math.min(...activeRanges.map((range) => range.start.getTime()));
 	const subdirs = fs.readdirSync(SESSIONS_DIR).filter((name) => {
 		try { return fs.statSync(path.join(SESSIONS_DIR, name)).isDirectory(); }
 		catch { return false; }
@@ -256,14 +294,13 @@ async function scanSessionsInRange(range: TimeRange): Promise<WindowStats> {
 		for (const file of files) {
 			const filePath = path.join(subdirPath, file);
 			try {
-				// Safe prefilter: if the file was not modified after the start of the range,
-				// it cannot contain messages inside this official window.
-				if (fs.statSync(filePath).mtimeMs < startMs) continue;
+				// A file older than the earliest window cannot contain a message in any window.
+				if (fs.statSync(filePath).mtimeMs < earliestStartMs) continue;
 			} catch {
 				continue;
 			}
 
-			let inWindow = false;
+			const inWindows = ranges.map(() => false);
 			try {
 				const stream = fs.createReadStream(filePath, { encoding: "utf-8" });
 				const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
@@ -276,54 +313,39 @@ async function scanSessionsInRange(range: TimeRange): Promise<WindowStats> {
 					try { obj = JSON.parse(trimmed); } catch { continue; }
 
 					if (obj.type !== "message") continue;
-					const msg = obj.message;
-					if (msg?.role !== "assistant" || msg?.provider !== "openai-codex") continue;
+					const message = obj.message;
+					if (message?.role !== "assistant" || message?.provider !== "openai-codex") continue;
 
-					const ts = messageTimestampMs(obj);
-					if (ts === null || ts < startMs || ts >= endMs) continue;
+					const timestamp = messageTimestampMs(obj);
+					if (timestamp === null || !message.usage) continue;
 
-					const usage = msg.usage;
-					if (!usage) continue;
-
-					inWindow = true;
-					result.input += usage.input || 0;
-					result.output += usage.output || 0;
-					result.cacheRead += usage.cacheRead || 0;
-					result.cacheWrite += usage.cacheWrite || 0;
-					result.totalTokens += usage.totalTokens || 0;
-					result.cost += usage.cost?.total || 0;
-
-					const modelStats = ensureModelStats(result, String(msg?.model || "unknown"));
-					modelStats.input += usage.input || 0;
-					modelStats.output += usage.output || 0;
-					modelStats.cacheRead += usage.cacheRead || 0;
-					modelStats.cacheWrite += usage.cacheWrite || 0;
-					modelStats.totalTokens += usage.totalTokens || 0;
-					modelStats.cost += usage.cost?.total || 0;
+					for (let index = 0; index < ranges.length; index += 1) {
+						const range = ranges[index];
+						if (!range || timestamp < range.start.getTime() || timestamp >= range.end.getTime()) continue;
+						inWindows[index] = true;
+						addUsageStats(results[index]!, message, message.usage);
+					}
 				}
 			} catch {
 				continue;
 			}
 
-			if (inWindow) result.sessions++;
+			for (let index = 0; index < inWindows.length; index += 1) {
+				if (inWindows[index]) results[index]!.sessions++;
+			}
 		}
 	}
 
-	return result;
+	return results;
 }
 
 // ---------------------------------------------------------------------------
 // Formatting
 // ---------------------------------------------------------------------------
 
-function usedPercent(window: UsageWindow | null | undefined): number | null {
-	if (!window) return null;
-	if (typeof window.used_percent === "number") return clamp(window.used_percent, 0, 100);
-	if (window.limit && window.limit > 0) {
-		const used = window.used ?? (window.limit - (window.remaining ?? 0));
-		return clamp(Math.round((used / window.limit) * 100), 0, 100);
-	}
-	return null;
+function remainingPercent(window: UsageWindow | null | undefined): number | null {
+	if (!window || typeof window.used_percent !== "number") return null;
+	return clamp(100 - window.used_percent, 0, 100);
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -401,41 +423,44 @@ function formatReport(data: UsageViewData, theme?: Theme): string {
 		lines.push(styled(theme, "error", `API error: ${data.apiError}`));
 		lines.push("");
 	}
-	lines.push(...formatWindowBlock("5h", data.primary, data.primaryRange, data.fiveH, data.now, theme));
-	lines.push("");
-	lines.push(...formatWindowBlock("7d", data.secondary, data.secondaryRange, data.sevenD, data.now, theme));
+	const windows: string[][] = [];
+	if (data.fiveHWindow) {
+		windows.push(formatWindowBlock("5h", data.fiveHWindow, data.fiveHRange, data.fiveH, data.now, theme));
+	}
+	if (data.sevenDWindow) {
+		windows.push(formatWindowBlock("7d", data.sevenDWindow, data.sevenDRange, data.sevenD, data.now, theme));
+	}
+
+	if (windows.length === 0) {
+		lines.push(styled(theme, "dim", "No quota windows available"));
+	} else {
+		lines.push(windows.map((window) => window.join("\n")).join("\n\n"));
+	}
 	return "\n" + lines.join("\n");
 }
 
 function formatWindowBlock(
 	label: "5h" | "7d",
-	window: UsageWindow | null,
+	window: UsageWindow,
 	range: TimeRange | null,
 	stats: WindowStats,
 	now: Date,
 	theme?: Theme,
 ): string[] {
-	const pct = usedPercent(window);
-	const pctText = pct === null ? "unknown" : `${pct}% used`;
+	const pct = remainingPercent(window);
+	const pctText = pct === null ? "unknown" : `${pct}%`;
 	const reset = formatResetAt(window, now);
 	const bar = renderBar(pct, 20, theme);
-	const heading = `${styled(theme, "accent", label)}  ${bar}  ${pctText.padEnd(8)}  ${styled(theme, "dim", `reset ${reset}`)}`;
-	const rangeLine = `    ${styled(theme, "dim", `window ${formatRange(range, now)}`)}`;
-
-	if (stats.totalTokens === 0) {
-		return [
-			heading,
-			rangeLine,
-			`    ${styled(theme, "dim", "No recorded pi activity in this window")}`,
-			`    ${metric("input", "0", theme)}   ${metric("output", "0", theme)}   ${metric("total", "0", theme)}`,
-		];
-	}
+	const heading = `${styled(theme, "accent", label)}  ${metric("quota", pctText, theme)}  ${bar}  ${styled(theme, "dim", `reset ${reset}`)}`;
+	const rangeLine = `    ${styled(theme, "dim", `period ${formatRange(range, now)}`)}`;
+	const activityLine = `    ${metric("total", `${fmtNum(stats.totalTokens)} tokens`, theme)}   ${metric("cost", fmtCost(stats.cost), theme)}   ${metric("sessions", String(stats.sessions), theme)}`;
+	const tokenLine = `    ${metric("input", fmtNum(stats.input), theme)}   ${metric("output", fmtNum(stats.output), theme)}   ${metric("cache read", fmtNum(stats.cacheRead), theme)}   ${metric("cache write", fmtNum(stats.cacheWrite), theme)}`;
 
 	return [
 		heading,
 		rangeLine,
-		`    ${metric("input", fmtNum(stats.input), theme)}   ${metric("output", fmtNum(stats.output), theme)}   ${metric("total", fmtNum(stats.totalTokens), theme)}`,
-		`    ${metric("cache", `${fmtNum(stats.cacheRead)}/${fmtNum(stats.cacheWrite)}`, theme)}   ${metric("cost", fmtCost(stats.cost), theme)}   ${metric("sessions", String(stats.sessions), theme)}`,
+		activityLine,
+		tokenLine,
 		...formatModelLines(stats, theme),
 	];
 }
@@ -459,6 +484,12 @@ function formatModelLines(stats: WindowStats, theme?: Theme): string[] {
 	const entries = Object.entries(stats.models)
 		.sort((a, b) => b[1].totalTokens - a[1].totalTokens);
 	if (entries.length === 0) return [];
+	if (entries.length === 1) {
+		const [model, modelStats] = entries[0]!;
+		return [
+			`    ${metric("model", model, theme)}   ${metric("tokens", fmtNum(modelStats.totalTokens), theme)}   ${metric("in", fmtNum(modelStats.input), theme)}   ${metric("out", fmtNum(modelStats.output), theme)}`,
+		];
+	}
 
 	const rows = entries.map(([model, modelStats]) => ({
 		model,
@@ -489,7 +520,7 @@ function renderBar(percent: number | null, width: number, theme?: Theme): string
 	if (percent === null) return styled(theme, "dim", "░".repeat(width));
 	const filled = clamp(Math.round((percent / 100) * width), 0, width);
 	const empty = width - filled;
-	const color = percent >= 90 ? "error" : percent >= 70 ? "warning" : "success";
+	const color = percent <= 10 ? "error" : percent <= 30 ? "warning" : "success";
 	return styled(theme, color, "█".repeat(filled)) + styled(theme, "dim", "░".repeat(empty));
 }
 
@@ -513,27 +544,23 @@ export default function codexUsageExtension(pi: ExtensionAPI) {
 
 			ctx.ui.notify(formatLoadingNotice(ctx.hasUI ? ctx.ui.theme : undefined), "info");
 
-			let usageResult!: { ok: true; usage: UsageResponse } | { ok: false; error: string };
-			let observedAt = new Date();
-			let primaryRange: TimeRange | null = null;
-			let secondaryRange: TimeRange | null = null;
+			const usageResult = await fetchUsage(accessToken)
+				.then((usage) => ({ ok: true as const, usage }))
+				.catch((error) => ({ ok: false as const, error: String(error) }));
+			const observedAt = new Date();
+			let fiveHRange: TimeRange | null = null;
+			let sevenDRange: TimeRange | null = null;
 			let fiveH = emptyStats();
 			let sevenD = emptyStats();
 
-			usageResult = await fetchUsage(accessToken)
-				.then((usage) => ({ ok: true as const, usage }))
-				.catch((error) => ({ ok: false as const, error: String(error) }));
-
-			observedAt = new Date();
-
+			let fiveHWindow: UsageWindow | null = null;
+			let sevenDWindow: UsageWindow | null = null;
 			if (usageResult.ok) {
-				primaryRange = inferWindowRange(usageResult.usage.rate_limit?.primary_window ?? null, observedAt);
-				secondaryRange = inferWindowRange(usageResult.usage.rate_limit?.secondary_window ?? null, observedAt);
+				({ fiveHWindow, sevenDWindow } = classifyRateLimitWindows(usageResult.usage.rate_limit));
+				fiveHRange = inferWindowRange(fiveHWindow, observedAt);
+				sevenDRange = inferWindowRange(sevenDWindow, observedAt);
 
-				[fiveH, sevenD] = await Promise.all([
-					primaryRange ? scanSessionsInRange(primaryRange) : Promise.resolve(emptyStats()),
-					secondaryRange ? scanSessionsInRange(secondaryRange) : Promise.resolve(emptyStats()),
-				]);
+				[fiveH, sevenD] = await scanSessionsInRanges([fiveHRange, sevenDRange]);
 			}
 
 			const usage = usageResult.ok ? usageResult.usage : null;
@@ -543,10 +570,10 @@ export default function codexUsageExtension(pi: ExtensionAPI) {
 				allowed: usage?.rate_limit?.allowed ?? true,
 				limitReached: usage?.rate_limit?.limit_reached ?? false,
 				apiError: usageResult.ok ? undefined : usageResult.error,
-				primary: usage?.rate_limit?.primary_window ?? null,
-				secondary: usage?.rate_limit?.secondary_window ?? null,
-				primaryRange,
-				secondaryRange,
+				fiveHWindow,
+				sevenDWindow,
+				fiveHRange,
+				sevenDRange,
 				fiveH,
 				sevenD,
 				now: observedAt,

@@ -5,17 +5,19 @@ import codexQuota from "../index.ts";
 test("cleans up its idle refresh timer on replacement and shutdown", async () => {
   const handlers = new Map<string, (event: unknown, ctx: unknown) => void | Promise<void>>();
   const timers: Array<{ callback: () => void; delay: number; cleared: boolean; unrefed: boolean }> = [];
-  const originalSetInterval = globalThis.setInterval;
-  const originalClearInterval = globalThis.clearInterval;
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const originalDateNow = Date.now;
+  Date.now = () => Date.UTC(2026, 7, 25, 12, 3, 0);
 
-  globalThis.setInterval = ((callback: () => void, delay: number) => {
+  globalThis.setTimeout = ((callback: () => void, delay: number) => {
     const timer = { callback, delay, cleared: false, unrefed: false, unref() { this.unrefed = true; } };
     timers.push(timer);
-    return timer as unknown as ReturnType<typeof setInterval>;
-  }) as typeof setInterval;
-  globalThis.clearInterval = ((timer: { cleared?: boolean }) => {
+    return timer as unknown as ReturnType<typeof setTimeout>;
+  }) as typeof setTimeout;
+  globalThis.clearTimeout = ((timer: { cleared?: boolean }) => {
     timer.cleared = true;
-  }) as typeof clearInterval;
+  }) as typeof clearTimeout;
 
   try {
     codexQuota({
@@ -38,7 +40,7 @@ test("cleans up its idle refresh timer on replacement and shutdown", async () =>
 
     await sessionStart({}, ctx);
     assert.equal(timers.length, 1);
-    assert.equal(timers[0].delay, 3 * 60 * 1000);
+    assert.equal(timers[0].delay, 2 * 60 * 1000);
     assert.equal(timers[0].unrefed, true);
 
     await sessionStart({}, ctx);
@@ -48,7 +50,8 @@ test("cleans up its idle refresh timer on replacement and shutdown", async () =>
     await sessionShutdown({}, ctx);
     assert.equal(timers[1].cleared, true);
   } finally {
-    globalThis.setInterval = originalSetInterval;
-    globalThis.clearInterval = originalClearInterval;
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+    Date.now = originalDateNow;
   }
 });
