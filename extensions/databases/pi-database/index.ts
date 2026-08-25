@@ -15,7 +15,7 @@ import {
 import { mysqlAdapter } from "./src/mysql.js";
 import { createSourceTreeComponent } from "./src/source-tree.js";
 import type { SourceTreeNode, SourceTreeTheme } from "./src/source-tree.js";
-import { firstKeyword } from "./src/sql.js";
+import { firstKeyword, splitTopLevelParts } from "./src/sql.js";
 import { DatabasePolicyError } from "./src/types.js";
 import type { DatabaseAdapter, ResolvedSource, ValidatedWrite, WriteResult } from "./src/types.js";
 
@@ -141,38 +141,6 @@ function callString(args: unknown, key: string): string | undefined {
   if (!isRecord(args) || typeof args[key] !== "string") return undefined;
   const value = args[key].trim();
   return value || undefined;
-}
-
-function splitTopLevelCommaList(value: string): string[] {
-  const items: string[] = [];
-  let current = "";
-  let depth = 0;
-  let quote: "'" | '"' | "`" | null = null;
-
-  for (let index = 0; index < value.length; index++) {
-    const char = value[index]!;
-    const previous = value[index - 1];
-    if (quote) {
-      current += char;
-      if (char === quote && previous !== "\\") quote = null;
-      continue;
-    }
-    if (char === "'" || char === '"' || char === "`") {
-      quote = char;
-      current += char;
-      continue;
-    }
-    if (char === "(") depth++;
-    else if (char === ")" && depth > 0) depth--;
-    if (char === "," && depth === 0) {
-      items.push(current.trim());
-      current = "";
-      continue;
-    }
-    current += char;
-  }
-  if (current.trim()) items.push(current.trim());
-  return items;
 }
 
 function matchingParen(sql: string, openIndex: number): number | undefined {
@@ -301,7 +269,7 @@ function formatSqlForUi(query: string): string {
     .replace(/\b(SETTINGS)\b/gi, "\n$1");
 
   formatted = formatted.replace(/(^|\n)SELECT\s+([\s\S]*?)\nFROM\b/gim, (_match, prefix: string, selectList: string) => {
-    const columns = splitTopLevelCommaList(selectList);
+    const columns = splitTopLevelParts(selectList);
     return columns.length <= 1 ? `${prefix}SELECT ${selectList}\nFROM` : `${prefix}SELECT\n  ${columns.join(",\n  ")}\nFROM`;
   });
   return formatNestedSubqueries(formatted.split("\n").map((line) => line.trimEnd()).join("\n").trim());
@@ -314,12 +282,12 @@ function formatWriteSqlForUi(statement: string): string {
     .replace(/\s+\bADD\s+(?=(?:COLUMN|INDEX)\b)/gi, "\nADD ");
   const values = formatted.match(/^([\s\S]*?\nVALUES)\s+([\s\S]+)$/i);
   if (values) {
-    const rows = splitTopLevelCommaList(values[2]);
+    const rows = splitTopLevelParts(values[2]);
     if (rows.length > 1) return `${values[1]}\n  ${rows.join(",\n  ")}`;
   }
   const create = formatted.match(/^(CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[^\n(]+\()\s*([\s\S]*?)\s*\)$/i);
   if (!create) return formatted;
-  const definitions = splitTopLevelCommaList(create[2]);
+  const definitions = splitTopLevelParts(create[2]);
   return definitions.length > 1 ? `${create[1]}\n  ${definitions.join(",\n  ")}\n)` : formatted;
 }
 
@@ -1148,7 +1116,7 @@ function registerTools(pi: ExtensionAPI): void {
     promptSnippet: "Execute a dialect-specific write (data or schema change) using the selected source policy",
     promptGuidelines: [
       "Use database_write only for an explicit user-requested change after selecting the correct source; never use bash or a local database client as a write fallback.",
-      "database_write requires database for table-scoped writes; omit database only for CREATE DATABASE and DROP DATABASE. ClickHouse supports standard CREATE MATERIALIZED VIEW ... TO ... AS SELECT or ... ENGINE = ... AS SELECT forms, including ON CLUSTER. CREATE OR REPLACE variants and INSERT ... SELECT (INSERT INTO <table> [(columns)] SELECT ...) require forced interactive confirmation; POPULATE, refreshable/window views, DEFINER, and SQL SECURITY are rejected. It follows the selected source confirmation policy and rejects multi-statement and unsupported SQL. DELETE, TRUNCATE, DROP, RENAME, and REPLACE always require interactive confirmation regardless of write_confirm. If it returns blocked, stop and explain the selected source policy to the user.",
+      "database_write requires database for table-scoped writes; omit database only for CREATE DATABASE and DROP DATABASE. ClickHouse supports standard CREATE MATERIALIZED VIEW ... TO ... AS SELECT or ... ENGINE = ... AS SELECT forms, including ON CLUSTER. CREATE OR REPLACE variants and INSERT ... SELECT (INSERT INTO <table> [(columns)] SELECT ...) require forced interactive confirmation; POPULATE, refreshable/window views, DEFINER, and SQL SECURITY are rejected. It follows the selected source confirmation policy and rejects multi-statement and unsupported SQL. DELETE, TRUNCATE, DROP, RENAME, REPLACE, and destructive ALTER (DROP/MODIFY/CHANGE/RENAME column, etc.) always require interactive confirmation regardless of write_confirm. If it returns blocked, stop and explain the selected source policy to the user.",
       "If database_write reports outcome unknown after a timeout or lost connection, first use database_query or metadata tools to verify database state; do not retry automatically and never use bash or a database client to bypass policy."
     ],
     parameters: WriteParams,

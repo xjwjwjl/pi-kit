@@ -225,6 +225,70 @@ export function hasTopLevelKeyword(statement: string, keyword: string): boolean 
   return false;
 }
 
+export function splitTopLevelParts(statement: string): string[] {
+  const parts: string[] = [];
+  let quote: "'" | '"' | "`" | null = null;
+  let blockComment = false;
+  let lineComment = false;
+  let depth = 0;
+  let start = 0;
+
+  for (let index = 0; index < statement.length; index++) {
+    const char = statement[index];
+    const next = statement[index + 1];
+    const previous = statement[index - 1];
+
+    if (lineComment) {
+      if (char === "\n" || char === "\r") lineComment = false;
+      continue;
+    }
+    if (blockComment) {
+      if (char === "*" && next === "/") {
+        blockComment = false;
+        index += 1;
+      }
+      continue;
+    }
+    if (quote) {
+      if (char === quote && previous !== "\\") quote = null;
+      continue;
+    }
+    if (char === "-" && next === "-") {
+      lineComment = true;
+      index += 1;
+      continue;
+    }
+    if (char === "#") {
+      lineComment = true;
+      continue;
+    }
+    if (char === "/" && next === "*") {
+      blockComment = true;
+      index += 1;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === "`") {
+      quote = char;
+      continue;
+    }
+    if (char === "(") {
+      depth += 1;
+      continue;
+    }
+    if (char === ")") {
+      if (depth > 0) depth -= 1;
+      continue;
+    }
+    if (char === "," && depth === 0) {
+      parts.push(statement.slice(start, index).trim());
+      start = index + 1;
+    }
+  }
+
+  parts.push(statement.slice(start).trim());
+  return parts.filter((part) => part !== "");
+}
+
 export function hasTopLevelComma(statement: string): boolean {
   let quote: "'" | '"' | "`" | null = null;
   let blockComment = false;

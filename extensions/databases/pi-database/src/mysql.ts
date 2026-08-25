@@ -1,7 +1,7 @@
 import mysql from "mysql2/promise";
 import type { Pool, ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { sourceWithDatabase } from "./config.js";
-import { firstKeyword, hasMultipleStatements, hasTopLevelKeyword, normalizeSql } from "./sql.js";
+import { firstKeyword, hasMultipleStatements, hasTopLevelKeyword, normalizeSql, splitTopLevelParts } from "./sql.js";
 import { DatabasePolicyError } from "./types.js";
 import { boundItems, boundRows, boundTableNames, truncateText } from "./results.js";
 import type { DatabaseAdapter, DescribeTableResult, ListDatabasesResult, PingResult, QueryResult, ResolvedSource, SearchTablesResult, TableResult, ValidatedWrite, WriteResult } from "./types.js";
@@ -16,7 +16,23 @@ const UPDATE_PATTERN = new RegExp(`^UPDATE\\s+${TABLE_IDENTIFIER}\\s+SET\\s+`, "
 const DELETE_PATTERN = new RegExp(`^DELETE\\s+FROM\\s+${TABLE_IDENTIFIER}(?:\\s+(?:WHERE\\b|ORDER\\s+BY\\b|LIMIT\\b)|$)`, "i");
 const CREATE_TABLE_PATTERN = new RegExp(`^CREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${TABLE_IDENTIFIER}\\s*\\(`, "i");
 const CREATE_DATABASE_PATTERN = new RegExp(`^CREATE\\s+DATABASE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${IDENTIFIER}$`, "i");
-const ALTER_ADD_PATTERN = new RegExp(`^ALTER\\s+TABLE\\s+${TABLE_IDENTIFIER}\\s+ADD\\s+(?:COLUMN|INDEX)\\b`, "i");
+const ALTER_TABLE_PREFIX = new RegExp(`^ALTER\\s+TABLE\\s+${TABLE_IDENTIFIER}\\s+`, "i");
+const ALTER_ADD_ACTION = new RegExp(`^ADD\\s+(?:COLUMN|INDEX|PRIMARY\\s+KEY|UNIQUE(?:\\s+(?:KEY|INDEX))?|FOREIGN\\s+KEY|CONSTRAINT|CHECK)\\b`, "i");
+const ALTER_DESTRUCTIVE_ACTION = new RegExp(
+  [
+    `DROP\\s+PRIMARY\\s+KEY`,
+    `DROP\\s+(?:FOREIGN\\s+KEY|INDEX|CONSTRAINT|CHECK)\\s+${IDENTIFIER}`,
+    `DROP\\s+(?:COLUMN\\s+)?${IDENTIFIER}`,
+    `MODIFY\\s+(?:COLUMN\\s+)?${IDENTIFIER}\\b`,
+    `CHANGE\\s+(?:COLUMN\\s+)?${IDENTIFIER}\\s+${IDENTIFIER}\\b`,
+    `RENAME\\s+COLUMN\\s+${IDENTIFIER}\\s+TO\\s+${IDENTIFIER}`,
+    `RENAME\\s+INDEX\\s+${IDENTIFIER}\\s+TO\\s+${IDENTIFIER}`,
+    `RENAME\\s+TO\\s+${IDENTIFIER}`,
+    `ALTER\\s+(?:COLUMN\\s+)?${IDENTIFIER}\\s+(?:SET\\s+DEFAULT|DROP\\s+DEFAULT)\\b`,
+    `CONVERT\\s+TO\\s+CHARACTER\\s+SET\\b`
+  ].join("|"),
+  "i"
+);
 const TRUNCATE_PATTERN = new RegExp(`^TRUNCATE\\s+(?:TABLE\\s+)?${TABLE_IDENTIFIER}$`, "i");
 const DROP_TABLE_PATTERN = new RegExp(`^DROP\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?${TABLE_IDENTIFIER}$`, "i");
 const DROP_DATABASE_PATTERN = new RegExp(`^DROP\\s+DATABASE\\s+(?:IF\\s+EXISTS\\s+)?${IDENTIFIER}$`, "i");
@@ -107,10 +123,27 @@ function validateRead(statement: string): string {
   if (!keyword || !["SELECT", "WITH", "SHOW", "DESCRIBE", "DESC", "EXPLAIN"].includes(keyword)) {
     throw new Error("database_query supports read-only MySQL statements only.");
   }
-  if (/\b(FOR\s+UPDATE|LOCK\s+IN\s+SHARE\s+MODE|INTO\s+OUTFILE|INTO\s+DUMPFILE|LOAD_FILE\s*\()\b/i.test(normalized)) {
-    throw new Error("This MySQL read query uses a blocked lock or file operation.");
+  if (/\b(FOR\s+UPDATE|LOCK\s+IN\s+SHARE\s+MODE|INTO\s+OUTFILE|INTO\s+DUMPFILE)\b|LOAD_FILE\s*\(|SLEEP\s*\(|BENCHMARK\s*\(|GET_LOCK\s*\(|RELEASE_LOCK\s*\(|MASTER_POS_WAIT\s*\(/i.test(normalized)) {
+    throw new Error("This MySQL read query uses a blocked lock, file, or time-wait operation.");
   }
   return normalized;
+}
+
+function validateAlter(normalized: string): ValidatedWrite {
+  const match = ALTER_TABLE_PREFIX.exec(normalized);
+  if (!match) throw new DatabasePolicyError("MySQL writes support only ALTER TABLE statements.");
+  const actions = splitTopLevelParts(normalized.slice(match[0].length));
+  if (actions.length === 0) throw new DatabasePolicyError("MySQL ALTER TABLE statements require at least one action.");
+  let destructive = false;
+  for (const action of actions) {
+    if (ALTER_DESTRUCTIVE_ACTION.test(action)) {
+      destructive = true;
+      continue;
+    }
+    if (ALTER_ADD_ACTION.test(action)) continue;
+    throw new DatabasePolicyError("MySQL ALTER TABLE supports only ADD COLUMN/INDEX/PRIMARY KEY/UNIQUE/FOREIGN KEY/CONSTRAINT/CHECK and single destructive actions (DROP, MODIFY, CHANGE, RENAME, ALTER, CONVERT).");
+  }
+  return { statement: normalized, statementKind: "alter", databaseRequired: true, forceConfirm: destructive || undefined };
 }
 
 function validateWrite(source: ResolvedSource, statement: string): ValidatedWrite {
@@ -155,14 +188,8 @@ function validateWrite(source: ResolvedSource, statement: string): ValidatedWrit
     }
     return { statement: normalized, statementKind: "create", databaseRequired: true };
   }
-  if (keyword === "ALTER" && ALTER_ADD_PATTERN.test(normalized)) {
-    const destructiveActions = ["DROP", "DELETE", "MODIFY", "CHANGE", "RENAME", "REPLACE", "TRUNCATE", "CLEAR", "REMOVE", "MOVE"];
-    if (destructiveActions.some((action) => hasTopLevelKeyword(normalized, action))) {
-      throw new DatabasePolicyError("MySQL writes do not support destructive ALTER TABLE statements.");
-    }
-    return { statement: normalized, statementKind: "alter", databaseRequired: true };
-  }
-  throw new DatabasePolicyError("MySQL writes support only INSERT ... VALUES, INSERT ... SELECT, UPDATE ... WHERE, DELETE ... WHERE, TRUNCATE, DROP, RENAME, REPLACE, CREATE DATABASE, CREATE TABLE, and ALTER TABLE ... ADD COLUMN/INDEX.");
+  if (keyword === "ALTER") return validateAlter(normalized);
+  throw new DatabasePolicyError("MySQL writes support only INSERT ... VALUES, INSERT ... SELECT, UPDATE ... WHERE, DELETE ... WHERE, TRUNCATE, DROP, RENAME, REPLACE, CREATE DATABASE, CREATE TABLE, and ALTER TABLE ADD or single destructive actions (DROP, MODIFY, CHANGE, RENAME, ALTER, CONVERT).");
 }
 
 function rowValues(row: unknown, columns: string[]): unknown[] {

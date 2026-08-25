@@ -16,7 +16,7 @@ import { createSourceTreeComponent } from "../src/source-tree.ts";
 import type { SourceTreeNode } from "../src/source-tree.ts";
 import { boundItems, boundRows, boundTableNames, resultLimits, truncateText } from "../src/results.ts";
 import databaseExtension, { __test__ } from "../index.ts";
-import { firstKeyword, hasMultipleStatements, hasTopLevelComma, hasTopLevelKeyword, normalizeSql } from "../src/sql.ts";
+import { firstKeyword, hasMultipleStatements, hasTopLevelComma, hasTopLevelKeyword, normalizeSql, splitTopLevelParts } from "../src/sql.ts";
 
 function writeConfig(dir: string, value: unknown): string {
   const configPath = path.join(dir, ".pi", "databases.json");
@@ -39,6 +39,10 @@ function testSqlScanner() {
   assert.equal(hasTopLevelComma("ALTER TABLE events DELETE WHERE name = 'a,b'"), false);
   assert.equal(hasTopLevelComma("ALTER TABLE events DELETE WHERE id IN (1, 2)"), false);
   assert.equal(hasTopLevelComma("ALTER TABLE events DELETE WHERE id = 1 -- , UPDATE flag = 1"), false);
+  assert.deepEqual(splitTopLevelParts("ADD COLUMN a int, DROP COLUMN b"), ["ADD COLUMN a int", "DROP COLUMN b"]);
+  assert.deepEqual(splitTopLevelParts("ADD COLUMN note varchar(20) DEFAULT 'a,b', ADD COLUMN c int"), ["ADD COLUMN note varchar(20) DEFAULT 'a,b'", "ADD COLUMN c int"]);
+  assert.deepEqual(splitTopLevelParts("DROP COLUMN a, DROP COLUMN b -- , DROP COLUMN c"), ["DROP COLUMN a", "DROP COLUMN b -- , DROP COLUMN c"]);
+  assert.deepEqual(splitTopLevelParts("ADD COLUMN c int /* x, y */, DROP COLUMN d"), ["ADD COLUMN c int /* x, y */", "DROP COLUMN d"]);
 }
 
 function testResultLimits() {
@@ -766,7 +770,7 @@ function testSourceTree() {
   assert.equal(closed, true);
 }
 
-function testWriteBoundaries() {
+async function testWriteBoundaries() {
   const mysql = {
     name: "mysql",
     dialect: "mysql" as const,
@@ -782,11 +786,26 @@ function testWriteBoundaries() {
   assert.equal(mysqlAdapter.validateWrite(mysql, "CREATE TABLE audit_log (id bigint)").statementKind, "create");
   assert.equal(mysqlAdapter.validateWrite(mysql, "CREATE TABLE audit_log (id bigint)").databaseRequired, true);
   assert.equal(mysqlAdapter.validateWrite(mysql, "ALTER TABLE users ADD COLUMN nickname varchar(32)").statementKind, "alter");
+  assert.equal(mysqlAdapter.validateWrite(mysql, "ALTER TABLE users ADD COLUMN nickname varchar(32)").forceConfirm, undefined);
+  assert.equal(mysqlAdapter.validateWrite(mysql, "ALTER TABLE users ADD PRIMARY KEY (id)").forceConfirm, undefined);
+  assert.equal(mysqlAdapter.validateWrite(mysql, "ALTER TABLE users ADD UNIQUE (email)").forceConfirm, undefined);
+  assert.equal(mysqlAdapter.validateWrite(mysql, "ALTER TABLE users ADD UNIQUE KEY uk_email (email)").forceConfirm, undefined);
+  assert.equal(mysqlAdapter.validateWrite(mysql, "ALTER TABLE users ADD FOREIGN KEY (org_id) REFERENCES orgs (id)").forceConfirm, undefined);
+  assert.equal(mysqlAdapter.validateWrite(mysql, "ALTER TABLE users ADD CONSTRAINT chk CHECK (age > 0)").forceConfirm, undefined);
   assert.throws(() => mysqlAdapter.validateWrite(mysql, "UPDATE users SET name = 'a'"), /WHERE clause/);
   assert.equal(mysqlAdapter.validateWrite(mysql, "INSERT INTO users SELECT id FROM archived").statementKind, "insert");
   assert.equal(mysqlAdapter.validateWrite(mysql, "INSERT INTO users (id) SELECT id FROM archived").forceConfirm, true);
   assert.throws(() => mysqlAdapter.validateWrite(mysql, "INSERT INTO users SET id = 1"), /support only/);
-  assert.throws(() => mysqlAdapter.validateWrite(mysql, "ALTER TABLE users ADD COLUMN nickname varchar(32), DROP COLUMN old_name"), /destructive ALTER/);
+  assert.equal(mysqlAdapter.validateWrite(mysql, "ALTER TABLE users ADD COLUMN nickname varchar(32), DROP COLUMN old_name").forceConfirm, true);
+  assert.equal(mysqlAdapter.validateWrite(mysql, "ALTER TABLE users DROP COLUMN old_name").statementKind, "alter");
+  assert.equal(mysqlAdapter.validateWrite(mysql, "ALTER TABLE users DROP COLUMN old_name").forceConfirm, true);
+  assert.equal(mysqlAdapter.validateWrite(mysql, "ALTER TABLE gateway_node DROP COLUMN vendor, DROP COLUMN model").forceConfirm, true);
+  assert.equal(mysqlAdapter.validateWrite(mysql, "ALTER TABLE users MODIFY COLUMN nickname varchar(64)").forceConfirm, true);
+  assert.equal(mysqlAdapter.validateWrite(mysql, "ALTER TABLE users CHANGE COLUMN nickname name varchar(64)").forceConfirm, true);
+  assert.equal(mysqlAdapter.validateWrite(mysql, "ALTER TABLE users RENAME COLUMN nickname TO name").forceConfirm, true);
+  assert.equal(mysqlAdapter.validateWrite(mysql, "ALTER TABLE users DROP INDEX idx_nickname").forceConfirm, true);
+  assert.throws(() => mysqlAdapter.validateWrite(mysql, "ALTER TABLE users DROP COLUMN a, DROP COLUMN b, ADD COLUMN c int, RANDOM GARBAGE"), /single destructive actions/);
+  assert.throws(() => mysqlAdapter.validateWrite(mysql, "ALTER TABLE users ENGINE = InnoDB"), /supports only/);
   assert.equal(mysqlAdapter.validateWrite(mysql, "DELETE FROM users WHERE id = 1").statementKind, "delete");
   assert.equal(mysqlAdapter.validateWrite(mysql, "DELETE FROM users WHERE id = 1").databaseRequired, true);
   assert.equal(mysqlAdapter.validateWrite(mysql, "DELETE FROM audit_log WHERE created_at < '2024-01-01' ORDER BY id LIMIT 10").statementKind, "delete");
@@ -810,6 +829,11 @@ function testWriteBoundaries() {
   assert.throws(() => mysqlAdapter.validateWrite(mysql, "RENAME TABLE a TO b, c TO d"), /single-pair/);
   assert.equal(mysqlAdapter.validateWrite(mysql, "REPLACE INTO users (id) VALUES (1)").statementKind, "replace");
   assert.throws(() => mysqlAdapter.validateWrite(mysql, "REPLACE INTO users SELECT id FROM archived"), /support only/);
+  await assert.rejects(() => mysqlAdapter.query(mysql, "app_db", "SELECT SLEEP(5)", 100), /time-wait/);
+  await assert.rejects(() => mysqlAdapter.query(mysql, "app_db", "SELECT BENCHMARK(1000000, MD5('x'))", 100), /time-wait/);
+  await assert.rejects(() => mysqlAdapter.query(mysql, "app_db", "SELECT GET_LOCK('k', 10)", 100), /time-wait/);
+  await assert.rejects(() => mysqlAdapter.query(mysql, "app_db", "SELECT * FROM users INTO OUTFILE '/tmp/x'", 100), /file/);
+  await assert.rejects(() => mysqlAdapter.query(mysql, "app_db", "SELECT * FROM users FOR UPDATE", 100), /lock/);
 
   const clickhouse = {
     name: "clickhouse",
@@ -834,6 +858,18 @@ function testWriteBoundaries() {
   assert.equal(clickhouseAdapter.validateWrite(clickhouse, "CREATE MATERIALIZED VIEW event_counts ON CLUSTER c TO event_counts_target AS SELECT event_type FROM events").forceConfirm, undefined);
   assert.equal(clickhouseAdapter.validateWrite(clickhouse, "CREATE OR REPLACE MATERIALIZED VIEW event_counts ON CLUSTER c TO event_counts_target AS SELECT event_type FROM events").forceConfirm, true);
   assert.equal(clickhouseAdapter.validateWrite(clickhouse, "ALTER TABLE events ADD COLUMN name String").statementKind, "alter");
+  assert.equal(clickhouseAdapter.validateWrite(clickhouse, "ALTER TABLE events ADD COLUMN name String").forceConfirm, undefined);
+  assert.equal(clickhouseAdapter.validateWrite(clickhouse, "ALTER TABLE events DROP COLUMN name").statementKind, "alter");
+  assert.equal(clickhouseAdapter.validateWrite(clickhouse, "ALTER TABLE events DROP COLUMN name").forceConfirm, true);
+  assert.equal(clickhouseAdapter.validateWrite(clickhouse, "ALTER TABLE events RENAME COLUMN old_name TO new_name").forceConfirm, true);
+  assert.equal(clickhouseAdapter.validateWrite(clickhouse, "ALTER TABLE events MODIFY COLUMN name String").forceConfirm, true);
+  assert.equal(clickhouseAdapter.validateWrite(clickhouse, "ALTER TABLE events CLEAR COLUMN payload").forceConfirm, true);
+  assert.equal(clickhouseAdapter.validateWrite(clickhouse, "ALTER TABLE events DROP PARTITION '2024-01'").forceConfirm, true);
+  assert.equal(clickhouseAdapter.validateWrite(clickhouse, "ALTER TABLE events ADD COLUMN a Int32, DROP COLUMN b").forceConfirm, true);
+  assert.equal(clickhouseAdapter.validateWrite(clickhouse, "ALTER TABLE events DROP COLUMN a, MODIFY COLUMN b String").forceConfirm, true);
+  await assert.rejects(() => clickhouseAdapter.query(clickhouse, "analytics", "SELECT * FROM events INTO OUTFILE '/tmp/x'", 100), /server-side file/);
+  await assert.rejects(() => clickhouseAdapter.query(clickhouse, "analytics", "SELECT sleep(3)", 100), /time-wait/);
+  await assert.rejects(() => clickhouseAdapter.query(clickhouse, "analytics", "SELECT sleepEachRow(0.1)", 100), /time-wait/);
   assert.equal(clickhouseAdapter.validateWrite(clickhouse, "INSERT INTO events SELECT id FROM other_events").statementKind, "insert");
   assert.equal(clickhouseAdapter.validateWrite(clickhouse, "INSERT INTO events (id) SELECT id FROM other_events").forceConfirm, true);
   assert.throws(() => clickhouseAdapter.validateWrite(clickhouse, "INSERT INTO events FORMAT JSONEachRow"), /support only/);
@@ -847,7 +883,7 @@ function testWriteBoundaries() {
   assert.equal(clickhouseAdapter.validateWrite(clickhouse, "ALTER TABLE events DELETE WHERE name = 'a,b'").statementKind, "delete");
   assert.equal(clickhouseAdapter.validateWrite(clickhouse, "ALTER TABLE events DELETE WHERE id IN (1, 2)").statementKind, "delete");
   assert.throws(() => clickhouseAdapter.validateWrite(clickhouse, "ALTER TABLE events DELETE WHERE id = 1, UPDATE flag = 1 WHERE id = 2"), /single command/);
-  assert.throws(() => clickhouseAdapter.validateWrite(clickhouse, "ALTER TABLE events DELETE WHERE id = 1, DROP COLUMN name"), /destructive or mutation/);
+  assert.throws(() => clickhouseAdapter.validateWrite(clickhouse, "ALTER TABLE events DELETE WHERE id = 1, DROP COLUMN name"), /single command/);
   assert.equal(clickhouseAdapter.validateWrite(clickhouse, "TRUNCATE TABLE IF EXISTS events").statementKind, "truncate");
   assert.throws(() => clickhouseAdapter.validateWrite(clickhouse, "TRUNCATE events"), /support only/);
   assert.equal(clickhouseAdapter.validateWrite(clickhouse, "DROP TABLE IF EXISTS events").statementKind, "drop");
@@ -855,7 +891,7 @@ function testWriteBoundaries() {
   assert.throws(() => clickhouseAdapter.validateWrite(clickhouse, "DROP TABLE events, other"), /single-object/);
   assert.equal(clickhouseAdapter.validateWrite(clickhouse, "RENAME TABLE events TO events_archive").statementKind, "rename");
   assert.throws(() => clickhouseAdapter.validateWrite(clickhouse, "RENAME TABLE a TO b, c TO d"), /single-pair/);
-  assert.throws(() => clickhouseAdapter.validateWrite(clickhouse, "ALTER TABLE events DROP COLUMN name"), /destructive or mutation/);
+  assert.throws(() => clickhouseAdapter.validateWrite(clickhouse, "ALTER TABLE events UPDATE flag = 1 WHERE id = 1"), /support only/);
   const readonlyMysql = { ...mysql, name: "readonly-mysql", allowWrite: false };
   assert.throws(() => mysqlAdapter.validateWrite(readonlyMysql, "INSERT INTO users (id) VALUES (1)"), /Writes are disabled/);
   assert.throws(() => mysqlAdapter.validateWrite(readonlyMysql, "INSERT INTO users (id) SELECT id FROM archived"), /Writes are disabled/);
@@ -872,7 +908,7 @@ testSourceSelection();
 await testDynamicRegistration();
 testDatabaseContextPrompt();
 await testToolPromptMetadata();
-testWriteBoundaries();
+await testWriteBoundaries();
 testDatabaseStatusText();
 testSourceTree();
 console.log("pi-database self-check OK");
