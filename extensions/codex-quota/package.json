@@ -5,9 +5,18 @@
   "type": "module",
   "scripts": {
     "test": "node --experimental-strip-types --test test/*.test.ts",
-    "check": "node --experimental-strip-types --check index.ts && npm test"
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && node --experimental-strip-types --check index.ts && node --experimental-strip-types --check src/file-lock.ts && npm test"
   },
   "pi": {
     "extensions": ["./index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.3",
+    "@types/node": "24.12.4",
+    "typescript": "5.9.3"
   }
 }
