@@ -263,21 +263,70 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+function reserveUniqueFallback(base: string, used: Set<string>): string {
+	let value = base;
+	let suffix = 2;
+	while (used.has(value)) value = `${base}_${suffix++}`;
+	used.add(value);
+	return value;
+}
+
 function prepareAskUserArguments(args: unknown): unknown {
 	if (!isRecord(args) || !Array.isArray(args.questions)) return args;
 
 	let changed = false;
-	const questions = args.questions.map((candidate) => {
-		if (!isRecord(candidate) || !Array.isArray(candidate.options)) return candidate;
+	const usedQuestionIds = new Set<string>();
+	for (const candidate of args.questions) {
+		if (!isRecord(candidate)) continue;
+		if (typeof candidate.id === "string" && candidate.id.trim()) {
+			usedQuestionIds.add(candidate.id);
+		}
+	}
 
-		const kind = typeof candidate.kind === "string" ? candidate.kind : undefined;
-		const shouldOmitOptions = candidate.options.length === 0 || kind === "text";
-		if (!shouldOmitOptions) return candidate;
+	const questions = args.questions.map((candidate, questionIndex) => {
+		if (!isRecord(candidate)) return candidate;
 
 		const next = { ...candidate };
-		delete next.options;
-		changed = true;
-		return next;
+		let questionChanged = false;
+
+		if (typeof candidate.id !== "string" || !candidate.id.trim()) {
+			next.id = reserveUniqueFallback(`question_${questionIndex + 1}`, usedQuestionIds);
+			questionChanged = true;
+		}
+
+		const kind = typeof candidate.kind === "string" ? candidate.kind : undefined;
+		const options = candidate.options;
+		const shouldOmitOptions = Array.isArray(options) && (options.length === 0 || kind === "text");
+		if (shouldOmitOptions) {
+			delete next.options;
+			questionChanged = true;
+		}
+
+		if (Array.isArray(options) && !shouldOmitOptions) {
+			const usedOptionValues = new Set<string>();
+			for (const option of options) {
+				if (!isRecord(option)) continue;
+				if (typeof option.value === "string" && option.value.trim()) {
+					usedOptionValues.add(option.value);
+				}
+			}
+
+			const normalizedOptions = options.map((option, optionIndex) => {
+				if (!isRecord(option)) return option;
+				if (typeof option.value === "string" && option.value.trim()) return option;
+
+				questionChanged = true;
+				return {
+					...option,
+					value: reserveUniqueFallback(`option_${questionIndex + 1}_${optionIndex + 1}`, usedOptionValues),
+				};
+			});
+
+			if (questionChanged) next.options = normalizedOptions;
+		}
+
+		if (questionChanged) changed = true;
+		return questionChanged ? next : candidate;
 	});
 
 	return changed ? { ...args, questions } : args;
