@@ -10,14 +10,15 @@ import {
   getContextCwd,
   initializeProjectConfig,
   loadProjectConfig,
-  selectSource
+  selectSource,
+  setProjectConfigEnabled
 } from "./src/config.js";
 import { mysqlAdapter } from "./src/mysql.js";
-import { createSourceTreeComponent } from "./src/source-tree.js";
+import { createSourceTreeComponent, formatSourceTreeText } from "./src/source-tree.js";
 import type { SourceTreeNode, SourceTreeTheme } from "./src/source-tree.js";
 import { firstKeyword, splitTopLevelParts } from "./src/sql.js";
 import { DatabasePolicyError } from "./src/types.js";
-import type { DatabaseAdapter, ResolvedSource, ValidatedWrite, WriteResult } from "./src/types.js";
+import type { DatabaseAdapter, ResolvedSource, SqlDialect, ValidatedWrite, WriteResult } from "./src/types.js";
 
 const adapters: Record<ResolvedSource["dialect"], DatabaseAdapter> = {
   mysql: mysqlAdapter,
@@ -25,37 +26,50 @@ const adapters: Record<ResolvedSource["dialect"], DatabaseAdapter> = {
 };
 
 const writeQueues = new Map<string, Promise<void>>();
+const DATABASE_TOOL_NAMES = [
+  "database_list_sources",
+  "database_ping",
+  "database_list_databases",
+  "database_list_tables",
+  "database_search_tables",
+  "database_describe_table",
+  "database_query",
+  "database_write"
+] as const;
 
-const SourceParams = Type.Object({
-  source: Type.Optional(Type.String({ description: "Configured database source name" }))
-});
+const SourceSelectionParams = {
+  source: Type.Optional(Type.String({ description: "Configured database source name; must match dialect when both are provided" })),
+  dialect: Type.Optional(Type.String({ pattern: "^(mysql|clickhouse)$", description: "MySQL or ClickHouse; selects that dialect's default source when source is omitted" }))
+};
+
+const SourceParams = Type.Object(SourceSelectionParams);
 
 const ListTablesParams = Type.Object({
-  source: Type.Optional(Type.String({ description: "Configured database source name" })),
+  ...SourceSelectionParams,
   database: Type.Optional(Type.String({ description: "Database name; defaults to the source database" }))
 });
 
 const SearchTablesParams = Type.Object({
-  source: Type.Optional(Type.String({ description: "Configured database source name" })),
+  ...SourceSelectionParams,
   term: Type.String({ description: "Case-insensitive table name or comment search text" }),
   database: Type.Optional(Type.String({ description: "Optional database filter" }))
 });
 
 const DescribeTableParams = Type.Object({
-  source: Type.Optional(Type.String({ description: "Configured database source name" })),
+  ...SourceSelectionParams,
   database: Type.String({ description: "Database containing the table" }),
   table: Type.String({ description: "Table to describe" })
 });
 
 const QueryParams = Type.Object({
-  source: Type.Optional(Type.String({ description: "Configured database source name" })),
+  ...SourceSelectionParams,
   database: Type.String({ minLength: 1, description: "Database to use for this query; required on every call" }),
   query: Type.String({ description: "Single read-only SQL statement" }),
   max_rows: Type.Optional(Type.Integer({ minimum: 1, maximum: 500, description: "Maximum returned rows; defaults to the selected source max_rows" }))
 });
 
 const WriteParams = Type.Object({
-  source: Type.Optional(Type.String({ description: "Configured database source name" })),
+  ...SourceSelectionParams,
   database: Type.Optional(Type.String({ minLength: 1, description: "Database for table-scoped writes; omit only for CREATE DATABASE and DROP DATABASE" })),
   statement: Type.String({ description: "Single supported write statement" })
 });
@@ -84,6 +98,7 @@ function sourceDetails(source: ResolvedSource, isDefault: boolean) {
   const database = typeof source.options.database === "string" ? source.options.database : undefined;
   return {
     name: source.name,
+    label: source.label ?? source.name,
     dialect: source.dialect,
     default: isDefault,
     host: host ?? url,
@@ -126,14 +141,25 @@ function renderDatabaseCall(
   return text;
 }
 
+function requestedDialect(value: unknown): SqlDialect | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") throw new Error('dialect must be "mysql" or "clickhouse".');
+  const dialect = value.trim();
+  if (!dialect) return undefined;
+  if (dialect === "mysql" || dialect === "clickhouse") return dialect;
+  throw new Error('dialect must be "mysql" or "clickhouse".');
+}
+
 function callSource(args: unknown, cwd: string): { name: string; dialect?: string; database?: string } {
   const requested = isRecord(args) && typeof args.source === "string" && args.source.trim() ? args.source.trim() : undefined;
+  let dialect: SqlDialect | undefined;
   try {
-    const source = selectSource(loadProjectConfig(cwd), requested);
+    dialect = requestedDialect(isRecord(args) ? args.dialect : undefined);
+    const source = selectSource(loadProjectConfig(cwd), requested, dialect);
     const database = typeof source.options.database === "string" && source.options.database.trim() ? source.options.database.trim() : undefined;
     return { name: source.name, dialect: source.dialect, database };
   } catch {
-    return { name: requested ?? "source" };
+    return { name: requested ?? "source", dialect };
   }
 }
 
@@ -268,18 +294,32 @@ function formatSqlForUi(query: string): string {
     .replace(/\b(LIMIT\s+BY|LIMIT|OFFSET|FETCH\s+(?:FIRST|NEXT))\b/gi, "\n$1")
     .replace(/\b(SETTINGS)\b/gi, "\n$1");
 
-  formatted = formatted.replace(/(^|\n)SELECT\s+([\s\S]*?)\nFROM\b/gim, (_match, prefix: string, selectList: string) => {
+  formatted = formatted.replace(/\bSELECT\s+([\s\S]*?)\nFROM\b/gim, (_match, selectList: string) => {
     const columns = splitTopLevelParts(selectList);
-    return columns.length <= 1 ? `${prefix}SELECT ${selectList}\nFROM` : `${prefix}SELECT\n  ${columns.join(",\n  ")}\nFROM`;
+    return columns.length <= 1 ? `SELECT ${selectList}\nFROM` : `SELECT\n  ${columns.join(",\n  ")}\nFROM`;
   });
   return formatNestedSubqueries(formatted.split("\n").map((line) => line.trimEnd()).join("\n").trim());
 }
 
+function formatInsertTargetColumnsForUi(sql: string): string {
+  const match = sql.match(/^(INSERT\s+INTO\s+[\s\S]*?)\(([^()]*)\)(?=\s+(?:SELECT|VALUES)\b)/i);
+  if (!match) return sql;
+  const columns = splitTopLevelParts(match[2] ?? "");
+  if (columns.length <= 1) return sql;
+  return `${match[1]}(\n  ${columns.join(",\n  ")}\n)\n${sql.slice(match[0].length).trimStart()}`;
+}
+
+function formatRenameTableForUi(sql: string): string {
+  return sql.replace(/^RENAME\s+TABLE\s+(.+?)\s+TO\s+/i, (_match, source: string) => `RENAME TABLE ${source}\nTO `);
+}
+
 function formatWriteSqlForUi(statement: string): string {
-  const formatted = formatSqlForUi(statement)
+  let formatted = formatSqlForUi(statement)
     .replace(/\s+\bSET\b/gi, "\nSET")
     .replace(/\s+\bVALUES\b/gi, "\nVALUES")
     .replace(/\s+\bADD\s+(?=(?:COLUMN|INDEX)\b)/gi, "\nADD ");
+  formatted = formatInsertTargetColumnsForUi(formatted);
+  formatted = formatRenameTableForUi(formatted);
   const values = formatted.match(/^([\s\S]*?\nVALUES)\s+([\s\S]+)$/i);
   if (values) {
     const rows = splitTopLevelParts(values[2]);
@@ -294,6 +334,18 @@ function formatWriteSqlForUi(statement: string): string {
 function getResultText(result: { content?: unknown }): string {
   const text = Array.isArray(result.content) ? result.content.find((item): item is { type: string; text: string } => isRecord(item) && item.type === "text") : undefined;
   return isRecord(text) && typeof text.text === "string" ? text.text : "";
+}
+
+function getResultDetails(result: { content?: unknown; details?: unknown }): Record<string, unknown> {
+  if (isRecord(result.details)) return result.details;
+  const text = getResultText(result).trim();
+  if (!text.startsWith("{")) return {};
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return isRecord(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
 }
 
 type QueryViewTheme = {
@@ -396,8 +448,9 @@ function sourceListView(details: { config_path: string; sources: ReturnType<type
   return {
     label: `config: ${details.config_path}`,
     count_label: `${details.sources.length} sources`,
-    columns: ["source", "dialect", "host", "database", "default", "write", "confirm"],
+    columns: ["label", "source", "dialect", "host", "database", "default", "write", "confirm"],
     rows: details.sources.map((s) => [
+      s.label ?? s.name,
       s.name,
       s.dialect,
       s.host ?? "—",
@@ -523,7 +576,7 @@ function renderQueryResultLines(
     return [...lines, ...wrapTextWithAnsi(t.error(`Error: ${getResultText(result).trim() || "Query failed"}`), safeWidth)];
   }
 
-  const details = isRecord(result.details) ? result.details : {};
+  const details = getResultDetails(result);
   const rowCount = typeof details.row_count === "number" ? details.row_count : 0;
   const truncated = details.truncated === true ? " · truncated" : "";
   const elapsedText = formatElapsed(details.elapsed_ms);
@@ -875,46 +928,119 @@ async function confirmWrite(ctx: unknown, confirmation: WriteConfirmation): Prom
   return (ui.confirm as (title: string, message: string) => Promise<boolean> | boolean)(confirmation.title, confirmation.message);
 }
 
-function resolveCurrentSource(ctx: unknown, requested?: string): ResolvedSource {
+function syncToolActivation(pi: ExtensionAPI, cwd: string): boolean {
+  const hasConfig = findProjectConfigPath(cwd) !== undefined;
+  let enabled = false;
+  if (hasConfig) {
+    try {
+      enabled = loadProjectConfig(cwd).enabled;
+    } catch {
+      // Keep invalid configs active so the status bar can surface the error.
+      enabled = true;
+    }
+  }
+  const databaseToolNames = new Set<string>(DATABASE_TOOL_NAMES);
+  const activeTools = pi.getActiveTools();
+  const nextTools = activeTools.filter((name) => !databaseToolNames.has(name));
+  if (hasConfig && enabled) nextTools.push(...DATABASE_TOOL_NAMES);
+  const deduplicated = [...new Set(nextTools)];
+  if (deduplicated.length !== activeTools.length || deduplicated.some((name, index) => name !== activeTools[index])) {
+    pi.setActiveTools(deduplicated);
+  }
+  return hasConfig && enabled;
+}
+
+function ensureDatabaseEnabled(config: { enabled: boolean; configPath: string }): void {
+  if (!config.enabled) {
+    throw new Error(`Database plugin is disabled in ${config.configPath}. Set "enabled": true to enable it.`);
+  }
+}
+
+function resolveCurrentSource(ctx: unknown, requested?: string, dialect?: string): ResolvedSource {
   const config = loadProjectConfig(getContextCwd(ctx));
-  return selectSource(config, requested);
+  ensureDatabaseEnabled(config);
+  return selectSource(config, requested, requestedDialect(dialect));
+}
+
+type DatabaseStatusContext = {
+  cwd?: string;
+  ui: {
+    setStatus(name: string, value: string | undefined): void;
+    theme: { fg(color: string, text: string): string };
+  };
+};
+
+function sourceTreeNodes(config: ReturnType<typeof loadProjectConfig>): SourceTreeNode[] {
+  return config.sources.map((source) => {
+    const details = sourceDetails(source, config.defaultSources[source.dialect] === source.name);
+    return { ...details, host: details.host ?? "" };
+  });
+}
+
+function refreshDatabaseStatus(pi: ExtensionAPI, ctx: DatabaseStatusContext): void {
+  const cwd = getContextCwd(ctx);
+  if (!findProjectConfigPath(cwd)) {
+    syncToolActivation(pi, cwd);
+    ctx.ui.setStatus("pi-database", undefined);
+    return;
+  }
+  syncToolActivation(pi, cwd);
+  try {
+    const config = loadProjectConfig(cwd);
+    ctx.ui.setStatus("pi-database", ctx.ui.theme.fg("accent", databaseStatusText(config)));
+  } catch {
+    ctx.ui.setStatus("pi-database", ctx.ui.theme.fg("error", "database: config error"));
+  }
 }
 
 function registerCommands(pi: ExtensionAPI): void {
-  pi.registerCommand("database-init", {
-    description: "Create a version 1 multi-source .pi/databases.json template",
-    handler: async (_args, ctx) => {
-      const result = initializeProjectConfig(getContextCwd(ctx));
-      if (result.created) {
-        ctx.ui.notify(`Created ${result.configPath}`, "info");
+  pi.registerCommand("database", {
+    description: "Show or control the project database plugin",
+    argumentHint: "status|on|off",
+    getArgumentCompletions: (prefix: string) => {
+      const normalized = prefix.trim().toLowerCase();
+      return ["status", "on", "off"]
+        .filter((value) => value.startsWith(normalized))
+        .map((value) => ({ value, label: value }));
+    },
+    handler: async (args, ctx) => {
+      const command = args.trim().toLowerCase() || "status";
+      if (command === "status") {
+        try {
+          const config = loadProjectConfig(getContextCwd(ctx));
+          const nodes = sourceTreeNodes(config);
+          if (ctx.mode === "tui" && typeof (ctx.ui as Record<string, unknown>).custom === "function") {
+            const custom = (ctx.ui as Record<string, unknown>).custom as (factory: (tui: { requestRender(force?: boolean): void }, theme: SourceTreeTheme, keybindings: unknown, done: (result: undefined) => void) => Component) => Promise<undefined>;
+            await custom((tui, theme, _keybindings, done) => createSourceTreeComponent(tui, config.configPath, nodes, theme, done, config.enabled));
+            return;
+          }
+          ctx.ui.notify(formatSourceTreeText(nodes, config.enabled).join("\n"), "info");
+        } catch (error) {
+          ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
+        }
         return;
       }
-      ctx.ui.notify(`${result.reason} Using ${result.configPath}`, "warning");
-    }
-  });
 
-  pi.registerCommand("database-status", {
-    description: "Show configured database sources as an interactive tree",
-    handler: async (_args, ctx) => {
-      let nodes: SourceTreeNode[];
-      let configPath: string;
+      if (command !== "on" && command !== "off") {
+        ctx.ui.notify("Usage: /database status|on|off", "warning");
+        return;
+      }
+
+      const enabled = command === "on";
       try {
-        const config = loadProjectConfig(getContextCwd(ctx));
-        configPath = config.configPath;
-        nodes = config.sources.map((source) => {
-          const details = sourceDetails(source, source.name === config.defaultSource);
-          return { ...details, host: details.host ?? "" };
-        });
+        const result = setProjectConfigEnabled(getContextCwd(ctx), enabled);
+        refreshDatabaseStatus(pi, ctx);
+        if (result.created) {
+          ctx.ui.notify(`Database plugin is on. Created ${result.configPath}`, "info");
+        } else if (result.changed) {
+          ctx.ui.notify(`Database plugin is ${enabled ? "on" : "off"}.`, "info");
+        } else {
+          ctx.ui.notify(enabled ? "Database plugin is already on." : "Database plugin is already off.", "info");
+        }
       } catch (error) {
-        ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
-        return;
+        refreshDatabaseStatus(pi, ctx);
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
       }
-      if (ctx.mode === "tui" && typeof (ctx.ui as Record<string, unknown>).custom === "function") {
-        const custom = (ctx.ui as Record<string, unknown>).custom as (factory: (tui: { requestRender(force?: boolean): void }, theme: SourceTreeTheme, keybindings: unknown, done: (result: undefined) => void) => Component) => Promise<undefined>;
-        await custom((tui, theme, _keybindings, done) => createSourceTreeComponent(tui, configPath, nodes, theme, done));
-        return;
-      }
-      ctx.ui.notify(nodes.map((node) => `${node.name} (${node.dialect})${node.default ? " · default" : ""} · ${node.host || "—"}`).join("\n"), "info");
     }
   });
 }
@@ -932,9 +1058,11 @@ function registerTools(pi: ExtensionAPI): void {
     parameters: Type.Object({}),
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       const config = loadProjectConfig(getContextCwd(ctx));
+      ensureDatabaseEnabled(config);
       const details = {
         config_path: config.configPath,
-        sources: config.sources.map((source) => sourceDetails(source, source.name === config.defaultSource))
+        default_sources: config.defaultSources,
+        sources: config.sources.map((source) => sourceDetails(source, config.defaultSources[source.dialect] === source.name))
       };
       return makeResult(details);
     },
@@ -942,7 +1070,7 @@ function registerTools(pi: ExtensionAPI): void {
       return renderDatabaseCall("Database Sources", undefined, [], theme, context);
     },
     renderResult(result, options, theme, context) {
-      const details = isRecord(result.details) ? result.details : {};
+      const details = getResultDetails(result);
       const view = sourceListView(details as { config_path: string; sources: ReturnType<typeof sourceDetails>[] });
       return new MetadataResultComponent(view, result, context.isError, options.expanded, createQueryViewTheme(theme));
     }
@@ -955,7 +1083,8 @@ function registerTools(pi: ExtensionAPI): void {
     promptSnippet: "Check connectivity for a configured database source",
     parameters: SourceParams,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      const source = resolveCurrentSource(ctx, (params as { source?: string }).source);
+      const input = params as { source?: string; dialect?: string };
+      const source = resolveCurrentSource(ctx, input.source, input.dialect);
       return makeResult(await adapterFor(source).ping(source, signal));
     },
     renderCall(args, theme, context) {
@@ -963,7 +1092,7 @@ function registerTools(pi: ExtensionAPI): void {
       return renderDatabaseCall("Database Ping", source, [], theme, context);
     },
     renderResult(result, _options, theme, context) {
-      const details = isRecord(result.details) ? result.details : {};
+      const details = getResultDetails(result);
       return new PingResultComponent(details, result, context.isError, createQueryViewTheme(theme));
     }
   });
@@ -978,7 +1107,8 @@ function registerTools(pi: ExtensionAPI): void {
     ],
     parameters: SourceParams,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      const source = resolveCurrentSource(ctx, (params as { source?: string }).source);
+      const input = params as { source?: string; dialect?: string };
+      const source = resolveCurrentSource(ctx, input.source, input.dialect);
       return makeResult(await adapterFor(source).listDatabases(source, signal));
     },
     renderCall(args, theme, context) {
@@ -986,7 +1116,7 @@ function registerTools(pi: ExtensionAPI): void {
       return renderDatabaseCall("Database Databases", source, [], theme, context);
     },
     renderResult(result, options, theme, context) {
-      const details = isRecord(result.details) ? result.details : {};
+      const details = getResultDetails(result);
       const view = databaseListView(
         Array.isArray(details.databases) ? details.databases as string[] : [],
         typeof details.source === "string" ? details.source : "",
@@ -1007,8 +1137,8 @@ function registerTools(pi: ExtensionAPI): void {
     ],
     parameters: ListTablesParams,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      const input = params as { source?: string; database?: string };
-      const source = resolveCurrentSource(ctx, input.source);
+      const input = params as { source?: string; dialect?: string; database?: string };
+      const source = resolveCurrentSource(ctx, input.source, input.dialect);
       const result = await adapterFor(source).listTables(source, input.database ?? String(source.options.database ?? ""), signal);
       return makeResult(result);
     },
@@ -1017,7 +1147,8 @@ function registerTools(pi: ExtensionAPI): void {
       return renderDatabaseCall("Database Tables", source, [callString(args, "database") ?? source.database ?? ""], theme, context);
     },
     renderResult(result, options, theme, context) {
-      const view = isRecord(result.details) ? tableListView(result.details as never) : {};
+      const details = getResultDetails(result);
+      const view = Object.keys(details).length > 0 ? tableListView(details as never) : {};
       return new MetadataResultComponent(view, result, context.isError, options.expanded, createQueryViewTheme(theme));
     }
   });
@@ -1033,8 +1164,8 @@ function registerTools(pi: ExtensionAPI): void {
     ],
     parameters: SearchTablesParams,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      const input = params as { source?: string; term: string; database?: string };
-      const source = resolveCurrentSource(ctx, input.source);
+      const input = params as { source?: string; dialect?: string; term: string; database?: string };
+      const source = resolveCurrentSource(ctx, input.source, input.dialect);
       const result = await adapterFor(source).searchTables(source, input.term, input.database, signal);
       return makeResult(result);
     },
@@ -1043,7 +1174,8 @@ function registerTools(pi: ExtensionAPI): void {
       return renderDatabaseCall("Database Find tables", source, [callString(args, "database") ?? "", callString(args, "term") ?? ""], theme, context);
     },
     renderResult(result, options, theme, context) {
-      const view = isRecord(result.details) ? tableSearchView(result.details as never) : {};
+      const details = getResultDetails(result);
+      const view = Object.keys(details).length > 0 ? tableSearchView(details as never) : {};
       return new MetadataResultComponent(view, result, context.isError, options.expanded, createQueryViewTheme(theme));
     }
   });
@@ -1058,8 +1190,8 @@ function registerTools(pi: ExtensionAPI): void {
     ],
     parameters: DescribeTableParams,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      const input = params as { source?: string; database: string; table: string };
-      const source = resolveCurrentSource(ctx, input.source);
+      const input = params as { source?: string; dialect?: string; database: string; table: string };
+      const source = resolveCurrentSource(ctx, input.source, input.dialect);
       const result = await adapterFor(source).describeTable(source, input.database, input.table, signal);
       return makeResult(result);
     },
@@ -1069,7 +1201,8 @@ function registerTools(pi: ExtensionAPI): void {
       return renderDatabaseCall("Database Describe", source, [target], theme, context);
     },
     renderResult(result, options, theme, context) {
-      const view = isRecord(result.details) ? tableDescriptionView(result.details as never) : {};
+      const details = getResultDetails(result);
+      const view = Object.keys(details).length > 0 ? tableDescriptionView(details as never) : {};
       return new MetadataResultComponent(view, result, context.isError, options.expanded, createQueryViewTheme(theme));
     }
   });
@@ -1084,8 +1217,8 @@ function registerTools(pi: ExtensionAPI): void {
     ],
     parameters: QueryParams,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      const input = params as { source?: string; database?: string; query: string; max_rows?: number };
-      const source = resolveCurrentSource(ctx, input.source);
+      const input = params as { source?: string; dialect?: string; database?: string; query: string; max_rows?: number };
+      const source = resolveCurrentSource(ctx, input.source, input.dialect);
       const database = typeof input.database === "string" ? input.database.trim() : "";
       if (!database) throw new Error("database_query requires a database argument.");
       onUpdate({ content: [{ type: "text", text: `${formatSqlForUi(input.query)}\n\nRunning...` }] });
@@ -1116,13 +1249,13 @@ function registerTools(pi: ExtensionAPI): void {
     promptSnippet: "Execute a dialect-specific write (data or schema change) using the selected source policy",
     promptGuidelines: [
       "Use database_write only for an explicit user-requested change after selecting the correct source; never use bash or a local database client as a write fallback.",
-      "database_write requires database for table-scoped writes; omit database only for CREATE DATABASE and DROP DATABASE. ClickHouse supports standard CREATE MATERIALIZED VIEW ... TO ... AS SELECT or ... ENGINE = ... AS SELECT forms, including ON CLUSTER. CREATE OR REPLACE variants and INSERT ... SELECT (INSERT INTO <table> [(columns)] SELECT ...) require forced interactive confirmation; POPULATE, refreshable/window views, DEFINER, and SQL SECURITY are rejected. It follows the selected source confirmation policy and rejects multi-statement and unsupported SQL. DELETE, TRUNCATE, DROP, RENAME, REPLACE, and destructive ALTER (DROP/MODIFY/CHANGE/RENAME column, etc.) always require interactive confirmation regardless of write_confirm. If it returns blocked, stop and explain the selected source policy to the user.",
+      "database_write accepts exactly one supported SQL statement per call. For multi-step operations, use separate calls and handle each result independently; do not submit scripts, semicolon-separated statements, or USE/database-selection statements, and do not assume the sequence is atomic. Pass database instead of USE. It requires database for table-scoped writes; omit database only for CREATE DATABASE and DROP DATABASE. ClickHouse supports standard CREATE MATERIALIZED VIEW ... TO ... AS SELECT or ... ENGINE = ... AS SELECT forms, including ON CLUSTER. CREATE OR REPLACE variants and INSERT ... SELECT (INSERT INTO <table> [(columns)] SELECT ...) require forced interactive confirmation; POPULATE, refreshable/window views, DEFINER, and SQL SECURITY are rejected. It follows the selected source confirmation policy and rejects unsupported SQL. DELETE, TRUNCATE, DROP, RENAME, REPLACE, and destructive ALTER (DROP/MODIFY/CHANGE/RENAME column, etc.) always require interactive confirmation regardless of write_confirm. If it returns blocked, stop and explain the selected source policy to the user.",
       "If database_write reports outcome unknown after a timeout or lost connection, first use database_query or metadata tools to verify database state; do not retry automatically and never use bash or a database client to bypass policy."
     ],
     parameters: WriteParams,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      const input = params as { source?: string; database?: string; statement: string };
-      const source = resolveCurrentSource(ctx, input.source);
+      const input = params as { source?: string; dialect?: string; database?: string; statement: string };
+      const source = resolveCurrentSource(ctx, input.source, input.dialect);
       const database = typeof input.database === "string" ? input.database.trim() || undefined : undefined;
       return serializeWrite(source, async () => {
         const adapter = adapterFor(source);
@@ -1143,7 +1276,7 @@ function registerTools(pi: ExtensionAPI): void {
             database,
             requested_statement: input.statement,
             reason: error.message,
-            next_action: "Stop. Explain this source policy to the user and ask what they want to do next. Do not use bash, a database client, or config edits to bypass it."
+            next_action: "Stop this write attempt. Explain this source policy to the user and ask what they want to do next. database_write accepts one supported SQL statement per call; any later step in a multi-step operation requires a separate call with independent validation and confirmation. Do not retry or continue automatically, and do not use bash, a database client, or config edits to bypass it."
           };
           return makeResult(result, formatWrite(result));
         }
@@ -1233,7 +1366,8 @@ function registerTools(pi: ExtensionAPI): void {
       return renderDatabaseCall("Database Write", source, [callString(args, "database") ?? "", firstKeyword(statement) ?? "SQL"], theme, context);
     },
     renderResult(result, options, theme, context) {
-      const details = isRecord(result.details) ? result.details as WriteResult : undefined;
+      const parsedDetails = getResultDetails(result);
+      const details = Object.keys(parsedDetails).length > 0 ? parsedDetails as WriteResult : undefined;
       if (context.isError || !details) {
         const text = context.isError ? String(result.content?.[0]?.text ?? "Write failed") : "Write completed";
         return new Text(theme.fg(writeResultColor(details, context.isError), text), 0, 0);
@@ -1245,39 +1379,20 @@ function registerTools(pi: ExtensionAPI): void {
 }
 
 export default function databaseExtension(pi: ExtensionAPI) {
-  let toolsRegistered = false;
-  const registerToolsIfConfigured = (cwd: string): boolean => {
-    if (toolsRegistered || !findProjectConfigPath(cwd)) return toolsRegistered;
-    registerTools(pi);
-    toolsRegistered = true;
-    return true;
-  };
-
-  // Commands are always available: /database-init exists precisely to create the
-  // config when none exists, so it must not be gated behind config presence.
+  // Register definitions during extension loading so Pi can render persisted
+  // tool rows while restoring a session, before session_start is emitted.
   registerCommands(pi);
+  registerTools(pi);
 
   pi.on("before_agent_start", async (event, ctx) => {
     const cwd = event.cwd ?? getContextCwd(ctx);
-    registerToolsIfConfigured(cwd);
+    syncToolActivation(pi, cwd);
     const prompt = buildDatabaseContextPrompt(cwd);
     return prompt ? { systemPrompt: `${event.systemPrompt}\n\n${prompt}` } : undefined;
   });
 
   pi.on("session_start", async (_event, ctx) => {
-    if (!registerToolsIfConfigured(getContextCwd(ctx))) {
-      ctx.ui.setStatus("pi-database", undefined);
-      return;
-    }
-    try {
-      const config = loadProjectConfig(getContextCwd(ctx));
-      ctx.ui.setStatus("pi-database", ctx.ui.theme.fg("accent", databaseStatusText(config)));
-    } catch {
-      // A config file exists but failed to load; keep the badge visible so the
-      // user knows the database extension is not usable, rather than silently
-      // pretending there is no config at all.
-      ctx.ui.setStatus("pi-database", ctx.ui.theme.fg("error", "database: config error"));
-    }
+    refreshDatabaseStatus(pi, ctx);
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {

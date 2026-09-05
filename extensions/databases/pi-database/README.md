@@ -8,11 +8,16 @@ The extension reads `.pi/databases.json` from the current project or its nearest
 
 ```json
 {
-  "version": 1,
-  "default_source": "",
+  "version": 2,
+  "enabled": true,
+  "default_sources": {
+    "mysql": "mysql_localhost",
+    "clickhouse": "clickhouse_localhost"
+  },
   "sources": [
     {
       "name": "mysql_localhost",
+      "label": "MySQL Local",
       "dialect": "mysql",
       "allow_write": true,
       "write_confirm": false,
@@ -28,6 +33,7 @@ The extension reads `.pi/databases.json` from the current project or its nearest
     },
     {
       "name": "clickhouse_localhost",
+      "label": "ClickHouse Local",
       "dialect": "clickhouse",
       "allow_write": true,
       "write_confirm": false,
@@ -44,18 +50,19 @@ The extension reads `.pi/databases.json` from the current project or its nearest
 }
 ```
 
-Source names are globally unique and may contain letters, digits, underscores, dots, and hyphens. `password_env` takes precedence over `password` and fails clearly when the named environment variable is absent. `options.database` is optional; set it only when one database should be the source default. `query_timeout_ms` defaults to `30000`; `max_rows` defaults to `100` and is capped at `500`. The `database_query.max_rows` argument overrides its source default for that call. `allow_write` defaults to `true`; set it to `false` to make a source read-only. `write_confirm` defaults to `false`; set it to `true` for a source that should require interactive confirmation before writes. `INSERT ... SELECT` and destructive statements (`DELETE`, `TRUNCATE`, `DROP`, `RENAME`, `REPLACE`) always require interactive confirmation regardless of `write_confirm`.
+Source names are globally unique and may contain letters, digits, underscores, dots, and hyphens. `label` is optional and is used only in the status view; it falls back to `name`, which remains the stable value for tool selection. `enabled` defaults to `true`; set it to `false` to deactivate the database tools, prompt context, and status badge for this project. Tool definitions remain registered so historical tool rows can keep their custom TUI rendering. `default_sources` maps each dialect to a configured source of the same dialect; omit either key when that dialect has no default. `password_env` takes precedence over `password` and fails clearly when the named environment variable is absent. `options.database` is optional; set it only when one database should be the source default. `query_timeout_ms` defaults to `30000`; `max_rows` defaults to `100` and is capped at `500`. The `database_query.max_rows` argument overrides its source default for that call. `allow_write` defaults to `true`; set it to `false` to make a source read-only. `write_confirm` defaults to `false`; set it to `true` for a source that should require interactive confirmation before writes. `INSERT ... SELECT` and destructive statements (`DELETE`, `TRUNCATE`, `DROP`, `RENAME`, `REPLACE`) always require interactive confirmation regardless of `write_confirm`. Version 1 configurations and `default_source` are unsupported.
 
-When a tool omits `source`, it uses `default_source`; a single configured source is also selected automatically. Multiple sources without a default require an explicit source name. Without `options.database`, `database_list_tables` requires its `database` argument. `database_query` always requires its `database` argument, even when the source has a default database.
+When a tool omits `source`, it must pass `dialect` (`mysql` or `clickhouse`) to use that dialect's configured default. An explicit `source` may be used instead and must match `dialect` when both are passed. A single configured source is selected automatically. Multiple sources with neither `source` nor `dialect` require an explicit choice. Without `options.database`, `database_list_tables` requires its `database` argument. `database_query` always requires its `database` argument, even when the source has a default database.
 
 ## Commands
 
-- `/database-init`: creates a version 1 template only when no local or inherited config exists.
-- `/database-status`: opens an interactive tree of configured sources (`↑↓` select, `Enter` expand/collapse details, `Esc` close).
+- `/database status`: opens an interactive tree of configured sources (`↑↓` select, `Enter` expand/collapse details, `Esc` close).
+- `/database on`: enables the plugin; creates a version 2 template when no local or inherited config exists.
+- `/database off`: disables the plugin for the current project.
 
-Both commands are always available, even before a `.pi/databases.json` exists; `database-status` reports the missing-config error and `database-init` never overwrites an existing config. The `database_*` tools are registered only when a config file is found.
+The `/database` command is always available, even before a `.pi/databases.json` exists; `status` reports the missing-config error and `on` creates a template without overwriting an existing config. Tool definitions are registered at startup so persisted tool rows can recover their custom TUI renderers; the `database_*` tools are active only when a config file is found and `enabled` is not `false`.
 
-The footer status badge shows the default source (or a `N sources` count when there is no default): `database: mysql-192.168.27.148 +1`. An invalid config shows `database: config error` in red.
+The footer status badge shows only plugin state: `database: on` or `database: off`. An invalid config shows `database: config error` in red. Use `/database status` to inspect sources in a compact list.
 
 ## Tools
 
@@ -68,7 +75,7 @@ The footer status badge shows the default source (or a `N sources` count when th
 - `database_query`
 - `database_write`
 
-Every result identifies its source and dialect. Results are bounded to 500 rows/tables, 50KB total output, and 2,000 characters per cell or metadata text field. `database_query` is read-only and blocks lock, file, and time-wait operations (MySQL `FOR UPDATE`, `LOCK IN SHARE MODE`, `INTO OUTFILE/DUMPFILE`, `LOAD_FILE`, `SLEEP`, `BENCHMARK`, `GET_LOCK`, `MASTER_POS_WAIT`; ClickHouse `INTO OUTFILE`, `sleep`/`sleepEachRow`). `database_write` runs only when `allow_write: true` on the selected source and asks for interactive confirmation when `write_confirm: true` is configured for that source; restricted `INSERT ... SELECT`, destructive statements, and ClickHouse `CREATE OR REPLACE MATERIALIZED VIEW` always ask (see below). Table-scoped writes require its `database` argument; only `CREATE DATABASE` and `DROP DATABASE` omit it.
+Every result identifies its source and dialect. Source-selecting tools accept optional `source` and `dialect` parameters; use `dialect` to choose its configured default when `source` is omitted. Results are bounded to 500 rows/tables, 50KB total output, and 2,000 characters per cell or metadata text field. `database_query` is read-only and blocks lock, file, and time-wait operations (MySQL `FOR UPDATE`, `LOCK IN SHARE MODE`, `INTO OUTFILE/DUMPFILE`, `LOAD_FILE`, `SLEEP`, `BENCHMARK`, `GET_LOCK`, `MASTER_POS_WAIT`; ClickHouse `INTO OUTFILE`, `sleep`/`sleepEachRow`). `database_write` runs only when `allow_write: true` on the selected source and asks for interactive confirmation when `write_confirm: true` is configured for that source; restricted `INSERT ... SELECT`, destructive statements, and ClickHouse `CREATE OR REPLACE MATERIALIZED VIEW` always ask (see below). Table-scoped writes require its `database` argument; only `CREATE DATABASE` and `DROP DATABASE` omit it.
 
 Allowed writes:
 
@@ -110,7 +117,7 @@ ClickHouse:
 
 ClickHouse materialized views use the normal create policy: `write_confirm` controls whether creation asks for confirmation, including the supported `ON CLUSTER` variants. Only `CREATE MATERIALIZED VIEW ... TO ... AS SELECT ...` and `CREATE MATERIALIZED VIEW ... ENGINE = ... AS SELECT ...` are supported. The `CREATE OR REPLACE` variant of those forms is allowed but always requires interactive confirmation. `POPULATE`, refreshable/window views, `DEFINER`, and `SQL SECURITY` are rejected.
 
-Replacement writes, drops, truncates, renames, derived table creation, destructive `ALTER` outside the supported restricted actions, ClickHouse mutations (except the restricted `ALTER TABLE ... DELETE WHERE` and destructive actions), `ON CLUSTER` outside the supported materialized-view forms, other admin operations, and multiple statements are rejected (the restricted `INSERT ... SELECT` and destructive forms are available through `database_write` when `allow_write: true`, always with confirmation). If a confirmed write times out or loses its connection, the result reports `outcome: "unknown"`; inspect with `database_query` or metadata tools before any further action, and never retry automatically.
+Replacement writes, drops, truncates, renames, derived table creation, destructive `ALTER` outside the supported restricted actions, ClickHouse mutations (except the restricted `ALTER TABLE ... DELETE WHERE` and destructive actions), `ON CLUSTER` outside the supported materialized-view forms, other admin operations, and multiple statements are rejected (the restricted `INSERT ... SELECT` and destructive forms are available through `database_write` when `allow_write: true`, always with confirmation). `database_write` accepts one SQL statement per call; for multi-step operations, use separate calls, handle each result independently, pass `database` instead of `USE`, and do not assume atomic execution. If a confirmed write times out or loses its connection, the result reports `outcome: "unknown"`; inspect with `database_query` or metadata tools before any further action, and never retry automatically.
 
 ## Discovery workflow
 

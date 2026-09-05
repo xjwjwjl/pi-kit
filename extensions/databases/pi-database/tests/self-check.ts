@@ -8,11 +8,12 @@ import {
   initializeProjectConfig,
   loadProjectConfig,
   selectSource,
+  setProjectConfigEnabled,
   sourceWithDatabase
 } from "../src/config.ts";
 import { clickhouseAdapter } from "../src/clickhouse.ts";
 import { mysqlAdapter } from "../src/mysql.ts";
-import { createSourceTreeComponent } from "../src/source-tree.ts";
+import { createSourceTreeComponent, formatSourceTreeText } from "../src/source-tree.ts";
 import type { SourceTreeNode } from "../src/source-tree.ts";
 import { boundItems, boundRows, boundTableNames, resultLimits, truncateText } from "../src/results.ts";
 import databaseExtension, { __test__ } from "../index.ts";
@@ -62,19 +63,34 @@ function testInitializeConfig() {
   const result = initializeProjectConfig(dir);
   assert.equal(result.created, true);
   const config = JSON.parse(fs.readFileSync(result.configPath, "utf-8"));
-  assert.equal(config.version, 1);
+  assert.equal(config.version, 2);
+  assert.equal(config.enabled, true);
+  assert.deepEqual(config.default_sources, { mysql: "mysql_localhost", clickhouse: "clickhouse_localhost" });
   assert.equal(config.sources.length, 2);
   assert.equal(config.sources.every((source: { allow_write: boolean }) => source.allow_write === true), true);
   assert.equal(config.sources.every((source: { write_confirm: boolean }) => source.write_confirm === false), true);
   assert.equal(config.sources.every((source: { query_timeout_ms: number }) => source.query_timeout_ms === 30_000), true);
   assert.equal(config.sources.every((source: { max_rows: number }) => source.max_rows === 100), true);
   assert.equal(config.sources.every((source: { options: Record<string, unknown> }) => source.options.database === ""), true);
+  assert.deepEqual(config.sources.map((source: { label: string }) => source.label), ["MySQL Local", "ClickHouse Local"]);
   assert.equal(initializeProjectConfig(dir).created, false);
+  const disabled = setProjectConfigEnabled(dir, false);
+  assert.equal(disabled.changed, true);
+  assert.equal(loadProjectConfig(dir).enabled, false);
+  const enabled = setProjectConfigEnabled(dir, true);
+  assert.equal(enabled.changed, true);
+  assert.equal(loadProjectConfig(dir).enabled, true);
+
+  const noConfigDisableDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-disable-empty-"));
+  const noConfigDisable = setProjectConfigEnabled(noConfigDisableDir, false);
+  assert.equal(noConfigDisable.changed, false);
+  assert.equal(noConfigDisable.created, false);
+  assert.equal(fs.existsSync(path.join(noConfigDisableDir, ".pi", "databases.json")), false);
 
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-parent-"));
   const child = path.join(parent, "child");
   fs.mkdirSync(child);
-  const parentConfig = writeConfig(parent, { version: 1, sources: [{ name: "only", dialect: "mysql", options: { host: "localhost", user: "u" } }] });
+  const parentConfig = writeConfig(parent, { version: 2, default_sources: {}, sources: [{ name: "only", dialect: "mysql", options: { host: "localhost", user: "u" } }] });
   const inherited = initializeProjectConfig(child);
   assert.equal(inherited.created, false);
   assert.equal(inherited.configPath, parentConfig);
@@ -84,8 +100,8 @@ function testInitializeConfig() {
 function testSourceSelection() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-source-"));
   writeConfig(dir, {
-    version: 1,
-    default_source: "analytics",
+    version: 2,
+    default_sources: { mysql: "app", clickhouse: "analytics" },
     sources: [
       { name: "app", dialect: "mysql", allow_write: false, write_confirm: true, query_timeout_ms: 12_000, max_rows: 25, options: { host: "localhost", user: "app", database: "app_db" } },
       { name: "analytics", dialect: "clickhouse", allow_write: true, write_confirm: false, query_timeout_ms: 45_000, max_rows: 999, options: { url: "http://localhost:8123", username: "analytics", database: "analytics" } }
@@ -93,7 +109,10 @@ function testSourceSelection() {
   });
   const config = loadProjectConfig(dir);
   assert.equal(config.sources.length, 2);
-  assert.equal(selectSource(config).name, "analytics");
+  assert.deepEqual(config.defaultSources, { mysql: "app", clickhouse: "analytics" });
+  assert.equal(selectSource(config, undefined, "mysql").name, "app");
+  assert.equal(selectSource(config, undefined, "clickhouse").name, "analytics");
+  assert.throws(() => selectSource(config), /Multiple database sources/);
   assert.equal(selectSource(config, "app").dialect, "mysql");
   assert.equal(selectSource(config, "app").queryTimeoutMs, 12_000);
   assert.equal(selectSource(config, "app").maxRows, 25);
@@ -108,10 +127,12 @@ function testSourceSelection() {
   assert.equal(selectSource(config, "app").options.database, "app_db");
   assert.notEqual(querySource.cacheKey, selectSource(config, "app").cacheKey);
   assert.throws(() => selectSource(config, "missing"), /Unknown database source/);
+  assert.throws(() => selectSource(config, "app", "clickhouse"), /uses mysql/);
 
   const ambiguous = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-ambiguous-"));
   writeConfig(ambiguous, {
-    version: 1,
+    version: 2,
+    default_sources: {},
     sources: [
       { name: "one", dialect: "mysql", options: { host: "localhost", user: "one" } },
       { name: "two", dialect: "clickhouse", options: { url: "http://localhost:8123", username: "two" } }
@@ -121,10 +142,23 @@ function testSourceSelection() {
   assert.equal(ambiguousConfig.sources[0]?.allowWrite, true);
   assert.equal(ambiguousConfig.sources[0]?.writeConfirm, false);
   assert.throws(() => selectSource(ambiguousConfig), /Multiple database sources/);
+  assert.throws(() => selectSource(ambiguousConfig, undefined, "mysql"), /No default mysql source/);
 
   const dotted = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-dotted-"));
-  writeConfig(dotted, { version: 1, sources: [{ name: "mysql-192.168.27.148", dialect: "mysql", options: { host: "localhost", user: "u" } }] });
+  writeConfig(dotted, { version: 2, default_sources: {}, sources: [{ name: "mysql-192.168.27.148", dialect: "mysql", options: { host: "localhost", user: "u" } }] });
   assert.equal(selectSource(loadProjectConfig(dotted)).name, "mysql-192.168.27.148");
+
+  const legacy = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-legacy-"));
+  writeConfig(legacy, { version: 1, default_source: "app", sources: [{ name: "app", dialect: "mysql", options: { host: "localhost", user: "u" } }] });
+  assert.throws(() => loadProjectConfig(legacy), /version 2 config/);
+
+  const legacyField = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-legacy-field-"));
+  writeConfig(legacyField, { version: 2, default_sources: { mysql: "app" }, default_source: "app", sources: [{ name: "app", dialect: "mysql", options: { host: "localhost", user: "u" } }] });
+  assert.throws(() => loadProjectConfig(legacyField), /default_source is no longer supported/);
+
+  const mismatchedDefault = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-mismatched-default-"));
+  writeConfig(mismatchedDefault, { version: 2, default_sources: { mysql: "analytics" }, sources: [{ name: "analytics", dialect: "clickhouse", options: { url: "http://localhost:8123", username: "u" } }] });
+  assert.throws(() => loadProjectConfig(mismatchedDefault), /must reference a mysql source/);
 }
 
 async function testDynamicRegistration() {
@@ -133,6 +167,19 @@ async function testDynamicRegistration() {
   const tools: string[] = [];
   const commands: string[] = [];
   const statuses: Array<string | undefined> = [];
+  const notifications: Array<{ message: string; type?: string }> = [];
+  const commandDefinitions = new Map<string, { handler?: (args: string, ctx: any) => Promise<void> | void; getArgumentCompletions?: (prefix: string) => unknown }>();
+  const databaseTools = [
+    "database_list_sources",
+    "database_ping",
+    "database_list_databases",
+    "database_list_tables",
+    "database_search_tables",
+    "database_describe_table",
+    "database_query",
+    "database_write"
+  ];
+  let activeTools = ["read", "bash", "edit", "write", ...databaseTools];
   databaseExtension({
     on(event: string, handler: (event: any, ctx: any) => Promise<unknown> | unknown) {
       handlers.set(event, [...(handlers.get(event) ?? []), handler]);
@@ -140,34 +187,61 @@ async function testDynamicRegistration() {
     registerTool(tool: { name?: string }) {
       if (tool.name) tools.push(tool.name);
     },
-    registerCommand(name: string) {
+    registerCommand(name: string, definition: { handler?: (args: string, ctx: any) => Promise<void> | void; getArgumentCompletions?: (prefix: string) => unknown }) {
       commands.push(name);
+      commandDefinitions.set(name, definition);
+    },
+    getActiveTools() {
+      return [...activeTools];
+    },
+    setActiveTools(nextTools: string[]) {
+      activeTools = [...nextTools];
     }
   } as never);
-  const ctx = { cwd: dir, ui: { setStatus(_name: string, value: string | undefined) { statuses.push(value); }, theme: { fg: (_color: string, text: string) => text } } };
-  assert.deepEqual(commands, ["database-init", "database-status"]);
+  const ctx = { cwd: dir, ui: { setStatus(_name: string, value: string | undefined) { statuses.push(value); }, notify(message: string, type?: string) { notifications.push({ message, type }); }, theme: { fg: (_color: string, text: string) => text } } };
+  assert.deepEqual(commands, ["database"]);
+  const databaseCommand = commandDefinitions.get("database");
+  assert.equal(typeof databaseCommand?.handler, "function");
+  assert.deepEqual(databaseCommand?.getArgumentCompletions?.("of"), [{ value: "off", label: "off" }]);
+  assert.equal(tools.length, 8, "tool definitions are registered before session_start for restored TUI rows");
   await handlers.get("session_start")![0]!({}, ctx);
-  assert.deepEqual(tools, []);
+  assert.deepEqual(activeTools, ["read", "bash", "edit", "write"]);
   assert.deepEqual(statuses, [undefined]);
 
-  writeConfig(dir, { version: 1, sources: [{ name: "app", dialect: "mysql", options: { host: "localhost", user: "app" } }] });
-  await handlers.get("before_agent_start")![0]!({ cwd: dir, systemPrompt: "base" }, ctx);
+  await databaseCommand!.handler!("on", ctx);
+  assert.equal(loadProjectConfig(dir).enabled, true);
+  assert.match(notifications.at(-1)?.message ?? "", /Database plugin is on/);
+  assert.deepEqual(activeTools, ["read", "bash", "edit", "write", ...databaseTools]);
+  await databaseCommand!.handler!("off", ctx);
+  assert.equal(loadProjectConfig(dir).enabled, false);
+  assert.match(notifications.at(-1)?.message ?? "", /Database plugin is off/);
+  assert.deepEqual(activeTools, ["read", "bash", "edit", "write"]);
+
+  writeConfig(dir, { version: 2, enabled: true, default_sources: { mysql: "app" }, sources: [{ name: "app", dialect: "mysql", options: { host: "localhost", user: "app" } }] });
+  const enabledPrompt = await handlers.get("before_agent_start")![0]!({ cwd: dir, systemPrompt: "base" }, ctx);
+  assert.equal(typeof enabledPrompt, "object");
   assert.equal(tools.length, 8);
-  assert.deepEqual(commands, ["database-init", "database-status"]);
+  assert.deepEqual(activeTools, ["read", "bash", "edit", "write", ...databaseTools]);
+  assert.deepEqual(commands, ["database"]);
+
+  writeConfig(dir, { version: 2, enabled: false, default_sources: { mysql: "app" }, sources: [{ name: "app", dialect: "mysql", options: { host: "localhost", user: "app" } }] });
+  const disabledPrompt = await handlers.get("before_agent_start")![0]!({ cwd: dir, systemPrompt: "base" }, ctx);
+  assert.equal(disabledPrompt, undefined);
+  assert.deepEqual(activeTools, ["read", "bash", "edit", "write"]);
 
   // A config file that fails to load keeps tools registered but surfaces the
   // config error in the status instead of claiming there is no config.
-  writeConfig(dir, { version: 1, sources: [{ name: "bad", dialect: "unsupported", options: {} }] });
+  writeConfig(dir, { version: 2, default_sources: {}, sources: [{ name: "bad", dialect: "unsupported", options: {} }] });
   await handlers.get("session_start")![0]!({}, ctx);
   assert.equal(tools.length, 8);
-  assert.deepEqual(statuses, [undefined, "database: config error"]);
+  assert.deepEqual(statuses, [undefined, "database: on", "database: off", "database: config error"]);
 }
 
 function testDatabaseContextPrompt() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-prompt-"));
   writeConfig(dir, {
-    version: 1,
-    default_source: "app",
+    version: 2,
+    default_sources: { mysql: "app", clickhouse: "analytics" },
     sources: [
       { name: "app", dialect: "mysql", options: { host: "localhost", user: "app" } },
       { name: "analytics", dialect: "clickhouse", options: { url: "http://localhost:8123", username: "analytics" } }
@@ -183,11 +257,23 @@ function testDatabaseContextPrompt() {
   assert.doesNotMatch(prompt, /mysql, clickhouse-client/);
   assert.match(prompt, /If database_write returns blocked or unsupported, stop/);
   assert.match(prompt, /outcome is unknown/);
-  assert.match(prompt, /default source selects only the connection, never a database/);
+  assert.match(prompt, /Default sources select only connections, never databases/);
+  assert.match(prompt, /pass dialect to select that dialect's configured default/);
   assert.match(prompt, /database_query and database_list_tables, always pass database/);
   assert.match(prompt, /If the database is unknown, call database_list_databases first/);
   assert.match(prompt, /CREATE MATERIALIZED VIEW/);
   assert.match(prompt, /INSERT \.\.\. SELECT/);
+  assert.match(prompt, /exactly one supported SQL statement per call/);
+  assert.match(prompt, /multi-step operations/);
+  assert.match(prompt, /do not submit scripts/);
+  const disabledDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-disabled-prompt-"));
+  writeConfig(disabledDir, {
+    version: 2,
+    enabled: false,
+    default_sources: { mysql: "app" },
+    sources: [{ name: "app", dialect: "mysql", options: { host: "localhost", user: "app" } }]
+  });
+  assert.equal(buildDatabaseContextPrompt(disabledDir), undefined);
   const noConfigDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-no-prompt-"));
   assert.equal(buildDatabaseContextPrompt(noConfigDir), undefined);
 }
@@ -219,7 +305,10 @@ async function testToolPromptMetadata() {
   );
   assert.equal(__test__.formatSqlForUi("SELECT * FROM events PREWHERE date >= today() - 7 WHERE active QUALIFY score > 0 LIMIT BY user_id LIMIT 10 OFFSET 5"), "SELECT *\nFROM events\nPREWHERE date >= today() - 7\nWHERE active\nQUALIFY score > 0\nLIMIT BY user_id\nLIMIT 10\nOFFSET 5");
   assert.equal(__test__.formatWriteSqlForUi("UPDATE users SET enabled = 0 WHERE id = 42"), "UPDATE users\nSET enabled = 0\nWHERE id = 42");
-  assert.equal(__test__.formatWriteSqlForUi("INSERT INTO users (id, name) VALUES (1, 'Lin'), (2, 'Pi')"), "INSERT INTO users (id, name)\nVALUES\n  (1, 'Lin'),\n  (2, 'Pi')");
+  assert.equal(__test__.formatWriteSqlForUi("INSERT INTO users (id, name) VALUES (1, 'Lin'), (2, 'Pi')"), "INSERT INTO users (\n  id,\n  name\n)\nVALUES\n  (1, 'Lin'),\n  (2, 'Pi')");
+  assert.equal(__test__.formatWriteSqlForUi("INSERT INTO cmcc_network_manage.ods_snmp_samples_rebuild (insert_time, event_time, vendor_id) SELECT insert_time, event_time, vendor_id FROM cmcc_network_manage.ods_snmp_samples WHERE event_time > '2026-08-25 16:21:00.155'"), "INSERT INTO cmcc_network_manage.ods_snmp_samples_rebuild (\n  insert_time,\n  event_time,\n  vendor_id\n)\nSELECT\n  insert_time,\n  event_time,\n  vendor_id\nFROM cmcc_network_manage.ods_snmp_samples\nWHERE event_time > '2026-08-25 16:21:00.155'");
+  assert.equal(__test__.formatWriteSqlForUi("INSERT INTO cmcc_network_manage.ods_snmp_samples_rebuild_ordered_20260825 (insert_time, event_time, vendor_id, device_id, device_ip, mib_type, component, metric, value_float, value_text, value_status) SELECT insert_time, event_time, vendor_id, device_id, device_ip, mib_type, component, metric, value_float, value_text, value_status FROM cmcc_network_manage.ods_snmp_samples"), "INSERT INTO cmcc_network_manage.ods_snmp_samples_rebuild_ordered_20260825 (\n  insert_time,\n  event_time,\n  vendor_id,\n  device_id,\n  device_ip,\n  mib_type,\n  component,\n  metric,\n  value_float,\n  value_text,\n  value_status\n)\nSELECT\n  insert_time,\n  event_time,\n  vendor_id,\n  device_id,\n  device_ip,\n  mib_type,\n  component,\n  metric,\n  value_float,\n  value_text,\n  value_status\nFROM cmcc_network_manage.ods_snmp_samples");
+  assert.equal(__test__.formatWriteSqlForUi("RENAME TABLE cmcc_network_manage.ods_snmp_samples_rebuild_ordered_20260825 TO cmcc_network_manage.ods_snmp_samples"), "RENAME TABLE cmcc_network_manage.ods_snmp_samples_rebuild_ordered_20260825\nTO cmcc_network_manage.ods_snmp_samples");
   assert.equal(__test__.formatWriteSqlForUi("CREATE TABLE audit_log (id bigint, created_at timestamp)"), "CREATE TABLE audit_log (\n  id bigint,\n  created_at timestamp\n)");
   const confirmationSource = { name: "app_mysql", dialect: "mysql" } as never;
   for (const statementKind of ["insert", "update", "delete", "create", "alter"] as const) {
@@ -290,12 +379,12 @@ async function testToolPromptMetadata() {
   assert.match(__test__.renderMetadataResultLines(dbList, {}, false, false, 80, plainQueryTheme).join("\n"), /2 databases[\s\S]*app[\s\S]*test/);
   const truncatedDbList = __test__.databaseListView(["app", "test"], "srv", "mysql", true);
   assert.match(__test__.renderMetadataResultLines(truncatedDbList, {}, false, false, 80, plainQueryTheme).join("\n"), /truncated/);
-  const sources = __test__.sourceListView({ config_path: ".pi/databases.json", sources: [{ name: "srv", dialect: "mysql", default: true, host: "127.0.0.1", database: "db", allow_write: false, write_confirm: true, query_timeout_ms: 30000, max_rows: 100 }] });
+  const sources = __test__.sourceListView({ config_path: ".pi/databases.json", sources: [{ name: "srv", label: "MySQL Dev", dialect: "mysql", default: true, host: "127.0.0.1", database: "db", allow_write: false, write_confirm: true, query_timeout_ms: 30000, max_rows: 100 }] });
   assert.match(__test__.renderMetadataResultLines(sources, {}, false, false, 80, plainQueryTheme).join("\n"), /1 sources[\s\S]*srv[\s\S]*mysql[\s\S]*127/);
   const styledSourceTheme = { ...plainQueryTheme, success: (text: string) => `[success:${text}]`, muted: (text: string) => `[muted:${text}]` };
   const sourceStates = __test__.sourceListView({ config_path: ".pi/databases.json", sources: [
-    { name: "default_srv", dialect: "mysql", default: true, host: "localhost", database: undefined, allow_write: false, write_confirm: true, query_timeout_ms: 30000, max_rows: 100 },
-    { name: "other_srv", dialect: "mysql", default: false, host: "localhost", database: undefined, allow_write: false, write_confirm: true, query_timeout_ms: 30000, max_rows: 100 }
+    { name: "default_srv", label: "MySQL Dev", dialect: "mysql", default: true, host: "localhost", database: undefined, allow_write: false, write_confirm: true, query_timeout_ms: 30000, max_rows: 100 },
+    { name: "other_srv", label: "MySQL Diagnostic", dialect: "mysql", default: false, host: "localhost", database: undefined, allow_write: false, write_confirm: true, query_timeout_ms: 30000, max_rows: 100 }
   ] });
   const sourceStateText = __test__.renderMetadataResultLines(sourceStates, {}, false, false, 120, styledSourceTheme).join("\n");
   assert.match(sourceStateText, /\[success:default\]/);
@@ -321,6 +410,15 @@ async function testToolPromptMetadata() {
   assert.match(collapsedRows, /app\.tools\.expand/);
   const collapsedQuery = __test__.renderQueryResultLines({ query: "SELECT id FROM users" }, { details: { ...manyRows, row_count: 11 } }, false, false, 80).join("\n");
   assert.match(collapsedQuery, /\.\.\.\n1 more rows \(\[app\.tools\.expand:to expand\]\)\n\n11 rows/);
+  const restoredQuery = __test__.renderQueryResultLines(
+    { query: "SELECT id, name FROM users" },
+    { content: [{ type: "text", text: JSON.stringify(queryDetails) }] },
+    false,
+    false,
+    80,
+    plainQueryTheme
+  );
+  assert.equal(restoredQuery.join("\n"), wideLines.join("\n"));
   assert.doesNotMatch(__test__.renderQueryData(manyRows, true, 80, plainQueryTheme).join("\n"), /more rows/);
   assert.equal(__test__.formatElapsed(1236), "1.24 s");
   assert.equal(__test__.isNumericValue("4460.94"), true);
@@ -374,16 +472,37 @@ async function testToolPromptMetadata() {
     tools.find((tool) => tool.name === "database_write")?.promptGuidelines?.join(" ") ?? "",
     /INSERT \.\.\. SELECT/
   );
+  assert.match(
+    tools.find((tool) => tool.name === "database_write")?.promptGuidelines?.join(" ") ?? "",
+    /exactly one supported SQL statement per call/
+  );
+  assert.match(
+    tools.find((tool) => tool.name === "database_write")?.promptGuidelines?.join(" ") ?? "",
+    /multi-step operations/
+  );
   assert.equal(
     (tools.find((tool) => tool.name === "database_write")?.parameters?.database as { description?: unknown } | undefined)?.description,
     "Database for table-scoped writes; omit only for CREATE DATABASE and DROP DATABASE"
   );
+  const sourceSelectingTools = tools.filter((tool) => tool.name !== "database_list_sources");
+  assert.equal(sourceSelectingTools.every((tool) => typeof tool.parameters?.dialect === "object"), true);
+  assert.equal(
+    (tools.find((tool) => tool.name === "database_query")?.parameters?.dialect as { description?: unknown; pattern?: unknown } | undefined)?.description,
+    "MySQL or ClickHouse; selects that dialect's default source when source is omitted"
+  );
+  assert.equal(
+    (tools.find((tool) => tool.name === "database_query")?.parameters?.dialect as { pattern?: unknown } | undefined)?.pattern,
+    "^(mysql|clickhouse)$"
+  );
 
   const callTitleDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-call-title-"));
   writeConfig(callTitleDir, {
-    version: 1,
-    default_source: "mysql_localhost",
-    sources: [{ name: "mysql_localhost", dialect: "mysql", options: { host: "localhost", user: "reader" } }]
+    version: 2,
+    default_sources: { mysql: "mysql_localhost", clickhouse: "clickhouse_localhost" },
+    sources: [
+      { name: "mysql_localhost", dialect: "mysql", options: { host: "localhost", user: "reader" } },
+      { name: "clickhouse_localhost", dialect: "clickhouse", options: { url: "http://localhost:8123", username: "reader" } }
+    ]
   });
   const callTheme = {
     fg: (color: string, text: string) => `[${color}:${text}]`,
@@ -396,12 +515,33 @@ async function testToolPromptMetadata() {
   };
   assert.match(renderCall("database_list_sources", {}), /^\[toolTitle:\*Database Sources\*\]$/);
   assert.match(renderCall("database_ping", { source: "mysql_localhost" }), /Ping.*\[muted: · MySQL\].*\[accent: · mysql_localhost\]/);
+  assert.match(renderCall("database_ping", { dialect: "clickhouse" }), /Ping.*\[muted: · ClickHouse\].*\[accent: · clickhouse_localhost\]/);
   assert.match(renderCall("database_list_databases", { source: "mysql_localhost" }), /Databases.*mysql_localhost/);
   assert.match(renderCall("database_list_tables", { source: "mysql_localhost", database: "app_db" }), /Tables.*mysql_localhost.*app_db/);
   assert.match(renderCall("database_search_tables", { source: "mysql_localhost", term: "users" }), /Find tables.*mysql_localhost.*users/);
   assert.match(renderCall("database_describe_table", { source: "mysql_localhost", database: "app_db", table: "users" }), /Describe.*mysql_localhost.*app_db\.users/);
   assert.match(renderCall("database_query", { source: "mysql_localhost", database: "app_db", query: "SELECT 1" }), /Query.*\[muted: · MySQL\].*\[accent: · mysql_localhost\].*app_db/);
   assert.match(renderCall("database_write", { source: "mysql_localhost", database: "app_db", statement: "INSERT INTO users (id) VALUES (1)" }), /Write.*mysql_localhost.*app_db.*INSERT/);
+
+  const sourceListTool = tools.find((tool) => tool.name === "database_list_sources");
+  assert.equal(typeof sourceListTool?.execute, "function");
+  const sourceListResult = await sourceListTool!.execute!("test", {}, undefined, () => {}, { cwd: callTitleDir, hasUI: false });
+  assert.deepEqual((sourceListResult as { details: Record<string, unknown> }).details.default_sources, { mysql: "mysql_localhost", clickhouse: "clickhouse_localhost" });
+
+  const pingTool = tools.find((tool) => tool.name === "database_ping");
+  assert.equal(typeof pingTool?.execute, "function");
+  const originalClickHousePing = clickhouseAdapter.ping;
+  clickhouseAdapter.ping = async (source) => ({ source: source.name, dialect: source.dialect, ok: true });
+  try {
+    const pingResult = await pingTool!.execute!("test", { dialect: "clickhouse" }, undefined, () => {}, { cwd: callTitleDir, hasUI: false });
+    assert.equal((pingResult as { details: Record<string, unknown> }).details.source, "clickhouse_localhost");
+    await assert.rejects(
+      () => pingTool!.execute!("test", { source: "mysql_localhost", dialect: "clickhouse" }, undefined, () => {}, { cwd: callTitleDir, hasUI: false }),
+      /uses mysql/
+    );
+  } finally {
+    clickhouseAdapter.ping = originalClickHousePing;
+  }
 
   const nextSessionTools: string[] = [];
   __test__.registerTools({
@@ -413,8 +553,8 @@ async function testToolPromptMetadata() {
 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-blocked-write-"));
   writeConfig(dir, {
-    version: 1,
-    default_source: "readonly_mysql",
+    version: 2,
+    default_sources: { mysql: "readonly_mysql" },
     sources: [
       { name: "readonly_mysql", dialect: "mysql", allow_write: false, options: { host: "localhost", user: "reader" } }
     ]
@@ -427,6 +567,17 @@ async function testToolPromptMetadata() {
   );
   const writeTool = tools.find((tool) => tool.name === "database_write");
   assert.equal(typeof writeTool?.execute, "function");
+  const disabledDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-disabled-execute-"));
+  writeConfig(disabledDir, {
+    version: 2,
+    enabled: false,
+    default_sources: { mysql: "readonly_mysql" },
+    sources: [{ name: "readonly_mysql", dialect: "mysql", allow_write: false, options: { host: "localhost", user: "reader" } }]
+  });
+  await assert.rejects(
+    () => queryTool!.execute!("test", { database: "app_db", query: "SELECT 1" }, undefined, () => {}, { cwd: disabledDir, hasUI: false }),
+    /Database plugin is disabled/
+  );
   const result = await writeTool!.execute!("test", { statement: "CREATE DATABASE app_db" }, undefined, () => {}, { cwd: dir, hasUI: false });
   const details = (result as { details: Record<string, unknown>; content: Array<{ text?: string }> }).details;
   assert.equal(details.blocked, true);
@@ -434,12 +585,12 @@ async function testToolPromptMetadata() {
   assert.equal(details.allow_write, false);
   assert.equal(details.write_confirm, false);
   assert.match(String(details.reason), /Writes are disabled/);
-  assert.match(String(details.next_action), /Stop\. Explain this source policy/);
+  assert.match(String(details.next_action), /Stop this write attempt\. Explain this source policy/);
 
   const confirmationDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-confirmed-write-"));
   writeConfig(confirmationDir, {
-    version: 1,
-    default_source: "writer_mysql",
+    version: 2,
+    default_sources: { mysql: "writer_mysql" },
     sources: [
       { name: "writer_mysql", dialect: "mysql", allow_write: true, write_confirm: true, options: { host: "localhost", user: "writer" } }
     ]
@@ -470,8 +621,8 @@ async function testToolPromptMetadata() {
 
   const noConfirmationDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-no-confirmation-write-"));
   writeConfig(noConfirmationDir, {
-    version: 1,
-    default_source: "local_mysql",
+    version: 2,
+    default_sources: { mysql: "local_mysql" },
     sources: [
       { name: "local_mysql", dialect: "mysql", allow_write: true, write_confirm: false, options: { host: "localhost", user: "writer" } }
     ]
@@ -534,8 +685,8 @@ async function testToolPromptMetadata() {
 
   const materializedViewDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-materialized-view-"));
   writeConfig(materializedViewDir, {
-    version: 1,
-    default_source: "analytics",
+    version: 2,
+    default_sources: { clickhouse: "analytics" },
     sources: [
       { name: "analytics", dialect: "clickhouse", allow_write: true, write_confirm: false, options: { url: "http://localhost:8123", username: "writer" } }
     ]
@@ -610,8 +761,8 @@ async function testToolPromptMetadata() {
 
   const deletePolicyDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-delete-confirmation-"));
   writeConfig(deletePolicyDir, {
-    version: 1,
-    default_source: "cleanup_mysql",
+    version: 2,
+    default_sources: { mysql: "cleanup_mysql" },
     sources: [
       { name: "cleanup_mysql", dialect: "mysql", allow_write: true, write_confirm: false, options: { host: "localhost", user: "writer" } }
     ]
@@ -681,8 +832,8 @@ async function testToolPromptMetadata() {
     // Destructive statements are blocked entirely when allow_write is false.
     const readonlyDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-destructive-readonly-"));
     writeConfig(readonlyDir, {
-      version: 1,
-      default_source: "readonly_mysql",
+      version: 2,
+      default_sources: { mysql: "readonly_mysql" },
       sources: [
         { name: "readonly_mysql", dialect: "mysql", allow_write: false, options: { host: "localhost", user: "reader" } }
       ]
@@ -719,18 +870,16 @@ async function testToolPromptMetadata() {
 }
 
 function testDatabaseStatusText() {
-  const single = { defaultSource: "", sources: [{ name: "mysql-192.168.27.148" }] };
-  assert.equal(databaseStatusText(single), "database: mysql-192.168.27.148");
-  assert.equal(databaseStatusText({ defaultSource: "app", sources: [{ name: "app" }, { name: "analytics" }] }), "database: app +1");
-  assert.equal(databaseStatusText({ defaultSource: "", sources: [{ name: "app" }, { name: "analytics" }, { name: "logs" }] }), "database: 3 sources");
+  assert.equal(databaseStatusText({ enabled: true }), "database: on");
+  assert.equal(databaseStatusText({ enabled: false }), "database: off");
 }
 
 function testSourceTree() {
   const nodes: SourceTreeNode[] = [
-    { name: "mysql-a", dialect: "mysql", default: true, host: "127.0.0.1:3306", database: "app", allow_write: true, write_confirm: false, query_timeout_ms: 30_000, max_rows: 100 },
-    { name: "ch-b", dialect: "clickhouse", default: false, host: "http://127.0.0.1:8123", database: "analytics", allow_write: false, write_confirm: true, query_timeout_ms: 30_000, max_rows: 100 }
+    { name: "mysql-a", label: "MySQL Dev", dialect: "mysql", default: true, host: "127.0.0.1:3306", database: "app", allow_write: true, write_confirm: false, query_timeout_ms: 30_000, max_rows: 100 },
+    { name: "ch-b", label: "ClickHouse Diagnostic", dialect: "clickhouse", default: false, host: "http://127.0.0.1:8123", database: "analytics", allow_write: false, write_confirm: true, query_timeout_ms: 30_000, max_rows: 100 }
   ];
-  const validColors = new Set(["border", "accent", "dim", "muted", "success", "text"]);
+  const validColors = new Set(["border", "accent", "dim", "muted", "success", "warning", "text"]);
   const usedColors = new Set<string>();
   const theme = {
     fg: (color: string, text: string) => {
@@ -743,14 +892,16 @@ function testSourceTree() {
   let closed = false;
   const tui = { requestRender() { renders++; } };
   const component = createSourceTreeComponent(tui, "cfg.json", nodes, theme, () => { closed = true; });
+  const sourceTreeText = formatSourceTreeText(nodes).join("\n");
+  assert.match(sourceTreeText, /Database Sources · 2/);
+  assert.match(sourceTreeText, /MySQL Dev\s+MySQL\s+★/);
+  assert.match(sourceTreeText, /ClickHouse Diagnostic\s+ClickHouse/);
 
   const collapsed = component.render(80).join("\n");
   assert.match(collapsed, /Database Sources · 2/);
-  assert.match(collapsed, /mysql-a \(mysql\) · default/);
-  assert.match(collapsed, /host\s+127\.0\.0\.1:3306/);
-  assert.match(collapsed, /▼ mysql-a/);
-  assert.match(collapsed, /▶ ch-b/);
-  assert.doesNotMatch(collapsed, /http:\/\/127\.0\.0\.1:8123/);
+  assert.match(collapsed, /MySQL Dev.*MySQL.*★/);
+  assert.match(collapsed, /ClickHouse Diagnostic.*ClickHouse/);
+  assert.doesNotMatch(collapsed, /mysql-a|ch-b|127\.0\.0\.1:3306|http:\/\/127\.0\.0\.1:8123/);
   assert.equal([...usedColors].every((color) => validColors.has(color)), true);
   assert.equal(usedColors.has("text"), true);
 
@@ -758,13 +909,15 @@ function testSourceTree() {
   component.handleInput("enter");
   assert.ok(renders >= 2);
   const expanded = component.render(80).join("\n");
-  assert.match(expanded, /▼ ch-b/);
+  assert.match(expanded, /ClickHouse Diagnostic.*ClickHouse/);
+  assert.match(expanded, /source\s+ch-b/);
   assert.match(expanded, /http:\/\/127\.0\.0\.1:8123/);
   assert.match(expanded, /confirm on/);
 
   component.handleInput("up");
   component.handleInput("enter");
-  assert.doesNotMatch(component.render(80).join("\n"), /127\.0\.0\.1:3306/);
+  assert.match(component.render(80).join("\n"), /MySQL Dev.*MySQL.*★/);
+  assert.match(component.render(80).join("\n"), /source\s+mysql-a/);
 
   component.handleInput("escape");
   assert.equal(closed, true);

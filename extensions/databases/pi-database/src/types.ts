@@ -4,6 +4,7 @@ export type JsonRecord = Record<string, unknown>;
 
 export type ResolvedSource = {
   name: string;
+  label?: string;
   dialect: SqlDialect;
   options: JsonRecord;
   allowWrite: boolean;
@@ -16,7 +17,8 @@ export type ResolvedSource = {
 
 export type ResolvedProjectConfig = {
   configPath: string;
-  defaultSource?: string;
+  enabled: boolean;
+  defaultSources: Partial<Record<SqlDialect, string>>;
   sources: ResolvedSource[];
 };
 
