@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { OutputRateTracker } from "./src/output-rate-tracker.ts";
 
 /**
  * Token Pulse file map
@@ -65,19 +66,14 @@ type PulseState = {
 	messageEndedAt: number | null;
 	waitFrozenMs: number | null;
 	streamFirstOutputAt: number | null;
-	streamLastOutputAt: number | null;
 	activeToolCallIds: Set<string>;
 	lastOutputTokens: number | null;
 };
 
 type PulseSnapshot = PulseState & {
 	displayOutTps: number | null;
+	displayOutTpsStale: boolean;
 	displayFirstOutputWaitMs: number | null;
-};
-
-type OutMetricDisplay = {
-	tps: number;
-	waitMs: number | null;
 };
 
 type RequestAverageMetrics = {
@@ -95,7 +91,6 @@ type TurnTokenDisplay = {
 
 // Runtime/display constants
 
-const TPS_SMOOTHING_ALPHA = 0.4;
 const SLOW_FIRST_OUTPUT_WAIT_MS = 10_000;
 const WIDGET_KEY = "token-pulse";
 const REFRESH_MS = 120;
@@ -204,20 +199,6 @@ function requestStartedAt(state: PulseState): number | null {
 	return state.requestStartedAt ?? state.messageStartedAt;
 }
 
-function outTokens(state: PulseState): number {
-	if (typeof state.lastOutputTokens === "number" && state.lastOutputTokens >= 0) {
-		return state.lastOutputTokens;
-	}
-	return estimateTokensFromTextRaw(state.visibleText, "auto") + estimateTokensFromTextRaw(state.thinkingText, "prose") + estimateTokensFromTextRaw(state.toolCallText, "structured");
-}
-
-function generationDurationMs(state: PulseState): number | null {
-	if (state.streamFirstOutputAt == null) return null;
-	// Freeze at last output when streaming stops; prevents false TPS decay
-	const endedAt = state.messageEndedAt ?? (state.streaming ? nowMs() : (state.streamLastOutputAt ?? nowMs()));
-	return Math.max(0, endedAt - state.streamFirstOutputAt);
-}
-
 function firstOutputWaitMs(state: PulseState): number | null {
 	const startedAt = requestStartedAt(state);
 	if (startedAt == null) return null;
@@ -268,11 +249,6 @@ function formatCost(value: number): string {
 	return `$${value.toFixed(2)}`;
 }
 
-function smoothTps(previous: number | null, next: number): number {
-	if (previous == null || !Number.isFinite(previous)) return next;
-	return previous + (next - previous) * TPS_SMOOTHING_ALPHA;
-}
-
 function isWideChar(code: number): boolean {
 	return (code >= 0x3400 && code <= 0x9FFF) || (code >= 0xF900 && code <= 0xFAFF);
 }
@@ -294,10 +270,12 @@ function metricParts(snapshot: PulseSnapshot, theme: any) {
 		snapshot.displayFirstOutputWaitMs == null
 			? null
 			: `${firstIsSlow ? warn("first") : dim("first")} ${firstIsSlow ? warn(formatDuration(snapshot.displayFirstOutputWaitMs)) : firstIsStale ? dim(formatDuration(snapshot.displayFirstOutputWaitMs)) : muted(formatDuration(snapshot.displayFirstOutputWaitMs))}`;
-	const tpsPart =
-		snapshot.displayOutTps == null
-			? null
-			: `${snapshot.streaming ? accent(bold(formatTps(snapshot.displayOutTps))) : muted(formatTps(snapshot.displayOutTps))} ${dim("tok/s")}`;
+	let tpsPart: string | null = null;
+	if (snapshot.displayOutTps != null) {
+		const formatted = `~${formatTps(snapshot.displayOutTps)}`;
+		const value = snapshot.streaming && !snapshot.displayOutTpsStale ? accent(bold(formatted)) : muted(formatted);
+		tpsPart = `${value} ${dim("tok/s")}`;
+	}
 	return { firstPart, tpsPart };
 }
 
@@ -358,7 +336,6 @@ function createState(): PulseState {
 		messageEndedAt: null,
 		waitFrozenMs: null,
 		streamFirstOutputAt: null,
-		streamLastOutputAt: null,
 		activeToolCallIds: new Set(),
 		lastOutputTokens: null,
 	};
@@ -378,7 +355,6 @@ function resetState(state: PulseState, turnIndex: number | null): void {
 	state.messageEndedAt = null;
 	state.waitFrozenMs = null;
 	state.streamFirstOutputAt = null;
-	state.streamLastOutputAt = null;
 	state.activeToolCallIds.clear();
 	state.lastOutputTokens = null;
 }
@@ -451,13 +427,9 @@ export default function tokenPulseExtension(pi: ExtensionAPI) {
 	// marks the end of the complete run. Keep totals alive across those attempts.
 	let agentRunActive = false;
 
-	// Sticky display state keeps the last meaningful Output TPS visible
-	// through tool phases and completed turns.
-	let stickyOutMetric: OutMetricDisplay | null = null;
-	let smoothedOutTps: number | null = null;
-	let lastDisplayOutTps: number | null = null;
-	let lastDeltaTokens = 0;
-	let lastDeltaTimeMs = 0;
+	// Live rate is estimated locally from text/thinking deltas only. Provider usage
+	// remains reserved for final totals and never participates in TPS calculation.
+	const outputRateTracker = new OutputRateTracker();
 	// Agent-level usage totals — input/output from provider usage, output estimated during streaming until finalized
 	let inputTokens = 0;
 	let outputTokens = 0;
@@ -523,15 +495,11 @@ export default function tokenPulseExtension(pi: ExtensionAPI) {
 	let avgOutputTokens = 0;
 	let avgGenerationDurationMs = 0;
 
-	const resetStickyMetrics = (resetLastDisplay = false) => {
-		stickyOutMetric = null;
-		smoothedOutTps = null;
-		lastDeltaTokens = 0;
-		lastDeltaTimeMs = 0;
+	const resetRateMetrics = () => {
+		outputRateTracker.reset();
 		cachedVisibleLen = -1;
 		cachedThinkingLen = -1;
 		cachedToolCallLen = -1;
-		if (resetLastDisplay) lastDisplayOutTps = null;
 	};
 
 	const resetRequestAverages = () => {
@@ -552,61 +520,23 @@ export default function tokenPulseExtension(pi: ExtensionAPI) {
 			avgFirstOutputWaitCount += 1;
 		}
 
-		const genMs = generationDurationMs(state);
-		const tokens = outTokens(state);
-		if (genMs != null && genMs > 0 && tokens > 0) {
-			avgOutputTokens += tokens;
-			avgGenerationDurationMs += genMs;
+		const rate = outputRateTracker.snapshot();
+		const measurement = outputRateTracker.currentMeasurement();
+		if (rate.rate != null && measurement != null) {
+			avgOutputTokens += measurement.tokens;
+			avgGenerationDurationMs += measurement.durationMs;
 		}
 	};
 
-	// Convert mutable event state into a render-ready snapshot.
+	// Convert mutable event state into a render-ready snapshot. Reading the rate
+	// never advances its measurement window; only output events record samples.
 	const getSnapshot = (): PulseSnapshot => {
-		const tokens = outTokensCached(state);
-		const time = nowMs();
-		let nextOutTps: number | null = null;
-
-		// Delta-based instantaneous TPS — only update reference on valid samples
-		if (lastDeltaTimeMs === 0) {
-			lastDeltaTokens = tokens;
-			lastDeltaTimeMs = time;
-		} else if (time > lastDeltaTimeMs) {
-			const dTok = tokens - lastDeltaTokens;
-			if (dTok > 0) {
-				const dMs = time - lastDeltaTimeMs;
-				if (dMs >= 200) {
-					nextOutTps = (dTok * 1000) / dMs;
-					lastDeltaTokens = tokens;
-					lastDeltaTimeMs = time;
-				}
-			}
-		}
-
-		const nextWaitMs = firstOutputWaitMs(state);
-		const outputActive = state.streaming || state.inToolPhase;
-
-		if (nextOutTps != null) {
-			smoothedOutTps = outputActive ? smoothTps(smoothedOutTps, nextOutTps) : nextOutTps;
-			lastDisplayOutTps = smoothedOutTps;
-			stickyOutMetric = {
-				tps: smoothedOutTps,
-				waitMs: nextWaitMs,
-			};
-		}
-
-		if (stickyOutMetric != null && nextOutTps == null) {
-			lastDisplayOutTps = stickyOutMetric.tps;
-			return {
-				...state,
-				displayOutTps: stickyOutMetric.tps,
-				displayFirstOutputWaitMs: nextWaitMs ?? stickyOutMetric.waitMs,
-			};
-		}
-
+		const rate = outputRateTracker.snapshot(undefined, !state.streaming);
 		return {
 			...state,
-			displayOutTps: smoothedOutTps ?? lastDisplayOutTps,
-			displayFirstOutputWaitMs: nextWaitMs,
+			displayOutTps: rate.rate,
+			displayOutTpsStale: rate.stale,
+			displayFirstOutputWaitMs: firstOutputWaitMs(state),
 		};
 	};
 
@@ -656,7 +586,7 @@ export default function tokenPulseExtension(pi: ExtensionAPI) {
 		}
 	};
 
-	const recordStreamOutput = () => {
+	const recordStreamOutput = (delta?: string) => {
 		const at = nowMs();
 		if (state.streamFirstOutputAt == null) {
 			state.streamFirstOutputAt = at;
@@ -665,7 +595,14 @@ export default function tokenPulseExtension(pi: ExtensionAPI) {
 				state.waitFrozenMs = Math.max(0, at - startedAt);
 			}
 		}
-		state.streamLastOutputAt = at;
+		// Use one fixed, additive profile for live output. Tool-call JSON is
+		// intentionally excluded because it commonly arrives in one buffered burst.
+		if (delta) {
+			const estimatedTokens = estimateSegmentTokens(delta, "prose");
+			if (estimatedTokens > 0) {
+				outputRateTracker.record(estimatedTokens);
+			}
+		}
 	};
 
 	const finishModelGeneration = () => {
@@ -708,7 +645,7 @@ export default function tokenPulseExtension(pi: ExtensionAPI) {
 		resetState(state, null);
 		state.wallStartedAt = null;
 		state.wallEndedAt = null;
-		resetStickyMetrics(true);
+		resetRateMetrics();
 		resetRequestAverages();
 		resetUsageTotals();
 		clearUI(ctx);
@@ -726,7 +663,7 @@ export default function tokenPulseExtension(pi: ExtensionAPI) {
 				state.wallStartedAt = nowMs();
 				state.wallEndedAt = null;
 			}
-			resetStickyMetrics(true);
+			resetRateMetrics();
 			resetRequestAverages();
 			resetUsageTotals();
 			clearUI(ctx);
@@ -737,7 +674,7 @@ export default function tokenPulseExtension(pi: ExtensionAPI) {
 	pi.on("turn_start", (event: any, ctx) => {
 		pendingTurnIndex = typeof event?.turnIndex === "number" ? event.turnIndex : null;
 		resetForPendingTurn();
-		resetStickyMetrics();
+		resetRateMetrics();
 		requestRender(ctx);
 	});
 
@@ -750,16 +687,11 @@ export default function tokenPulseExtension(pi: ExtensionAPI) {
 		state.messageEndedAt = null;
 		state.waitFrozenMs = null;
 		state.streamFirstOutputAt = null;
-		state.streamLastOutputAt = null;
 		state.visibleText = "";
 		state.thinkingText = "";
 		state.toolCallText = "";
 		state.lastOutputTokens = null;
-		lastDeltaTokens = 0;
-		lastDeltaTimeMs = 0;
-		cachedVisibleLen = -1;
-		cachedThinkingLen = -1;
-		cachedToolCallLen = -1;
+		resetRateMetrics();
 		startTimer(ctx);
 		requestRender(ctx);
 	});
@@ -788,7 +720,7 @@ export default function tokenPulseExtension(pi: ExtensionAPI) {
 			ensureTurnMeasurement();
 			markStreaming();
 			state.visibleText += textDelta;
-			recordStreamOutput();
+			recordStreamOutput(textDelta);
 			startTimer(ctx);
 			requestRender(ctx);
 			return;
@@ -798,7 +730,7 @@ export default function tokenPulseExtension(pi: ExtensionAPI) {
 			ensureTurnMeasurement();
 			markStreaming();
 			state.thinkingText += thinkingDelta;
-			recordStreamOutput();
+			recordStreamOutput(thinkingDelta);
 			startTimer(ctx);
 			requestRender(ctx);
 			return;
@@ -863,11 +795,6 @@ export default function tokenPulseExtension(pi: ExtensionAPI) {
 		if (finalizedOutput != null) {
 			state.lastOutputTokens = finalizedOutput;
 			outputTokens += finalizedOutput;
-			lastDeltaTokens = 0;
-			lastDeltaTimeMs = 0;
-			cachedVisibleLen = -1;
-			cachedThinkingLen = -1;
-			cachedToolCallLen = -1;
 		}
 		if (cacheRead != null && cacheRead > 0) {
 			cacheReadTotal += cacheRead;
@@ -930,7 +857,7 @@ export default function tokenPulseExtension(pi: ExtensionAPI) {
 		if (runCostTotal > 0) statParts.push(formatCost(runCostTotal));
 		const avgParts: string[] = [];
 		if (averages.avgFirstOutputWaitMs != null) avgParts.push(`avg first ${formatDuration(averages.avgFirstOutputWaitMs)}`);
-		if (averages.avgOutTps != null) avgParts.push(`avg ${formatTps(averages.avgOutTps)} tok/s`);
+		if (averages.avgOutTps != null) avgParts.push(`avg ~${formatTps(averages.avgOutTps)} tok/s`);
 		let message = timePart;
 		if (statParts.length > 0) message += ` | ${statParts.join(" ")}`;
 		if (avgParts.length > 0) message += ` | ${avgParts.join(" · ")}`;
@@ -948,7 +875,7 @@ export default function tokenPulseExtension(pi: ExtensionAPI) {
 		resetState(state, null);
 		state.wallStartedAt = null;
 		state.wallEndedAt = null;
-		resetStickyMetrics(true);
+		resetRateMetrics();
 		resetRequestAverages();
 		resetUsageTotals();
 		clearUI(ctx);
