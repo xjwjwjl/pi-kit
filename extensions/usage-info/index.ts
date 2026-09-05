@@ -2,8 +2,7 @@
  * /usage
  *
  * Integrated usage view: a timeline of usage over time, with the selected
- * period's provider → model tree as a drill-down detail (Tab toggles between
- * the selected period's tree and the whole range's tree).
+ * period's provider → model tree as a drill-down detail.
  *
  * Replaces the old /usage-timeline + /usage-models pair.
  */
@@ -24,7 +23,15 @@ import readline from "node:readline";
 type ModelKey = string;
 type MeasurementMode = "tokens" | "cost" | "duration";
 
-interface ParsedUsageEvent { at: Date; model: ModelKey; tokens: number; cost: number; durationMs: number }
+interface ParsedUsageEvent {
+	at: Date;
+	model: ModelKey;
+	tokens: number;
+	cost: number;
+	durationMs: number;
+	durationStart?: Date;
+	durationEnd?: Date;
+}
 interface ParsedSession { filePath: string; startedAt: Date; events: ParsedUsageEvent[] }
 
 interface DayAgg {
@@ -36,8 +43,6 @@ interface DayAgg {
 interface RangeAgg {
 	days: DayAgg[]; dayByKey: Map<string, DayAgg>; hours: DayAgg[]; hourByKey: Map<string, DayAgg>;
 	totalTokens: number; totalCost: number; totalDurationMs: number;
-	modelCost: Map<ModelKey, number>; modelTokens: Map<ModelKey, number>;
-	modelDuration: Map<ModelKey, number>;
 }
 
 interface BreakdownData { ranges: Map<(typeof RANGE_DAYS)[number], RangeAgg> }
@@ -210,8 +215,8 @@ function extractTokensTotal(usage: any): number {
 	if (total > 0) return total;
 	total = n(usage?.tokens?.total) || n(usage?.tokens?.totalTokens) || n(usage?.tokens?.total_tokens);
 	if (total > 0) return total;
-	const a = n(usage?.promptTokens) || n(usage?.prompt_tokens) || n(usage?.inputTokens) || n(usage?.input_tokens);
-	const b = n(usage?.completionTokens) || n(usage?.completion_tokens) || n(usage?.outputTokens) || n(usage?.output_tokens);
+	const a = n(usage?.promptTokens) || n(usage?.prompt_tokens) || n(usage?.inputTokens) || n(usage?.input_tokens) || n(usage?.input);
+	const b = n(usage?.completionTokens) || n(usage?.completion_tokens) || n(usage?.outputTokens) || n(usage?.output_tokens) || n(usage?.output);
 	return Math.max(0, a + b);
 }
 
@@ -248,7 +253,15 @@ async function parseSessionFile(filePath: string, signal?: AbortSignal): Promise
 	let startedAt = parseSessionStartFromFilename(fileName);
 	let currentModel: ModelKey | null = null;
 	let openTurnStartedAt: Date | null = null;
-	const pending: Array<{ at: Date | null; model: ModelKey; tokens: number; cost: number; durationMs: number }> = [];
+	const pending: Array<{
+		at: Date | null;
+		model: ModelKey;
+		tokens: number;
+		cost: number;
+		durationMs: number;
+		durationStart?: Date;
+		durationEnd?: Date;
+	}> = [];
 	const stream = createReadStream(filePath, { encoding: "utf8" });
 	const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
 	try {
@@ -273,17 +286,33 @@ async function parseSessionFile(filePath: string, signal?: AbortSignal): Promise
 			const mk = modelKeyFromParts(provider, model) ?? modelKeyFromParts(provider, modelId) ?? currentModel ?? "unknown";
 			const tokens = extractTokensTotal(usage), cost = extractCostTotal(usage);
 			let durationMs = 0;
+			let durationStart: Date | undefined;
+			let durationEnd: Date | undefined;
 			if (!assistantContinuesTurn(obj)) {
-				if (openTurnStartedAt && at) { const el = at.getTime() - openTurnStartedAt.getTime(); durationMs = el > 0 ? el : 0; }
+				if (openTurnStartedAt && at) {
+					const el = at.getTime() - openTurnStartedAt.getTime();
+					if (el > 0) {
+						durationMs = el;
+						durationStart = openTurnStartedAt;
+						durationEnd = at;
+					}
+				}
 				openTurnStartedAt = null;
 			}
 			if (tokens <= 0 && cost <= 0 && durationMs <= 0) continue;
-			pending.push({ at, model: mk, tokens, cost, durationMs });
+			pending.push({ at, model: mk, tokens, cost, durationMs, durationStart, durationEnd });
 		}
 	} finally { rl.close(); stream.destroy(); }
 	if (!startedAt) return null;
-	const events = pending.map((e) => ({ at: e.at ?? startedAt!, model: e.model, tokens: e.tokens, cost: e.cost, durationMs: e.durationMs }))
-		.sort((a, b) => a.at.getTime() - b.at.getTime());
+	const events = pending.map((e) => ({
+		at: e.at ?? startedAt!,
+		model: e.model,
+		tokens: e.tokens,
+		cost: e.cost,
+		durationMs: e.durationMs,
+		durationStart: e.durationStart,
+		durationEnd: e.durationEnd,
+	})).sort((a, b) => a.at.getTime() - b.at.getTime());
 	return { filePath, startedAt, events };
 }
 
@@ -318,7 +347,6 @@ function buildRangeAgg(days: number | "yesterday", now: Date): RangeAgg {
 	}
 	return {
 		days: outDays, dayByKey, hours, hourByKey, totalTokens: 0, totalCost: 0, totalDurationMs: 0,
-		modelCost: new Map(), modelTokens: new Map(), modelDuration: new Map(),
 	};
 }
 
@@ -331,19 +359,54 @@ function addToBucket(b: DayAgg, e: ParsedUsageEvent): void {
 
 function addToRangeTotals(r: RangeAgg, e: ParsedUsageEvent): void {
 	r.totalTokens += e.tokens; r.totalCost += e.cost; r.totalDurationMs += e.durationMs;
-	if (e.tokens > 0) r.modelTokens.set(e.model, (r.modelTokens.get(e.model) ?? 0) + e.tokens);
-	if (e.cost > 0) r.modelCost.set(e.model, (r.modelCost.get(e.model) ?? 0) + e.cost);
-	if (e.durationMs > 0) r.modelDuration.set(e.model, (r.modelDuration.get(e.model) ?? 0) + e.durationMs);
+}
+
+interface DurationSegment { at: Date; durationMs: number }
+
+function splitDuration(start: Date, end: Date): DurationSegment[] {
+	const startMs = start.getTime(), endMs = end.getTime();
+	if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return [];
+
+	const segments: DurationSegment[] = [];
+	let cursor = new Date(startMs);
+	while (cursor.getTime() < endMs) {
+		const nextHour = new Date(cursor);
+		nextHour.setMinutes(0, 0, 0);
+		nextHour.setHours(nextHour.getHours() + 1);
+		if (nextHour.getTime() <= cursor.getTime()) nextHour.setTime(cursor.getTime() + 60 * 60 * 1000);
+		const segmentEndMs = Math.min(nextHour.getTime(), endMs);
+		const durationMs = segmentEndMs - cursor.getTime();
+		if (durationMs <= 0) break;
+		segments.push({ at: new Date(cursor), durationMs });
+		cursor = new Date(segmentEndMs);
+	}
+	return segments;
+}
+
+function addEventToRange(range: RangeAgg, event: ParsedUsageEvent): void {
+	const day = range.dayByKey.get(toLocalDayKey(event.at));
+	if (!day) return;
+	addToRangeTotals(range, event);
+	addToBucket(day, event);
+	const hour = range.hourByKey.get(toLocalHourKey(event.at));
+	if (hour) addToBucket(hour, event);
 }
 
 function addSessionToRange(range: RangeAgg, session: ParsedSession): void {
-	for (const e of session.events) {
-		const day = range.dayByKey.get(toLocalDayKey(e.at));
-		if (!day) continue;
-		addToRangeTotals(range, e);
-		addToBucket(day, e);
-		const hour = range.hourByKey.get(toLocalHourKey(e.at));
-		if (hour) addToBucket(hour, e);
+	for (const event of session.events) {
+		const hasDurationInterval = !!event.durationStart && !!event.durationEnd;
+		addEventToRange(range, hasDurationInterval ? { ...event, durationMs: 0 } : event);
+		if (!hasDurationInterval) continue;
+
+		for (const segment of splitDuration(event.durationStart!, event.durationEnd!)) {
+			addEventToRange(range, {
+				at: segment.at,
+				model: event.model,
+				tokens: 0,
+				cost: 0,
+				durationMs: segment.durationMs,
+			});
+		}
 	}
 }
 
@@ -506,9 +569,6 @@ function buildPeriods(range: RangeAgg, mode: MeasurementMode): Period[] {
 class TimelineComponent implements Component {
 	private data: BreakdownData; private tui: TUI; private theme: Theme; private onDone: () => void;
 	private rangeIndex = 2; private measurement: MeasurementMode = "tokens"; private selectedIdx = Number.MAX_SAFE_INTEGER; // default: last period
-	// Selected period's detail is a provider→model tree; Tab toggles between the
-	// selected period's tree and the whole range's tree.
-	private detailMode: "period" | "range" = "period";
 	private cachedWidth?: number; private cachedLines?: string[];
 
 	constructor(data: BreakdownData, tui: TUI, theme: Theme, onDone: () => void) { this.data = data; this.tui = tui; this.theme = theme; this.onDone = onDone; }
@@ -521,13 +581,6 @@ class TimelineComponent implements Component {
 		if (matchesKey(data, Key.right) || data === "l") { this.rangeIndex = (this.rangeIndex + 1) % RANGE_DAYS.length; this.selectedIdx = Number.MAX_SAFE_INTEGER; this.invalidate(); this.tui.requestRender(); return; }
 		const num = Number(data);
 		if (Number.isInteger(num) && num >= 1 && num <= RANGE_DAYS.length) { this.rangeIndex = num - 1; this.selectedIdx = Number.MAX_SAFE_INTEGER; this.invalidate(); this.tui.requestRender(); return; }
-
-		if (matchesKey(data, Key.tab) || matchesKey(data, Key.shift("tab"))) {
-			this.detailMode = this.detailMode === "period" ? "range" : "period";
-			this.invalidate();
-			this.tui.requestRender();
-			return;
-		}
 
 		const periods = buildPeriods(this.currentRange(), this.measurement);
 		if (matchesKey(data, Key.leftbracket) || matchesKey(data, Key.up) || data === "k") { this.selectedIdx = clampIndex(this.selectedIdx - 1, periods.length); this.invalidate(); this.tui.requestRender(); }
@@ -545,7 +598,7 @@ class TimelineComponent implements Component {
 		const lines: string[] = [];
 		const prefix = `${rangeLabel(selectedDays)}:`;
 		const rest = `${formatCount(range.totalTokens)} · ${formatUsd(range.totalCost)} · ${formatDuration(range.totalDurationMs)}`;
-		const header = `\x1b[1m←→ ${prefix}\x1b[22m ${rest}   ${dim("detail:" + this.detailMode)}`;
+		const header = `\x1b[1m←→ ${prefix}\x1b[22m ${rest}`;
 		lines.push(truncateToWidth(header, width));
 		lines.push(dim("─".repeat(Math.min(visibleWidth(header), width))));
 
@@ -570,7 +623,7 @@ class TimelineComponent implements Component {
 				const row = `${padRightVisible(prefix, labelWidth + 1)}  ${valueCell}  ${costCell}  ${durCell}`;
 				lines.push(truncateToWidth(row, width));
 				if (selected) {
-					const tree = this.detailMode === "range" ? modelTreeRows(range) : periodModelTree(p.days);
+					const tree = periodModelTree(p.days);
 					if (tree.length > 0) {
 						// Indent the detail block under the selected period row.
 						for (const detailLine of modelTreeLines(tree, this.theme, Math.max(1, width - 4))) {
@@ -581,7 +634,7 @@ class TimelineComponent implements Component {
 		}
 
 		lines.push("");
-		lines.push(dim(`Up/Down select · [ ] step · Tab detail:${this.detailMode === "period" ? "period" : "range"} · 1-4 range · q quit`));
+		lines.push(dim("Up/Down select · [ ] step · 1-4 range · q quit"));
 		this.cachedWidth = width;
 		this.cachedLines = lines.map((l) => (visibleWidth(l) > width ? truncateToWidth(l, width) : l));
 		return this.cachedLines;
@@ -603,8 +656,12 @@ function buildModelTreeRows(
 	modelDuration: Map<string, number>,
 ): ModelTreeRow[] {
 	const byProvider = new Map<string, Map<string, { tokens: number; cost: number; durationMs: number }>>();
-	for (const [model, tokens] of modelTokens) {
-		if (tokens <= 0) continue;
+	const modelKeys = new Set([...modelTokens.keys(), ...modelCost.keys(), ...modelDuration.keys()]);
+	for (const model of modelKeys) {
+		const tokens = modelTokens.get(model) ?? 0;
+		const cost = modelCost.get(model) ?? 0;
+		const durationMs = modelDuration.get(model) ?? 0;
+		if (tokens <= 0 && cost <= 0 && durationMs <= 0) continue;
 		const idx = model.indexOf("/");
 		const provider = idx === -1 ? "(unknown)" : model.slice(0, idx);
 		const name = idx === -1 ? model : model.slice(idx + 1);
@@ -612,8 +669,8 @@ function buildModelTreeRows(
 		if (!models) { models = new Map(); byProvider.set(provider, models); }
 		const entry = models.get(name) ?? { tokens: 0, cost: 0, durationMs: 0 };
 		entry.tokens += tokens;
-		entry.cost += modelCost.get(model) ?? 0;
-		entry.durationMs += modelDuration.get(model) ?? 0;
+		entry.cost += cost;
+		entry.durationMs += durationMs;
 		models.set(name, entry);
 	}
 
@@ -621,7 +678,7 @@ function buildModelTreeRows(
 	for (const [provider, models] of byProvider) {
 		const modelList = [...models.entries()]
 			.map(([name, m]) => ({ name, ...m }))
-			.sort((a, b) => b.tokens - a.tokens || b.cost - a.cost);
+			.sort((a, b) => b.tokens - a.tokens || b.cost - a.cost || b.durationMs - a.durationMs);
 		rows.push({
 			provider,
 			tokens: modelList.reduce((s, m) => s + m.tokens, 0),
@@ -630,11 +687,7 @@ function buildModelTreeRows(
 			models: modelList,
 		});
 	}
-	return rows.sort((a, b) => b.tokens - a.tokens || b.cost - a.cost);
-}
-
-function modelTreeRows(range: RangeAgg): ModelTreeRow[] {
-	return buildModelTreeRows(range.modelTokens, range.modelCost, range.modelDuration);
+	return rows.sort((a, b) => b.tokens - a.tokens || b.cost - a.cost || b.durationMs - a.durationMs);
 }
 
 // Provider → model tree aggregated over a single period (day/week/hour).
@@ -650,7 +703,7 @@ function periodModelTree(days: DayAgg[]): ModelTreeRow[] {
 	return buildModelTreeRows(modelTokens, modelCost, modelDuration);
 }
 
-// Shared tree renderer used by the timeline detail (and the standalone models view).
+// Shared tree renderer used by the timeline detail.
 function modelTreeLines(tree: ModelTreeRow[], theme: Theme, width: number): string[] {
 	const tokenW = 8, costW = 7, durW = 7;
 	const visibleProviders = tree.slice(0, 5);
