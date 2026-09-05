@@ -1,0 +1,23 @@
+{
+  "name": "git-worktree",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Create a git worktree and launch a Pi session inside it (Windows Terminal).",
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.80.7",
+    "@types/node": "24.12.4",
+    "typescript": "5.9.3"
+  }
+}
