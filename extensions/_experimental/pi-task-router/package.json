@@ -1,0 +1,17 @@
+{
+  "name": "pi-task-router",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Experimental, advisory task routing for DeepSeek V4 sessions in Pi.",
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/**/*.test.ts",
+    "check": "node --experimental-strip-types --check index.ts && node --experimental-strip-types --check src/router-core.ts && npm test"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
