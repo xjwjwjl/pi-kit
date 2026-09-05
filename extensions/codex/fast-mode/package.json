@@ -1,0 +1,23 @@
+{
+  "name": "codex-fast-mode",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Toggle priority service tier for openai-codex requests",
+  "type": "module",
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && node --experimental-strip-types --check index.ts && node --experimental-strip-types --check src/config.ts && node --experimental-strip-types --check src/matcher.ts && node --experimental-strip-types --check src/payload.ts && node --experimental-strip-types --check src/status.ts && npm test"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.3",
+    "@types/node": "^24.0.0",
+    "typescript": "5.9.3"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}

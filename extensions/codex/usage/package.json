@@ -1,0 +1,22 @@
+{
+  "name": "codex-usage",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && node --experimental-strip-types --check index.ts && node --experimental-strip-types --check src/types.ts && node --experimental-strip-types --check src/usage-api.ts && node --experimental-strip-types --check src/quota-controller.ts && node --experimental-strip-types --check src/quota-cache.ts && node --experimental-strip-types --check src/file-lock.ts && node --experimental-strip-types --check src/quota.ts && node --experimental-strip-types --check src/quota-status.ts && node --experimental-strip-types --check src/session-scanner.ts && node --experimental-strip-types --check src/format.ts && npm test"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.3",
+    "@types/node": "24.12.4",
+    "typescript": "5.9.3"
+  }
+}

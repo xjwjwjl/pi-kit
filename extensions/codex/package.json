@@ -1,0 +1,22 @@
+{
+  "name": "codex",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Codex 相关 Pi 插件集合（usage / reset-credit / fast-mode / websearch）",
+  "scripts": {
+    "check": "npm run check:usage && npm run check:reset-credit && npm run check:fast-mode && npm run check:websearch",
+    "check:usage": "cd usage && npm run check",
+    "check:reset-credit": "cd reset-credit && npm run check",
+    "check:fast-mode": "cd fast-mode && npm run check",
+    "check:websearch": "cd websearch && npm run check"
+  },
+  "pi": {
+    "extensions": [
+      "./usage/index.ts",
+      "./reset-credit/index.ts",
+      "./fast-mode/index.ts",
+      "./websearch/index.ts"
+    ]
+  }
+}
