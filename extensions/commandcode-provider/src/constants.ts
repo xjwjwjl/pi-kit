@@ -1,0 +1,11 @@
+export const COMMAND_CODE_PROVIDER_ID = "commandcode";
+export const COMMAND_CODE_PROVIDER_NAME = "Command Code";
+export const COMMAND_CODE_API_BASE_URL = "https://api.commandcode.ai";
+export const COMMAND_CODE_BASE_URL = `${COMMAND_CODE_API_BASE_URL}/provider/v1`;
+export const COMMAND_CODE_STUDIO_URL = "https://commandcode.ai";
+export const COMMAND_CODE_LOGIN_PATH = "/studio/auth/cli";
+export const COMMAND_CODE_CALLBACK_PATH = "/callback";
+export const COMMAND_CODE_CALLBACK_HOST = "127.0.0.1";
+export const COMMAND_CODE_CALLBACK_PORT = 5959;
+export const COMMAND_CODE_CALLBACK_PORT_ATTEMPTS = 10;
+export const COMMAND_CODE_LOGIN_TIMEOUT_MS = 120_000;
