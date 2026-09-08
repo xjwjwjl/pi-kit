@@ -118,8 +118,8 @@ export function sourceWithDatabase(source: ResolvedSource, database: string): Re
 function resolveSource(value: unknown, configPath: string): ResolvedSource {
   if (!isRecord(value)) throw new Error(`Invalid ${configPath}: every source must be an object.`);
   const name = asString(value.name);
-  if (!name || !/^[a-z][a-z0-9_.-]*$/i.test(name)) {
-    throw new Error(`Invalid ${configPath}: source names must use letters, digits, underscores, dots, or hyphens.`);
+  if (!name || !/^[a-z0-9][a-z0-9_.-]*$/i.test(name)) {
+    throw new Error(`Invalid ${configPath}: source names must start with a letter or digit and may contain letters, digits, underscores, dots, or hyphens.`);
   }
   if (!isDialect(value.dialect)) throw new Error(`Invalid ${configPath}: source "${name}" has an unsupported dialect.`);
   if (!isRecord(value.options)) throw new Error(`Invalid ${configPath}: source "${name}" requires an options object.`);

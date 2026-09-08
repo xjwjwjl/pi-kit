@@ -161,6 +161,32 @@ function testSourceSelection() {
   assert.throws(() => loadProjectConfig(mismatchedDefault), /must reference a mysql source/);
 }
 
+function testSourceNameValidation() {
+  // A name may start with a digit; digits are allowed anywhere in the name.
+  const digitLed = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-digit-name-"));
+  writeConfig(digitLed, {
+    version: 2,
+    default_sources: { mysql: "2024_prod" },
+    sources: [
+      { name: "2024_prod", dialect: "mysql", options: { host: "localhost", user: "u" } },
+      { name: "1db", dialect: "clickhouse", options: { url: "http://localhost:8123", username: "u" } }
+    ]
+  });
+  const digitConfig = loadProjectConfig(digitLed);
+  assert.equal(digitConfig.sources.length, 2);
+  assert.deepEqual(digitConfig.defaultSources, { mysql: "2024_prod" });
+  assert.equal(selectSource(digitConfig, undefined, "mysql").name, "2024_prod");
+  assert.equal(selectSource(digitConfig, "1db").dialect, "clickhouse");
+
+  // Names that do not start with a letter/digit or that use unsupported characters are rejected.
+  const invalidNames = ["_private", ".hidden", "-starts-with-dash", "has space", "bad*name", "2024/01", ""];
+  for (const name of invalidNames) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-bad-name-"));
+    writeConfig(dir, { version: 2, default_sources: {}, sources: [{ name, dialect: "mysql", options: { host: "localhost", user: "u" } }] });
+    assert.throws(() => loadProjectConfig(dir), /source names must start with a letter or digit/);
+  }
+}
+
 async function testDynamicRegistration() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-dynamic-"));
   const handlers = new Map<string, Array<(event: any, ctx: any) => Promise<unknown> | unknown>>();
@@ -1058,6 +1084,7 @@ testSqlScanner();
 testResultLimits();
 testInitializeConfig();
 testSourceSelection();
+testSourceNameValidation();
 await testDynamicRegistration();
 testDatabaseContextPrompt();
 await testToolPromptMetadata();
