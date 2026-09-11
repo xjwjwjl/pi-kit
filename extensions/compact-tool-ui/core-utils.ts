@@ -47,8 +47,27 @@ export function plural(count: number, one: string, many = `${one}s`): string {
 	return `${count} ${count === 1 ? one : many}`;
 }
 
+/**
+ * Compact line-count unit (`50L`) shared by every tool metadata row.
+ *
+ * The unit keeps a count to three characters on top of the number, so a metadata
+ * slot never spells out `50 output lines` at the cost of the command or path next to it.
+ */
+export function formatLineCount(count: number): string {
+	return `${count}L`;
+}
+
 export function formatDuration(ms: number): string {
 	return `${(ms / 1000).toFixed(1)}s`;
+}
+
+/** Elapsed times below one second carry no signal on a compact metadata row. */
+export const MIN_VISIBLE_DURATION_MS = 1000;
+
+/** Format an elapsed time, or `undefined` when it is too small for a metadata slot. */
+export function formatVisibleDuration(ms: number | undefined): string | undefined {
+	if (ms === undefined || !Number.isFinite(ms) || ms < MIN_VISIBLE_DURATION_MS) return undefined;
+	return formatDuration(ms);
 }
 
 export function shortPath(value: unknown): string {

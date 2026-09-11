@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import os from "node:os";
-import { countLines, shortPath, stripAnsi } from "../core-utils.js";
+import { MIN_VISIBLE_DURATION_MS, countLines, formatVisibleDuration, shortPath, stripAnsi } from "../core-utils.js";
 
 test("countLines keeps explicit trailing blank lines", () => {
 	assert.equal(countLines("a\n\n"), 2);
@@ -28,4 +28,14 @@ test("shortPath only abbreviates the home directory on a path boundary", () => {
 	assert.equal(shortPath(`${home}/project`), "~/project");
 	assert.equal(shortPath(`${home}2/project`), `${home}2/project`);
 	assert.equal(shortPath(`bad\npath\x1b]0;title\x07`), "bad path");
+});
+
+test("formatVisibleDuration hides sub-second elapsed times", () => {
+	assert.equal(MIN_VISIBLE_DURATION_MS, 1000);
+	assert.equal(formatVisibleDuration(undefined), undefined);
+	assert.equal(formatVisibleDuration(0), undefined);
+	assert.equal(formatVisibleDuration(999), undefined);
+	assert.equal(formatVisibleDuration(1000), "1.0s");
+	assert.equal(formatVisibleDuration(12480), "12.5s");
+	assert.equal(formatVisibleDuration(Number.NaN), undefined);
 });

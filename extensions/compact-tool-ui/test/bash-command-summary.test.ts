@@ -6,12 +6,20 @@ test("summarizeBashCommand keeps short single-line commands intact", () => {
 	assert.deepEqual(summarizeBashCommand("git status"), { text: "git status", summarized: false });
 });
 
-test("summarizeBashCommand truncates long single-line commands", () => {
+test("summarizeBashCommand truncates long single-line commands from the middle", () => {
 	const command = `echo ${"x".repeat(160)}`;
 	const summary = summarizeBashCommand(command);
 	assert.equal(summary.summarized, true);
-	assert.match(summary.text, /…$/);
+	assert.match(summary.text, /^echo x+ … x+$/);
 	assert.equal(summary.metadata, undefined);
+	assert.ok(summary.text.length <= 64);
+});
+
+test("summarizeBashCommand keeps the trailing subcommand, flags, and paths of long commands", () => {
+	const command = `pnpm ${"--mid ".repeat(20)}--filter compact-tool-ui test`;
+	const summary = summarizeBashCommand(command);
+	assert.equal(summary.summarized, true);
+	assert.equal(summary.text, "pnpm --mid --mid --mid --mid … --filter compact-tool-ui test");
 	assert.ok(summary.text.length <= 64);
 });
 

@@ -12,7 +12,7 @@ Adds Command Code as a native Pi provider.
 
 The provider uses Command Code's OpenAI-compatible endpoint at `https://api.commandcode.ai/provider/v1` and stores the login credential in Pi's own `~/.pi/agent/auth.json`.
 
-The model catalog is refreshed from `GET /models` after authentication. A small fallback catalog is included so the provider remains selectable before the first refresh. Login returns immediately after the browser callback; model discovery and key validation continue in Pi's asynchronous catalog refresh.
+The model catalog is refreshed from `GET /models` after authentication and restored from Pi's model store when available. There is no hardcoded model catalog fallback, so Command Code models appear after authentication and catalog refresh. Login returns immediately after the browser callback; model discovery and key validation continue in Pi's asynchronous catalog refresh.
 
 `/commandcode-usage` uses Command Code's account endpoints for live data and does not persist usage responses or print credentials. The existing `/usage` command from `usage-info` remains the local Pi session timeline.
 

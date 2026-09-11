@@ -59,7 +59,7 @@ export class DiffPreviewBlock implements Component {
 		const guide = this.theme.fg("borderMuted", GUIDE);
 		const maxRenderedWidth = Math.max(1, width - RIGHT_EDGE_GUARD);
 		const contentWidth = Math.max(0, maxRenderedWidth - visibleWidth(GUIDE));
-		const rendered = [""];
+		const rendered: string[] = [];
 
 		for (const line of this.lines) {
 			const content = styleDiffLine(truncateDiffLine(line, contentWidth), this.theme);

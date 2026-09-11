@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
 	hasMeaningfulOutput,
+	outputLineCount,
 	previewTail,
 	splitBashStatus,
 	summarizeBashStream,
@@ -60,10 +61,27 @@ test("hasMeaningfulOutput ignores blank output", () => {
 	assert.equal(hasMeaningfulOutput("ok\n"), true);
 });
 
-test("summarizeSuccessfulBashOutput reports output line counts", () => {
+test("summarizeSuccessfulBashOutput reports compact line counts", () => {
 	assert.equal(summarizeSuccessfulBashOutput(""), undefined);
-	assert.equal(summarizeSuccessfulBashOutput("ok\n"), "1 output line");
-	assert.equal(summarizeSuccessfulBashOutput("a\nb\n"), "2 output lines");
+	assert.equal(summarizeSuccessfulBashOutput("a\nb\nc\n"), "3L");
+});
+
+test("summarizeSuccessfulBashOutput shows content instead of a count for tiny outputs", () => {
+	assert.equal(summarizeSuccessfulBashOutput("ok\n"), "ok");
+	assert.equal(summarizeSuccessfulBashOutput("a\nb\n"), "a · 1 more line");
+	assert.equal(summarizeSuccessfulBashOutput("961 docs/x.md\n", "wc -l docs/x.md"), "961 docs/x.md");
+	assert.equal(summarizeSuccessfulBashOutput("\t spaced\tout \n"), "spaced out");
+});
+
+test("summarizeSuccessfulBashOutput truncates an oversized content preview", () => {
+	const summary = summarizeSuccessfulBashOutput(`${"x".repeat(300)}\n`);
+	assert.equal(summary?.length, 160);
+	assert.match(summary ?? "", /^x{159}…$/);
+});
+
+test("summarizeSuccessfulBashOutput counts content lines only", () => {
+	assert.equal(summarizeSuccessfulBashOutput("a\n\nb\n"), "a · 1 more line");
+	assert.equal(summarizeSuccessfulBashOutput("a\n\n\nb\nc\nd\n"), "4L");
 });
 
 test("summarizeSuccessfulBashOutput uses semantic summaries for search commands", () => {
@@ -81,11 +99,11 @@ test("summarizeSuccessfulBashOutput uses semantic summaries for path and list co
 test("summarizeSuccessfulBashOutput only applies semantics to whitelisted pipelines", () => {
 	assert.equal(summarizeSuccessfulBashOutput("src/a.ts:1:hit\nsrc/a.ts-2-context\n--\nsrc/b.ts:3:hit\n", "rg -n -C 2 hit src"), "3 search lines");
 	assert.equal(summarizeSuccessfulBashOutput(" 42\n", "find . -type f | wc -l"), "42 files");
-	assert.equal(summarizeSuccessfulBashOutput("42\n", "rg -n needle src | wc -l"), "1 output line");
-	assert.equal(summarizeSuccessfulBashOutput("2\n", "find . >/dev/null && printf 'a\\nb\\n' | wc -l"), "1 output line");
-	assert.equal(summarizeSuccessfulBashOutput("42\n", "find . || wc -l"), "1 output line");
+	assert.equal(summarizeSuccessfulBashOutput("42\n", "rg -n needle src | wc -l"), "42");
+	assert.equal(summarizeSuccessfulBashOutput("2\n", "find . >/dev/null && printf 'a\\nb\\n' | wc -l"), "2");
+	assert.equal(summarizeSuccessfulBashOutput("42\n", "find . || wc -l"), "42");
 	assert.equal(summarizeSuccessfulBashOutput("src/a.ts:1:hit\n", "rg -n 'needle|other' src"), "1 match · 1 file");
-	assert.equal(summarizeSuccessfulBashOutput("a\nb\nsrc/a.ts:1:hit\n", "ls src && rg -n hit src"), "3 output lines");
+	assert.equal(summarizeSuccessfulBashOutput("a\nb\nsrc/a.ts:1:hit\n", "ls src && rg -n hit src"), "3L");
 });
 
 test("summarizeSuccessfulBashOutput reports empty semantic output", () => {
@@ -96,8 +114,27 @@ test("summarizeSuccessfulBashOutput reports empty semantic output", () => {
 	assert.equal(summarizeSuccessfulBashOutput("", "ls empty-dir"), "empty");
 });
 
+test("summarizeSuccessfulBashOutput names silent git results only when they mean something", () => {
+	assert.equal(summarizeSuccessfulBashOutput("", "git diff -- web/src"), "no changes");
+	assert.equal(summarizeSuccessfulBashOutput("\n", "git --no-pager diff --stat"), "no changes");
+	assert.equal(summarizeSuccessfulBashOutput("", "git -C repo diff HEAD"), "no changes");
+	assert.equal(summarizeSuccessfulBashOutput("", "git status --short"), "clean");
+	assert.equal(summarizeSuccessfulBashOutput("", "git status --porcelain=v1"), "clean");
+	// Silent success stays unlabeled when the silence carries no meaning.
+	assert.equal(summarizeSuccessfulBashOutput("", "mkdir -p build"), undefined);
+	assert.equal(summarizeSuccessfulBashOutput("", "git status"), undefined);
+	assert.equal(summarizeSuccessfulBashOutput("", "git diff && echo done"), undefined);
+	assert.equal(summarizeSuccessfulBashOutput("M src/a.ts\n", "git status --short"), "M src/a.ts");
+});
+
 test("tail keeps only the requested trailing lines", () => {
 	assert.equal(tail("a\nb\nc\n", 2), "b\nc");
+});
+
+test("outputLineCount ignores trailing empty lines like tail", () => {
+	assert.equal(outputLineCount("a\nb\n"), 2);
+	assert.equal(outputLineCount("a\nb\n\n"), 2);
+	assert.equal(outputLineCount(""), 0);
 });
 
 test("previewTail keeps only the requested trailing lines when output is meaningful", () => {
@@ -108,5 +145,5 @@ test("previewTail keeps only the requested trailing lines when output is meaning
 test("summarizeBashStream reports running output line counts", () => {
 	assert.equal(summarizeBashStream(""), "running");
 	assert.equal(summarizeBashStream("\n  \n"), "running");
-	assert.equal(summarizeBashStream("a\nb\n"), "2 lines so far");
+	assert.equal(summarizeBashStream("a\nb\n"), "2L so far");
 });

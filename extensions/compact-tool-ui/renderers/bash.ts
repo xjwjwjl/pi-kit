@@ -1,15 +1,22 @@
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
-import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
+import { createBashToolDefinition, formatSize, keyHint } from "@earendil-works/pi-coding-agent";
+import { ExpandedDetailRail, type ExpandedDetailSection } from "../components/expanded-detail-rail.js";
+import { ExpandedToolHeader } from "../components/expanded-tool-header.js";
+import { LineNumberedCodeBlock } from "../components/line-numbered-code-block.js";
+import { ShellCommandBlock } from "../components/shell-command-block.js";
 import { CompactToolRow, type CompactToolRowSuffixCandidate } from "../components/compact-tool-row.js";
 import { OutputPreviewBlock } from "../components/output-preview-block.js";
+import { ToolDetailFooter } from "../components/tool-detail-footer.js";
 import { commandText } from "../format/bash-command.js";
 import { summarizeBashCommand, type BashCommandDisplay } from "../format/bash-command-summary.js";
+import { adaptBashCommand, type BashCommandLayout } from "../format/unbash-adapter.js";
+import { layoutBashCommand } from "../format/bash-command-layout.js";
 import { DEFAULT_BASH_DISPLAY_OPTIONS, type BashDisplayOptions } from "../settings/options.js";
 import { type ToolUiStatus, mutedMetadataText, toolNameText } from "../style.js";
-import { emptyComponent, formatDuration, textBlocks } from "../tui-utils.js";
-import { hasMeaningfulOutput, previewTail, splitBashStatus, summarizeBashStream, summarizeFailedBashOutput, summarizeSuccessfulBashOutput, tail } from "./bash-helpers.js";
+import { countLines, emptyComponent, formatVisibleDuration, linkPath, stripAnsi, textBlocks } from "../tui-utils.js";
+import { hasMeaningfulOutput, outputLineCount, previewTail, splitBashStatus, summarizeBashStream, summarizeFailedBashOutput, summarizeSuccessfulBashOutput, tail } from "./bash-helpers.js";
 import { settleCompactState, type CompactSummaryState } from "./compact-text.js";
-import { getExpandedResultRenderer, renderExpandedCall, type BuiltInRendererSlots } from "./render-expanded-result.js";
+import { type BuiltInRendererSlots } from "./render-expanded-result.js";
 import { resolveToolRenderShell, type ToolRenderShellSource } from "./render-shell.js";
 import { resolveBashCommand, resolveBashTimeout, type BashArgs } from "./tool-args.js";
 
@@ -24,7 +31,18 @@ type BashRefreshTimerEntry = {
 	invalidate: () => void;
 };
 
+/** Maximum tail lines kept for a streaming expanded bash output. */
+const STREAMING_OUTPUT_TAIL_LINES = 28;
+
+type ExpandedCommandCache = {
+	source: string;
+	argsComplete: boolean;
+	layout?: BashCommandLayout;
+};
+
 type CompactBashState = CompactSummaryState<CompactToolRow> & BuiltInRendererSlots<BuiltInBashState> & {
+	expandedCallHeader?: ExpandedToolHeader;
+	expandedCommandCache?: ExpandedCommandCache;
 	compactStartedAt?: number;
 	compactEndedAt?: number;
 	compactInterval?: NodeJS.Timeout;
@@ -77,13 +95,24 @@ type BashMetadata = {
 	candidates: CompactToolRowSuffixCandidate[];
 };
 
-function setBashText(component: CompactToolRow, command: BashCommandDisplay, metadata: BashMetadata, theme: Theme) {
+type BashHeaderComponent = CompactToolRow | ExpandedToolHeader;
+
+function setBashText(component: BashHeaderComponent, command: BashCommandDisplay, metadata: BashMetadata, theme: Theme) {
 	component.setParts(`${toolNameText("bash", theme)} `, commandText(command.text, theme), metadata.full, metadata.candidates);
 	return component;
 }
 
 function compactBashStatus(state: CompactBashState): ToolUiStatus {
 	return state.compactStatus ?? "pending";
+}
+
+/** The built-in bash tool trims long output, so a collapsed row must not hide that it did. */
+function bashOutputTruncated(result: any): boolean {
+	return result?.details?.truncation?.truncated === true;
+}
+
+function withTruncationMarker(summary: string | undefined): string {
+	return summary ? `${summary} · truncated` : "truncated";
 }
 
 function compactBashMetadata(
@@ -96,15 +125,19 @@ function compactBashMetadata(
 	theme: Theme,
 	displayOptions: Required<BashDisplayOptions>,
 ): BashMetadata {
+	const active = status === "running" || status === "pending";
+	// The configured timeout only matters while the command can still be cut off; once settled it
+	// is noise, and `timeout`/`aborted` outcomes already surface through the result summary.
+	const activeTimeout = active ? timeout : undefined;
 	const summary = status === "success" && !displayOptions.successfulOutputSummary ? undefined : state.compactSummary;
 	const runningSummary = executionStarted ? summary ?? "running" : summary;
-	const resultSummary = status === "running" || status === "pending" ? runningSummary : summary;
-	const full = mutedMetadataText([command.metadata, timeout, resultSummary, duration], theme);
-	const timeoutResultAndDuration = mutedMetadataText([timeout, resultSummary, duration], theme);
+	const resultSummary = active ? runningSummary : summary;
+	const full = mutedMetadataText([command.metadata, activeTimeout, resultSummary, duration], theme);
+	const timeoutResultAndDuration = mutedMetadataText([activeTimeout, resultSummary, duration], theme);
 	const resultAndDuration = mutedMetadataText([resultSummary, duration], theme);
 	const resultOnly = mutedMetadataText([resultSummary], theme);
 	const durationOnly = mutedMetadataText([duration], theme);
-	const timeoutOnly = mutedMetadataText([timeout], theme);
+	const timeoutOnly = mutedMetadataText([activeTimeout], theme);
 	const commandOnly = mutedMetadataText([command.metadata], theme);
 	const fallback = resultAndDuration || resultOnly || durationOnly || timeoutOnly || commandOnly || full;
 	const candidates: CompactToolRowSuffixCandidate[] = [
@@ -201,6 +234,91 @@ function renderOutputPreview(preview: string, theme: Theme) {
 	return new OutputPreviewBlock(preview, theme);
 }
 
+function expandedBashCall(
+	state: CompactBashState,
+	command: BashCommandDisplay,
+	metadata: BashMetadata,
+	theme: Theme,
+): ExpandedToolHeader {
+	const header = state.expandedCallHeader ?? new ExpandedToolHeader();
+	state.expandedCallHeader = header;
+	setBashText(header, command, metadata, theme);
+	return header;
+}
+
+function resolveExpandedCommandLayout(state: CompactBashState, rawCommand: string, argsComplete: boolean): BashCommandLayout | undefined {
+	const source = stripAnsi(rawCommand);
+	const cached = state.expandedCommandCache;
+	if (cached?.source === source && cached.argsComplete === argsComplete) return cached.layout;
+	const layout = adaptBashCommand(source, argsComplete);
+	state.expandedCommandCache = { source, argsComplete, layout };
+	return layout;
+}
+
+function bashTruncationFooter(truncation: any): string {
+	const outputLines = truncation?.outputLines;
+	const totalLines = truncation?.totalLines;
+	const parts: string[] = [];
+	if (typeof outputLines === "number" && Number.isFinite(outputLines) && typeof totalLines === "number" && Number.isFinite(totalLines) && totalLines > 0) {
+		parts.push(`${outputLines}/${totalLines} lines`);
+	} else if (typeof outputLines === "number" && Number.isFinite(outputLines)) {
+		parts.push(`${outputLines} lines shown`);
+	}
+	if (truncation?.truncatedBy === "bytes" && typeof truncation?.maxBytes === "number" && Number.isFinite(truncation.maxBytes)) {
+		parts.push(`${formatSize(truncation.maxBytes)} cap`);
+	}
+	return parts.length > 0 ? `truncated · ${parts.join(" · ")}` : "truncated";
+}
+
+function expandedBashResult(
+	rawCommand: string,
+	commandLayout: BashCommandLayout | undefined,
+	output: string,
+	result: any,
+	isPartial: boolean,
+	theme: Theme,
+	cwd: string,
+): ExpandedDetailRail {
+	const details = result?.details;
+	const displayOutput = isPartial ? tail(output, STREAMING_OUTPUT_TAIL_LINES) : output;
+	const footer = new ToolDetailFooter();
+	const footerParts: string[] = [];
+	// The output section title carries `streaming` whenever it renders; keep the footer marker
+	// only for the no-output case so the state is never lost or duplicated.
+	if (isPartial && !displayOutput) footerParts.push("streaming");
+	if (details?.truncation?.truncated) footerParts.push(bashTruncationFooter(details.truncation));
+	if (details?.fullOutputPath) {
+		const pathText = linkPath(theme.fg("mdLink", details.fullOutputPath), details.fullOutputPath, cwd);
+		footerParts.push(`full output: ${pathText}`);
+	}
+	footerParts.push(keyHint("app.tools.expand", "collapse"));
+	footer.setText(footerParts.join(" · "));
+
+	const commandRenderLayout = commandLayout ? layoutBashCommand(commandLayout) : undefined;
+	const renderedCommand = commandRenderLayout ?? stripAnsi(rawCommand);
+	const commandMetadataParts: string[] = [];
+	if (commandLayout?.formatted && commandLayout.statementCount > 1) commandMetadataParts.push(`${commandLayout.statementCount} statements`);
+	if (commandRenderLayout?.pipelineStages && commandRenderLayout.pipelineStages > 0) commandMetadataParts.push(`${commandRenderLayout.pipelineStages} stages`);
+	const commandMetadata = commandMetadataParts.length > 0 ? commandMetadataParts.join(" · ") : undefined;
+	const sections: ExpandedDetailSection[] = [
+		{ label: "command", metadata: commandMetadata, content: new ShellCommandBlock(renderedCommand, theme) },
+	];
+	if (displayOutput) {
+		const shownLines = countLines(displayOutput);
+		sections.push({
+			label: "output",
+			metadata: isPartial ? streamingOutputMetadata(shownLines, outputLineCount(output)) : `${shownLines} lines`,
+			content: new LineNumberedCodeBlock(displayOutput, theme, { showLineNumbers: false, maxVisualLines: isPartial ? STREAMING_OUTPUT_TAIL_LINES : undefined }),
+		});
+	}
+	return new ExpandedDetailRail(theme, sections, footer);
+}
+
+function streamingOutputMetadata(shownLines: number, totalLines: number): string {
+	const label = shownLines < totalLines ? `tail ${shownLines}/${totalLines} lines` : `${shownLines} lines`;
+	return `${label} · streaming`;
+}
+
 function settleCompactBashLifecycle(
 	state: CompactBashState,
 	toolCallId: string,
@@ -246,20 +364,20 @@ export function registerCompactBash(pi: ExtensionAPI, cwd: string, displayOption
 				context.invalidate,
 				isActiveBashExecution(state, startedAt, context.executionStarted),
 				refreshTimerByToolCallId,
-				!context.expanded,
+				true,
 			);
-			const expandedCall = renderExpandedCall(original, args, theme, context, state);
-			if (expandedCall) return expandedCall;
-
-			const text = ensureBashCallText(state, context.lastComponent);
-			const status = compactBashStatus(state);
-			const end = status === "success" || status === "failed" ? state.compactEndedAt ?? Date.now() : Date.now();
-			const duration = startedAt === undefined ? undefined : formatDuration(end - startedAt);
-			const displayOptions = resolveBashDisplayOptions(displayOptionsSource);
 			const bashArgs = args as BashArgs;
 			const command = bashCommandDisplay(bashArgs);
 			const timeout = resolveBashTimeout(bashArgs);
-			return setBashText(text, command, compactBashMetadata(state, status, command, timeout, duration, context.executionStarted, theme, displayOptions), theme);
+			const status = compactBashStatus(state);
+			const end = status === "success" || status === "failed" ? state.compactEndedAt ?? Date.now() : Date.now();
+			const duration = startedAt === undefined ? undefined : formatVisibleDuration(end - startedAt);
+			const displayOptions = resolveBashDisplayOptions(displayOptionsSource);
+			const metadata = compactBashMetadata(state, status, command, timeout, duration, context.executionStarted, theme, displayOptions);
+			if (context.expanded) return expandedBashCall(state, command, metadata, theme);
+
+			const text = ensureBashCallText(state, context.lastComponent);
+			return setBashText(text, command, metadata, theme);
 		},
 		renderResult(result, options, theme, context) {
 			const state = context.state as CompactBashState;
@@ -270,7 +388,7 @@ export function registerCompactBash(pi: ExtensionAPI, cwd: string, displayOption
 			syncBashRefreshLifecycle(state, context.toolCallId, context.invalidate, isActive, refreshTimerByToolCallId, isActive);
 
 			const end = (options.isPartial && !context.isError ? Date.now() : state.compactEndedAt) ?? Date.now();
-			const duration = startedAt === undefined ? undefined : formatDuration(end - startedAt);
+			const duration = startedAt === undefined ? undefined : formatVisibleDuration(end - startedAt);
 			const raw = textBlocks(result);
 			const { status, output } = splitBashStatus(raw, context.isError);
 			const bashArgs = context.args as BashArgs;
@@ -278,16 +396,18 @@ export function registerCompactBash(pi: ExtensionAPI, cwd: string, displayOption
 			const command = summarizeBashCommand(rawCommand);
 			const timeout = resolveBashTimeout(bashArgs);
 			const callText = getBashCallText(state);
-			const renderExpanded = getExpandedResultRenderer(original, result, options, theme, context, state);
 			const displayOptions = resolveBashDisplayOptions(displayOptionsSource);
+			const commandLayout = context.expanded ? resolveExpandedCommandLayout(state, rawCommand, context.argsComplete) : undefined;
 
 			if (options.isPartial && !context.isError) {
 				const hasOutput = hasMeaningfulOutput(output);
 				const compactStatus: ToolUiStatus = hasOutput ? "running" : "pending";
 				const streamSummary = summarizeBashStream(output);
 				settleCompactState(state, compactStatus, streamSummary);
-				callText && setBashText(callText, command, compactBashMetadata(state, compactStatus, command, timeout, duration, true, theme, displayOptions), theme);
-				if (renderExpanded) return renderExpanded();
+				const metadata = compactBashMetadata(state, compactStatus, command, timeout, duration, true, theme, displayOptions);
+				callText && setBashText(callText, command, metadata, theme);
+				if (context.expanded) expandedBashCall(state, command, metadata, theme);
+				if (context.expanded) return expandedBashResult(rawCommand, commandLayout, output, result, true, theme, context.cwd);
 				if (displayOptions.runningTailPreview) {
 					const preview = previewTail(output, displayOptions.previewLines);
 					if (preview) return renderOutputPreview(preview, theme);
@@ -298,17 +418,22 @@ export function registerCompactBash(pi: ExtensionAPI, cwd: string, displayOption
 			if (context.isError) {
 				const failureSummary = summarizeFailedBashOutput(status, output || raw, rawCommand);
 				settleCompactState(state, "failed", failureSummary);
-				callText && setBashText(callText, command, compactBashMetadata(state, "failed", command, timeout, duration, context.executionStarted, theme, displayOptions), theme);
-				if (renderExpanded) return renderExpanded();
+				const metadata = compactBashMetadata(state, "failed", command, timeout, duration, context.executionStarted, theme, displayOptions);
+				callText && setBashText(callText, command, metadata, theme);
+				if (context.expanded) expandedBashCall(state, command, metadata, theme);
+				if (context.expanded) return expandedBashResult(rawCommand, commandLayout, output || raw, result, false, theme, context.cwd);
 				const preview = tail(output || raw);
 				if (!preview) return emptyComponent();
 				return renderOutputPreview(preview, theme);
 			}
 
 			const outputSummary = summarizeSuccessfulBashOutput(output, rawCommand);
-			settleCompactState(state, "success", outputSummary);
-			callText && setBashText(callText, command, compactBashMetadata(state, "success", command, timeout, duration, context.executionStarted, theme, displayOptions), theme);
-			if (renderExpanded) return renderExpanded();
+			const truncatedSummary = bashOutputTruncated(result) ? withTruncationMarker(outputSummary) : outputSummary;
+			settleCompactState(state, "success", truncatedSummary);
+			const metadata = compactBashMetadata(state, "success", command, timeout, duration, context.executionStarted, theme, displayOptions);
+			callText && setBashText(callText, command, metadata, theme);
+			if (context.expanded) expandedBashCall(state, command, metadata, theme);
+			if (context.expanded) return expandedBashResult(rawCommand, commandLayout, output, result, false, theme, context.cwd);
 			if (displayOptions.successfulTailPreview) {
 				const preview = previewTail(output, displayOptions.previewLines);
 				if (preview) return renderOutputPreview(preview, theme);

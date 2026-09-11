@@ -5,6 +5,9 @@ export interface CommandCodeModelRecord {
     name?: string;
     context_length?: number;
     owned_by?: string;
+    // Keep provider-specific capability metadata so model-catalog can inspect it
+    // without requiring the gateway to settle on one schema up front.
+    [key: string]: unknown;
 }
 
 interface CommandCodeModelsResponse {

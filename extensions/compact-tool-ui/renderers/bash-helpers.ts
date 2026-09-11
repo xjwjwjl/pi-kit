@@ -1,4 +1,4 @@
-import { countLines, plural, stripAnsi, trimTrailingEmptyLines } from "../core-utils.js";
+import { countLines, formatLineCount, plural, sanitizeInlineText, stripAnsi, trimTrailingEmptyLines } from "../core-utils.js";
 
 const BASH_TAIL_LINES = 10;
 
@@ -182,6 +182,21 @@ function bashOutputKind(command: string | undefined): BashSemanticOutputKind | u
 	return undefined;
 }
 
+/** Commands whose empty output is itself the result the user was asking for. */
+type BashEmptyResult = "no-changes" | "clean";
+
+function bashEmptyResult(command: string | undefined): BashEmptyResult | undefined {
+	if (!command) return undefined;
+	const normalized = stripAnsi(command).trimStart();
+	if (hasTopLevelShellChain(normalized) || splitTopLevelPipeline(normalized)) return undefined;
+
+	const first = stripLeadingAssignments(firstShellCommand(normalized));
+	const subcommand = /^git\s+(?:--no-pager\s+|-C\s+\S+\s+)*([a-z][a-z-]*)\b/.exec(first)?.[1];
+	if (subcommand === "diff") return "no-changes";
+	if (subcommand === "status" && /(?:^|\s)(?:-s|--short|--porcelain(?:=v\d)?)(?:\s|$)/.test(first)) return "clean";
+	return undefined;
+}
+
 function inferSearchFileCount(lines: string[]): number | undefined {
 	const files = new Set<string>();
 	for (const line of lines) {
@@ -217,22 +232,39 @@ function summarizeEntryOutput(lines: string[]): string {
 	return entries === 0 ? "empty" : plural(entries, "entry", "entries");
 }
 
-function summarizeOutputLines(count: number): string {
-	return `${count} output ${count === 1 ? "line" : "lines"}`;
+/** Outputs this small read better as their own content than as a line count. */
+const CONTENT_PREVIEW_MAX_LINES = 2;
+/** Bound the suffix before the row's own width-aware truncation applies. */
+const CONTENT_PREVIEW_MAX_CHARS = 160;
+
+function contentPreview(firstLine: string): string {
+	const inline = sanitizeInlineText(firstLine).trim();
+	return inline.length > CONTENT_PREVIEW_MAX_CHARS ? `${inline.slice(0, CONTENT_PREVIEW_MAX_CHARS - 1)}…` : inline;
 }
 
-function summarizeEmptySemanticOutput(kind: ReturnType<typeof bashOutputKind>): string | undefined {
+function summarizeGenericOutput(lines: string[]): string {
+	if (lines.length > CONTENT_PREVIEW_MAX_LINES) return formatLineCount(lines.length);
+	const preview = contentPreview(lines[0] ?? "");
+	if (lines.length === 1) return preview;
+	return `${preview} · ${plural(lines.length - 1, "more line")}`;
+}
+
+function summarizeEmptySemanticOutput(kind: ReturnType<typeof bashOutputKind>, emptyResult: BashEmptyResult | undefined): string | undefined {
 	if (kind === "search" || kind === "search-lines" || kind === "search-files") return "no matches";
 	if (kind === "paths" || kind === "file-count") return "no paths";
 	if (kind === "entries") return "empty";
+	if (emptyResult === "no-changes") return "no changes";
+	if (emptyResult === "clean") return "clean";
 	return undefined;
 }
 
 export function summarizeSuccessfulBashOutput(output: string, command?: string): string | undefined {
 	const kind = bashOutputKind(command);
-	if (!hasMeaningfulOutput(output)) return summarizeEmptySemanticOutput(kind);
+	const emptyResult = bashEmptyResult(command);
+	if (!hasMeaningfulOutput(output)) return summarizeEmptySemanticOutput(kind, emptyResult);
+	// Count content lines only: blank lines are noise in a summary and must not inflate it.
 	const lines = outputLines(output);
-	if (lines.length === 0) return summarizeEmptySemanticOutput(kind);
+	if (lines.length === 0) return summarizeEmptySemanticOutput(kind, emptyResult);
 
 	if (kind === "search") return summarizeSearchOutput(lines);
 	if (kind === "search-lines") return summarizeSearchLinesOutput(output);
@@ -241,7 +273,7 @@ export function summarizeSuccessfulBashOutput(output: string, command?: string):
 	if (kind === "paths") return summarizePathOutput(lines);
 	if (kind === "entries") return summarizeEntryOutput(lines);
 
-	return summarizeOutputLines(countLines(stripAnsi(output).trimEnd()));
+	return summarizeGenericOutput(lines);
 }
 
 function exitStatusCode(status: string): string | undefined {
@@ -288,11 +320,16 @@ export function tail(text: string, maxLines = BASH_TAIL_LINES): string {
 	return lines.slice(Math.max(0, lines.length - maxLines)).join("\n");
 }
 
+/** Count output lines the same way `tail` trims them, so shown/total stay consistent. */
+export function outputLineCount(output: string): number {
+	return trimTrailingEmptyLines(stripAnsi(output).split("\n")).length;
+}
+
 export function previewTail(output: string, maxLines: number): string {
 	return hasMeaningfulOutput(output) ? tail(output, maxLines) : "";
 }
 
 export function summarizeBashStream(output: string): string {
 	if (!hasMeaningfulOutput(output)) return "running";
-	return `${plural(countLines(stripAnsi(output).trimEnd()), "line")} so far`;
+	return `${formatLineCount(countLines(stripAnsi(output).trimEnd()))} so far`;
 }

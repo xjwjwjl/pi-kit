@@ -2,8 +2,6 @@ import type { OpenAICompletionsCompat, Model, RefreshModelsContext, ThinkingLeve
 import { fetchCommandCodeModels, type CommandCodeModelRecord } from "./api.ts";
 import { COMMAND_CODE_BASE_URL, COMMAND_CODE_PROVIDER_ID } from "./constants.ts";
 
-// Source: pi's built-in provider catalog (zai.json / deepseek.json). Declared
-// before FALLBACK_COMMAND_CODE_MODELS so the top-level model calls can use them.
 const GLM_THINKING_LEVEL_MAP: ThinkingLevelMap = {
     off: null,
     minimal: null,
@@ -22,33 +20,57 @@ const DEEPSEEK_THINKING_LEVEL_MAP: ThinkingLevelMap = {
     max: "max",
 };
 
-export const FALLBACK_COMMAND_CODE_MODELS: readonly Model<"openai-completions">[] = [
-    createCommandCodeModel({
-        id: "z-ai/glm-5.3-flash",
-        name: "GLM-5.3 Flash",
-        context_length: 1_048_576,
-    }),
-    createCommandCodeModel({
-        id: "Qwen/Qwen3.8-Flash",
-        name: "Qwen 3.8 Flash",
-        context_length: 1_000_000,
-    }),
-    createCommandCodeModel({
-        id: "deepseek/deepseek-v4-flash-fast",
-        name: "DeepSeek V4 Flash Fast",
-        context_length: 1_000_000,
-    }),
-    createCommandCodeModel({
-        id: "deepseek/deepseek-v4-flash-vision-exp",
-        name: "DeepSeek V4 Flash Vision",
-        context_length: 1_000_000,
-    }),
-    createCommandCodeModel({
-        id: "deepseek/deepseek-v4-flash",
-        name: "DeepSeek V4 Flash",
-        context_length: 1_000_000,
-    }),
-];
+const CAPABILITY_CONTAINER_KEYS = [
+    "capabilities",
+    "capability",
+    "features",
+    "architecture",
+    "metadata",
+] as const;
+
+const MODALITY_KEYS = [
+    "input_modalities",
+    "inputModalities",
+    "supported_input_modalities",
+    "supportedInputModalities",
+    "supported_modalities",
+    "supportedModalities",
+    "input_types",
+    "inputTypes",
+    "supported_inputs",
+    "supportedInputs",
+    "input",
+    "modalities",
+] as const;
+
+const VISION_FLAG_KEYS = [
+    "vision",
+    "supports_vision",
+    "supportsVision",
+    "image",
+    "images",
+    "supports_image",
+    "supportsImage",
+    "supports_images",
+    "supportsImages",
+    "image_input",
+    "imageInput",
+    "supports_image_input",
+    "supportsImageInput",
+    "supports_visual_input",
+    "supportsVisualInput",
+] as const;
+
+const KNOWN_MODALITY_TOKENS = new Set([
+    "text",
+    "image",
+    "vision",
+    "audio",
+    "video",
+    "file",
+    "document",
+    "pdf",
+]);
 
 export async function fetchCommandCodeModelsForProvider(
     context: RefreshModelsContext,
@@ -78,12 +100,152 @@ export function createCommandCodeModel(record: CommandCodeModelRecord): Model<"o
         provider: COMMAND_CODE_PROVIDER_ID,
         baseUrl: COMMAND_CODE_BASE_URL,
         reasoning: true,
-        input: isVisionModel(id, record.name) ? ["text", "image"] : ["text"],
+        input: modelInput(record, id),
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow,
         maxTokens: Math.min(128_000, contextWindow),
         ...thinkingConfig(id),
     };
+}
+
+type JsonRecord = Record<string, unknown>;
+type ModelInput = Array<"text" | "image">;
+
+function modelInput(record: CommandCodeModelRecord, id: string): ModelInput {
+    const apiCapability = readImageCapability(record);
+    const supportsImage = apiCapability ?? isVisionModel(id, record.name);
+    return supportsImage ? ["text", "image"] : ["text"];
+}
+
+/**
+ * Capability metadata wins over name matching. The gateway currently returns
+ * the standard OpenAI model fields only, so keep the fallback for older or
+ * incomplete catalogs and accept the common capability shapes when available.
+ */
+function readImageCapability(record: CommandCodeModelRecord): boolean | undefined {
+    const root = record as JsonRecord;
+    const sources = [
+        ...CAPABILITY_CONTAINER_KEYS.map((key) => root[key]),
+        root,
+    ];
+
+    for (const source of sources) {
+        const result = readInputModalities(source);
+        if (result !== undefined) return result;
+    }
+    for (const source of sources) {
+        const result = readVisionFlags(source);
+        if (result !== undefined) return result;
+    }
+    return undefined;
+}
+
+function readInputModalities(value: unknown): boolean | undefined {
+    const source = asRecord(value);
+    if (!source) return parseModalityValue(value);
+
+    for (const key of MODALITY_KEYS) {
+        if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
+        const result = parseModalityValue(source[key]);
+        if (result !== undefined) return result;
+    }
+    return parseModalityMap(source);
+}
+
+function readVisionFlags(value: unknown): boolean | undefined {
+    const source = asRecord(value);
+    if (!source) return undefined;
+
+    for (const key of VISION_FLAG_KEYS) {
+        if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
+        const result = parseBooleanCapability(source[key]);
+        if (result !== undefined) return result;
+    }
+    return undefined;
+}
+
+function parseModalityValue(value: unknown): boolean | undefined {
+    if (Array.isArray(value)) return parseModalityEntries(value);
+    if (typeof value === "string") {
+        return parseModalityEntries(value.split(/[\s,|+/]+/));
+    }
+    const source = asRecord(value);
+    return source ? parseModalityMap(source) : undefined;
+}
+
+function parseModalityEntries(values: readonly unknown[]): boolean | undefined {
+    let sawKnownModality = false;
+    for (const value of values) {
+        const token = modalityToken(value);
+        if (!token) continue;
+        if (isImageModality(token)) return true;
+        if (KNOWN_MODALITY_TOKENS.has(token)) sawKnownModality = true;
+    }
+    return sawKnownModality ? false : undefined;
+}
+
+function parseModalityMap(source: JsonRecord): boolean | undefined {
+    let sawKnownModality = false;
+    for (const [key, value] of Object.entries(source)) {
+        const token = modalityToken(key);
+        if (!token) continue;
+        if (isImageModality(token)) {
+            const enabled = parseBooleanCapability(value);
+            if (enabled === true) return true;
+            if (enabled === false) sawKnownModality = true;
+            continue;
+        }
+        if (!KNOWN_MODALITY_TOKENS.has(token)) continue;
+        if (parseBooleanCapability(value) === true) sawKnownModality = true;
+    }
+    return sawKnownModality ? false : undefined;
+}
+
+function modalityToken(value: unknown): string | undefined {
+    if (typeof value === "string") {
+        const token = value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+        return token || undefined;
+    }
+    const source = asRecord(value);
+    if (!source) return undefined;
+    for (const key of ["type", "modality", "name", "id"]) {
+        const token = modalityToken(source[key]);
+        if (token) return token;
+    }
+    return undefined;
+}
+
+function parseBooleanCapability(value: unknown): boolean | undefined {
+    if (typeof value === "boolean") return value;
+    if (typeof value === "number") {
+        if (value === 1) return true;
+        if (value === 0) return false;
+    }
+    if (typeof value !== "string") return undefined;
+    switch (value.trim().toLowerCase()) {
+        case "true":
+        case "yes":
+        case "supported":
+        case "enabled":
+        case "on":
+        case "1":
+            return true;
+        case "false":
+        case "no":
+        case "unsupported":
+        case "disabled":
+        case "off":
+        case "0":
+            return false;
+        default:
+            return undefined;
+    }
+}
+
+function asRecord(value: unknown): JsonRecord | undefined {
+    return value && typeof value === "object" && !Array.isArray(value)
+        ? value as JsonRecord
+        : undefined;
 }
 
 /**
@@ -144,5 +306,14 @@ function positiveInteger(value: unknown): number | undefined {
 }
 
 function isVisionModel(id: string, name?: string): boolean {
-    return /vision|multimodal|image/i.test(`${id} ${name ?? ""}`);
+    if (/vision|multimodal|image/i.test(`${id} ${name ?? ""}`)) return true;
+
+    const slug = id.split("/").at(-1)?.trim().toLowerCase();
+    return slug === "deepseek-flash"
+        || slug === "deepseek-v4-flash"
+        || slug === "deepseek-v4.1-flash";
+}
+
+function isImageModality(token: string): boolean {
+    return token === "vision" || token.startsWith("image") || token.includes("vision");
 }

@@ -24,6 +24,7 @@ type ModelKey = string;
 type MeasurementMode = "tokens" | "cost" | "duration";
 
 interface ParsedUsageEvent {
+	entryId?: string;
 	at: Date;
 	model: ModelKey;
 	tokens: number;
@@ -168,9 +169,12 @@ function parseSessionStartFromFilename(name: string): Date | null {
 
 function extractProviderModelAndUsage(obj: any): { provider?: any; model?: any; modelId?: any; usage?: any } {
 	const msg = obj?.message;
+	const details = msg?.details;
 	return {
-		provider: obj?.provider ?? msg?.provider, model: obj?.model ?? msg?.model,
-		modelId: obj?.modelId ?? msg?.modelId, usage: obj?.usage ?? msg?.usage,
+		provider: obj?.provider ?? msg?.provider ?? details?.provider,
+		model: obj?.model ?? msg?.model ?? details?.model,
+		modelId: obj?.modelId ?? msg?.modelId ?? details?.modelId,
+		usage: obj?.usage ?? msg?.usage ?? details?.usage,
 	};
 }
 
@@ -254,6 +258,7 @@ async function parseSessionFile(filePath: string, signal?: AbortSignal): Promise
 	let currentModel: ModelKey | null = null;
 	let openTurnStartedAt: Date | null = null;
 	const pending: Array<{
+		entryId?: string;
 		at: Date | null;
 		model: ModelKey;
 		tokens: number;
@@ -275,20 +280,23 @@ async function parseSessionFile(filePath: string, signal?: AbortSignal): Promise
 				continue;
 			}
 			if (obj?.type === "model_change") { const mk = modelKeyFromParts(obj.provider, obj.modelId); if (mk) currentModel = mk; continue; }
-			if (obj?.type !== "message") continue;
+			if (obj?.type !== "message" && obj?.type !== "compaction") continue;
 
 			const at = extractTimestampDate(obj);
 			const role = extractMessageRole(obj);
-			if (role === "user") { openTurnStartedAt = at; continue; }
-			if (role !== "assistant") continue;
+			const isMessage = obj?.type === "message";
+			const isAssistant = isMessage && role === "assistant";
+			const isCompaction = obj?.type === "compaction";
+			if (isMessage && role === "user") { openTurnStartedAt = at; continue; }
 
 			const { provider, model, modelId, usage } = extractProviderModelAndUsage(obj);
+			if (!isAssistant && !usage) continue;
 			const mk = modelKeyFromParts(provider, model) ?? modelKeyFromParts(provider, modelId) ?? currentModel ?? "unknown";
 			const tokens = extractTokensTotal(usage), cost = extractCostTotal(usage);
 			let durationMs = 0;
 			let durationStart: Date | undefined;
 			let durationEnd: Date | undefined;
-			if (!assistantContinuesTurn(obj)) {
+			if (isAssistant && !assistantContinuesTurn(obj)) {
 				if (openTurnStartedAt && at) {
 					const el = at.getTime() - openTurnStartedAt.getTime();
 					if (el > 0) {
@@ -300,11 +308,15 @@ async function parseSessionFile(filePath: string, signal?: AbortSignal): Promise
 				openTurnStartedAt = null;
 			}
 			if (tokens <= 0 && cost <= 0 && durationMs <= 0) continue;
-			pending.push({ at, model: mk, tokens, cost, durationMs, durationStart, durationEnd });
+			pending.push({
+				entryId: typeof obj?.id === "string" && obj.id.length > 0 ? obj.id : undefined,
+				at, model: mk, tokens, cost, durationMs, durationStart, durationEnd,
+			});
 		}
 	} finally { rl.close(); stream.destroy(); }
 	if (!startedAt) return null;
 	const events = pending.map((e) => ({
+		entryId: e.entryId,
 		at: e.at ?? startedAt!,
 		model: e.model,
 		tokens: e.tokens,
@@ -392,6 +404,18 @@ function addEventToRange(range: RangeAgg, event: ParsedUsageEvent): void {
 	if (hour) addToBucket(hour, event);
 }
 
+function dedupeSessionEvents(session: ParsedSession, seenEntryIds: Set<string>): ParsedSession {
+	const events: ParsedUsageEvent[] = [];
+	for (const event of session.events) {
+		if (event.entryId) {
+			if (seenEntryIds.has(event.entryId)) continue;
+			seenEntryIds.add(event.entryId);
+		}
+		events.push(event);
+	}
+	return events.length === session.events.length ? session : { ...session, events };
+}
+
 function addSessionToRange(range: RangeAgg, session: ParsedSession): void {
 	for (const event of session.events) {
 		const hasDurationInterval = !!event.durationStart && !!event.durationEnd;
@@ -447,6 +471,8 @@ async function computeBreakdown(
 	const PARSE_CONCURRENCY = 8;
 	let nextIndex = 0;
 	let parsedFiles = 0;
+	// Fork/clone files copy the same entry tree; count each persisted entry once.
+	const seenEntryIds = new Set<string>();
 	const parseWorker = async (): Promise<void> => {
 		while (!signal?.aborted) {
 			const idx = nextIndex++;
@@ -454,7 +480,8 @@ async function computeBreakdown(
 			const filePath = candidates[idx]!;
 			const session = await parseSessionFile(filePath, signal);
 			if (!signal?.aborted && session) {
-				for (const d of RANGE_DAYS) addSessionToRange(ranges.get(d)!, session);
+				const uniqueSession = dedupeSessionEvents(session, seenEntryIds);
+				for (const d of RANGE_DAYS) addSessionToRange(ranges.get(d)!, uniqueSession);
 			}
 			parsedFiles++;
 			onProgress?.({ phase: "parse", parsedFiles, totalFiles, currentFile: path.basename(filePath) });

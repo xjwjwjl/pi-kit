@@ -4,7 +4,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { fetchCommandCodeModels } from "./src/api.ts";
 import { loginCommandCode } from "./src/auth.ts";
 import { COMMAND_CODE_BASE_URL, COMMAND_CODE_PROVIDER_ID, COMMAND_CODE_PROVIDER_NAME } from "./src/constants.ts";
-import { fetchCommandCodeModelsForProvider, FALLBACK_COMMAND_CODE_MODELS } from "./src/model-catalog.ts";
+import { fetchCommandCodeModelsForProvider } from "./src/model-catalog.ts";
 import { showCommandCodeUsage } from "./src/usage-view.ts";
 import { CommandCodeQuotaController } from "./src/quota-controller.ts";
 
@@ -39,7 +39,7 @@ export function createCommandCodeProvider(): Provider<"openai-completions"> {
                 toAuth: async (credential) => ({ apiKey: credential.access }),
             },
         },
-        models: FALLBACK_COMMAND_CODE_MODELS,
+        models: [],
         fetchModels: fetchCommandCodeModelsForProvider,
         api: openAICompletionsApi(),
     });

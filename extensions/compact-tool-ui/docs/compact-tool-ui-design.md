@@ -1,6 +1,6 @@
 # Pi Tools UI 展示优化设计草案
 
-> 状态：MVP v0 已实现为扩展初版，后续已加入 `edit` compact renderer，并统一 `read` / `write` / `edit` 的 compact error/hint  
+> 状态：MVP v0 与 Expanded v1（统一 detail rail、`bash` / `read` / `write` / `edit` expanded renderer）已实现；Expanded Bash 长命令安全格式化、性能护栏与 truncation/pipeline/flag 细节增强已实现
 > 目录：`extensions/compact-tool-ui/`  
 > 目标：先用扩展覆盖内置 `bash` / `write` / `read` / `edit` 的 renderer 进行体验验证，设计稳定后再考虑 upstream patch。
 
@@ -102,7 +102,7 @@ Header 负责表达：
 ```text
 read src/index.ts:1-120
 bash pnpm build                                 exit 1 · 9.7s
-write extensions/foo/index.ts                   214 lines · 6.8 KB
+write extensions/foo/index.ts                   214L · 6.8 KB
 ```
 
 ### 4.2 Summary
@@ -177,10 +177,13 @@ read src/index.ts:120-180
 截断：
 
 ```text
-read src/large.ts                                truncated
+read src/huge.ts                                2000/9000L
+read src/large.ts:1-100 · 4900L more
 ```
 
 MVP v0 不设置小文件例外：所有成功 `read` 在 collapsed 状态默认不展示正文；普通文本读取不显示行数，用户展开后再看正文。后续如果反馈过于安静，再讨论小文件直出阈值。
+
+`read` 有两种提前结束的路径，两者都必须进入 collapsed metadata：内置行 / 字节上限（`details.truncation`）显示 `outputLines/totalLinesL`，比值不可用时回退为 `truncated`；用户 `limit` 在 EOF 前停止时不产生 truncation details，只留下正文里的 continuation notice，因此从 notice 中解析剩余行数并显示为 `NL more`。
 
 ### expanded 展示
 
@@ -211,21 +214,34 @@ read src/missing.ts                              path not found
 ```text
 bash npm test                                   running · 4.1s
 bash sleep 10                                   timeout 30s · running · 4.1s
-bash npm test                                   2 lines so far · 4.1s
-bash python3 heredoc                            31 lines · 1.3 KB · 2 lines so far · 4.1s
+bash npm test                                   2L so far · 4.1s
+bash python3 heredoc                            31 lines · 1.3 KB · 2L so far · 4.1s
 ```
 
-MVP v0 默认在运行中只更新 header 状态；如果已有输出，则显示已输出行数。调用参数提供 `timeout` 时，在 collapsed metadata 中显示 `timeout Ns`。tail preview 作为可选能力，可配置显示最后 N 行。多行 / heredoc / 长命令在 collapsed 状态下始终压缩为一行命令摘要。
+MVP v0 默认在运行中只更新 header 状态；如果已有输出，则显示已输出行数（`NL so far`）。调用参数提供 `timeout` 时，只在运行中的 collapsed metadata 中显示 `timeout Ns`；命令结束后该字段移除，避免和真实 outcome 重复（`timeout` / `aborted` 由 result summary 表达）。tail preview 作为可选能力，可配置显示最后 N 行。多行 / heredoc / 长命令在 collapsed 状态下始终压缩为一行命令摘要。
 
 ### success collapsed
 
 ```text
-bash npm test                                   38 output lines · 12.4s
-bash python3 heredoc                            110 lines · 4.1 KB · 8 output lines · 0.8s
-bash shell script with python heredoc           62 lines · 2.0 KB · 0.3s
+bash npm test                                   38L · 12.4s
+bash python3 heredoc                            110 lines · 4.1 KB · 8L · 0.8s
+bash echo hi                                    hi
+bash wc -l docs/tui.md                          961 docs/tui.md · 1.2s
+bash git status --short                         M a.vue · 1 more line · 1.2s
+bash git diff -- web/src                        no changes
+# 输出被内置限制截断时：
+bash npm test                                   50L · truncated · 12.4s
 ```
 
-成功时默认仍不展示正文；如有输出，则在摘要中补充输出摘要，并将耗时放在 metadata 最后。普通命令显示 `N output lines`；`rg` / `grep` 显示 `N matches`（可推断时补充 `M files`）；带 `-A` / `-B` / `-C` context 的 `rg` / `grep` 显示 `N search lines`；`find` / `rg --files` 显示 `N paths`；`find ... | wc -l` 显示 `N files`；纯 `ls` 显示 `N entries`，但 `ls && ...` / `ls; ...` 等混合命令降级为普通 output lines。语义化命令空输出时显示 `no matches` / `no paths` / `empty`；普通命令无输出时只显示耗时。用户展开后再看完整输出和完整命令。
+成功时默认仍不展示正文；如有输出，则在摘要中补充输出摘要，并将耗时放在 metadata 最后。
+
+普通命令的输出摘要按信息密度分级：内容行数 ≤ 2 时直接展示首行内容（单行化、按 160 字符上限截断），行数为 2 时附加 `1 more line` 标记；行数 ≥ 3 时使用 `NL` 单位计数（`50L`），避免 `50 output lines` 这类短语吞掉命令正文的可用宽度。计数只统计非空内容行，空行不计入；`NL` 在同一行内与 command metadata 的 `N lines` 不会混淆。
+
+内置 bash tool 截断输出时（`details.truncation.truncated`），collapsed 摘要追加 `truncated` 标记，例如 `50L · truncated`；无摘要时单独显示 `truncated`，不依赖展开才能发现。
+
+`rg` / `grep` 显示 `N matches`（可推断时补充 `M files`）；带 `-A` / `-B` / `-C` context 的 `rg` / `grep` 显示 `N search lines`；`find` / `rg --files` 显示 `N paths`；`find ... | wc -l` 显示 `N files`；纯 `ls` 显示 `N entries`，但 `ls && ...` / `ls; ...` 等混合命令降级为普通内容摘要。语义化命令空输出时显示 `no matches` / `no paths` / `empty`；`git diff` 类命令空输出时显示 `no changes`，`git status --short` / `--porcelain` 空输出时显示 `clean`；其余普通命令无输出时保持静默，只显示耗时。用户展开后再看完整输出和完整命令。
+
+耗时低于 1s 时不写入 collapsed metadata，避免大量亚秒级命令拖出一条无信息的 `0.1s`。
 
 ### error collapsed
 
@@ -295,14 +311,14 @@ edit src/config.ts                              oldText not found
 ### collapsed
 
 ```text
-write extensions/foo/index.ts                   214 lines · 6.8 KB
+write extensions/foo/index.ts                   214L · 6.8 KB
 ```
 
 如果能区分新建与覆盖：
 
 ```text
-create extensions/foo/index.ts                  214 lines · 6.8 KB
-overwrite src/app.ts                            380 lines · 12.1 KB
+create extensions/foo/index.ts                  214L · 6.8 KB
+overwrite src/app.ts                            380L · 12.1 KB
 ```
 
 ### 小文件例外
@@ -442,18 +458,21 @@ MVP v0 首先覆盖三个最容易造成噪音的内置 tool：
 
 #### bash
 
-- running：显示 `bash <command summary> · running · <elapsed>`；如果已有输出，则切换为 `bash <command summary> · <n> lines so far · <elapsed>`。
+- running：显示 `bash <command summary> · running · <elapsed>`；如果已有输出，则切换为 `bash <command summary> · <n>L so far · <elapsed>`。
 - running：默认不展示 tail preview；可通过配置开启最后 N 行 preview。
-- timeout：调用参数提供 `timeout` 时，在 collapsed metadata 中显示 `timeout Ns`。
+- timeout：调用参数提供 `timeout` 时，只在该命令处于 running / pending 时于 collapsed metadata 中显示 `timeout Ns`；命令结束后移除该字段。
 - collapsed command：短单行命令原样显示；`rg` / `grep` / `find` / 纯 `ls` 使用语义 label，例如 `rg /pattern/ in path`、`find *.ts in .`、`ls src`；长单行命令截断但不额外显示字符数；多行命令压缩为 `shell script · N lines · size`；Python heredoc 压缩为 `python3 heredoc · N lines · size`。
-- success collapsed：只显示摘要，例如 `bash pnpm test · 38 output lines · 12.4s` 或 `bash python3 heredoc · 110 lines · 4.1 KB · 0.8s`。
-- success collapsed：普通命令无输出时只显示耗时；有输出时补充摘要并将耗时放在最后。普通命令使用 `N output lines`；`rg` / `grep` 使用 `N matches`，带 context 时使用 `N search lines`，空输出使用 `no matches`；`find` / `rg --files` 使用 `N paths`，`find ... | wc -l` 使用 `N files`，空输出使用 `no paths`；纯 `ls` 使用 `N entries`，空输出使用 `empty`，混合 `ls` 命令降级为普通 output lines。
+- success collapsed：只显示摘要，例如 `bash pnpm test · 38L · 12.4s` 或 `bash git status --short · M a.vue · 1 more line`。
+- success collapsed：内容行数 ≤ 2 的普通命令直接展示首行内容（单行化、160 字符上限），行数为 2 时附加 `1 more line`；行数 ≥ 3 时使用 `NL` 单位计数。计数只统计非空内容行。
+- success collapsed：内置 bash tool 截断输出时（`details.truncation.truncated`）在摘要后追加 `truncated`，无摘要时单独显示 `truncated`。
+- success collapsed：`rg` / `grep` 使用 `N matches`，带 context 时使用 `N search lines`，空输出使用 `no matches`；`find` / `rg --files` 使用 `N paths`，`find ... | wc -l` 使用 `N files`，空输出使用 `no paths`；纯 `ls` 使用 `N entries`，空输出使用 `empty`；`git diff` 类空输出使用 `no changes`，`git status --short` / `--porcelain` 空输出使用 `clean`。
+- duration：耗时低于 1s 时不展示；命令无输出且无适用语义时只显示耗时（或什么都不显示）。
 - error collapsed：显示 `bash <command summary> · exit <code> · <duration>`，并展示最后 10 行输出。
 - expanded：委托原始 renderer，展示完整当前可用输出、完整命令、截断信息和 full output path。
 
 #### write
 
-- success collapsed：只显示摘要，例如 `write src/generated.ts · 214 lines · 6.8 KB`。
+- success collapsed：只显示摘要，例如 `write src/generated.ts · 214L · 6.8 KB`；行数使用与 `bash` 相同的 `NL` 单位。
 - 不设置小文件例外。
 - error collapsed：显示 compact reason；有明确修复方向时显示 compact hint，例如 `write src/generated.ts · permission denied` + `check file permissions`。
 - expanded：委托原始 renderer，展示写入内容预览和语法高亮。
@@ -461,7 +480,8 @@ MVP v0 首先覆盖三个最容易造成噪音的内置 tool：
 #### read
 
 - success collapsed：普通文本只显示路径，例如 `read src/index.ts`。
-- 带范围时显示 `path:start-end`；截断时显示 `truncated`。
+- 带范围时显示 `path:start-end`。
+- 截断时按内置上限显示 `outputLines/totalLinesL`（例如 `2000/9000L`），比值不可用时显示 `truncated`；用户 `limit` 提前结束时显示 `NL more`（例如 `4900L more`）。
 - 不设置小文件例外。
 - error collapsed：显示 compact reason；有明确修复方向时显示 compact hint，例如 `read src/missing.ts · path not found` + `check file path`。
 - expanded：委托原始 renderer，展示文件内容、语法高亮和截断信息。
@@ -663,4 +683,305 @@ tools: {
 - 不改变返回给 LLM 的 tool result 内容。
 - 覆盖内置 tool 时保持 details shape 兼容。
 - 在非 interactive 模式下不影响执行结果。
+
+## 13. Expanded v1 设计提案（P1 已实现，P2 待实现）
+
+> 本节描述 Expanded v1 的目标体验与当前进度。P1 已由本扩展完整渲染 `bash` / `read`；`write` / `edit` 仍主要委托内置 renderer 作为兼容性 fallback。
+
+### 13.1 问题与目标
+
+当前 collapsed 视图已经形成了紧凑、低噪音的一行信息结构，但切换到 expanded 后会进入各内置 tool 不同的展示语言：有的直接展示纯文本，有的在 call 内展示内容，有的自带 Box / padding。配合扩展默认的 `renderShell: "self"`，容易出现 header、内容、间距和背景彼此不连续的问题。
+
+Expanded v1 的目标是让展开成为 collapsed 行的自然纵向延伸：
+
+1. **统一视觉语法**：所有 tool 都使用同一套 header、详情轨道、footer 层级。
+2. **内容优先**：展开后能完整阅读、复制、诊断；不为了“紧凑”再次丢失内容。
+3. **状态明确**：running、failure、truncation、用户 limit 和图片等例外状态有固定位置。
+4. **无卡片堆叠**：不引入多层 Box、粗边框或大面积背景；利用终端的留白、缩进和低对比 guide 建立层级。
+5. **不改变语义**：不改 execute、result shape、LLM context、session 存储和默认快捷键。
+
+### 13.2 统一视觉语法：详情轨道（detail rail）
+
+推荐 expanded 视图采用单根低对比左侧轨道，而不是卡片或表格。header 保持 tool 名、主要对象、状态和结果摘要；body 由命名 section 组成；footer 只承载收起提示及异常操作信息。
+
+```text
+Bash pnpm test · exit 1 · 4.2s
+
+  ├─ command
+  │  pnpm test -- --runInBand
+  ├─ output · 38 lines
+  │  FAIL src/foo.test.ts
+  │  Expected: 1
+  │  Received: 2
+  ╰─ Ctrl+O collapse
+```
+
+规则：
+
+- **header**：只出现一次 outcome / duration / diff stat，避免 footer 重复同一信息。
+- **section 标题**：使用 `├─ <kind> · <metadata>`；`kind` 采用小写短词，例如 `command`、`content`、`output`、`diff`、`error`。
+- **正文**：每行固定在 `│` guide 后；代码、diff 与原始输出有各自的主题语义色。
+- **footer**：使用 `╰─` 收束轨道，仅显示 `Ctrl+O collapse`、truncation、continuation 或 full-output link 等下一步行动信息。
+- **留白**：expanded result 在 header 后只增加一个内容间隔；`ToolExecutionComponent` 已在 self shell 外提供 tool 间留白，组件自身不能再增加无意义的顶部 spacer。
+- **背景**：默认 `renderShell: "self"` 下不绘制背景色；状态通过 header 的语义色与内容中的 error / warning token 表达。`renderShell: "default"` 仍可由 Pi 的外层 shell 提供背景，不需要增加另一套样式。
+
+### 13.3 各 tool 展开形态
+
+#### bash
+
+```text
+Bash pnpm test · exit 1 · 4.2s
+
+  ├─ command
+  │  pnpm test -- --runInBand
+  ├─ output · 38 lines
+  │  FAIL src/foo.test.ts
+  │  Expected: 1
+  │  Received: 2
+  ╰─ Ctrl+O collapse
+```
+
+- `command` 永远展示完整命令；多行命令和 heredoc 以 shell code block 呈现，而不是继续使用 collapsed command summary。
+- settled success / failure 展示当前可用的完整 output；输出为空时省略 `output` section。
+- running 时只显示最后约 20–30 个**视觉行**的 tail，并在 section 标题标注 `tail X/Y lines · streaming`（Y 为当前总输出行数，elapsed 保留在 header），避免长时间任务持续把 transcript 推高；settled 后替换为完整当前 output。
+- truncation 时 footer 显示 warning、已显示比例和可点击的 `full output` 本地路径；不要把内置 tool 拼进正文的 truncation 文案作为普通日志渲染。
+- failure 的 header 显示 exit / timeout / duration，正文保留完整诊断，不只保留 collapsed tail。
+
+#### read
+
+```text
+Read src/router.ts:80-150 · 71 lines
+
+  ├─ content · TypeScript
+  │   80  export function registerRoutes() {
+  │   81    // ...
+  │   82  }
+  ╰─ Ctrl+O collapse
+```
+
+- 以 `offset ?? 1` 计算真实行号；宽度不足时优先隐藏行号，保留内容和 guide。
+- section 标题显示语言（可识别时）和实际读取范围；正文使用语法高亮。
+- result 内的 truncation / user limit continuation notice 需要从正文中分离：前者在 footer 显示 `truncated · next offset=N`，后者显示 `N more lines · next offset=N`。
+- 图片读取保留 Pi 的原生 image attachment 展示；轨道只展示图片类型、诊断和展开状态，不复制渲染 image data。
+
+#### write
+
+```text
+Write extensions/foo/index.ts · 214L · 6.8 KB
+
+  ├─ content · TypeScript
+  │    1  import type { ExtensionAPI } from "...";
+  │    2  // ...
+  ╰─ Ctrl+O collapse
+```
+
+- 成功后展示完整写入内容（来自 args），并使用语言高亮和从 1 开始的行号。
+- pending 时可渐进显示已到达的 arguments，但只在参数完整后做完整高亮，避免每次 token 更新重算整份文件。
+- failure 时按 `error` section → `content` section 的顺序展示：先给出完整错误，再保留 attempted content 供诊断。
+- 不在 Expanded v1 推断或展示 `create` / `overwrite`，避免额外文件检查带来竞态或语义变化。
+
+#### edit
+
+```text
+Edit src/router.ts · +12 −4
+
+  ├─ diff · 2 hunks
+  │  @@ -80,7 +80,15 @@
+  │  - const timeout = 5000
+  │  + const timeout = 10000
+  ╰─ Ctrl+O collapse
+```
+
+- 使用完整 unified diff：hunk header、added、removed、context 都使用稳定主题 token。
+- expanded 状态不采用 collapsed `DiffPreviewBlock` 的中间省略策略；长行应 ANSI-safe 换行，并让 continuation 对齐内容列，保证可复制且不丢失行尾。
+- pending 时可以复用已有 async preview；settled 后以 `details.diff` 为权威数据。
+- error 使用 `error` section 展示完整原始错误；不再渲染成功 diff 的占位内容。
+
+### 13.4 状态与响应式规则
+
+| 情况 | Header | Body | Footer |
+|---|---|---|---|
+| pending | tool / target / preparing | 可省略，或展示已完整的 command/content | 无 |
+| running | running 或 stream summary / elapsed | bash 显示 tail；其他 tool 展示稳定 preview | `streaming` 信息可放 section 标题 |
+| success | 结果摘要 / duration | 完整可用内容 | `Ctrl+O collapse` |
+| failure | compact reason / exit / duration | 完整 error 与可用诊断 | 修复 hint、收起提示 |
+| truncated | 正常结果摘要 | 已保留的可用内容 | warning、比例、next offset 或 full-output path |
+
+宽度分级：
+
+- **≥ 96 columns**：显示 section metadata、行号和完整 footer metadata。
+- **64–95 columns**：保留 section 标题，行号按可用宽度缩短或省略。
+- **< 64 columns**：优先保留 guide、内容和状态；省略语言、行数等可推导 metadata，禁止横向溢出。
+- 所有正文都必须经过 ANSI-safe wrapping；展开态不能因为视觉原因截断内容。只有 tool 原本的 result truncation 才能减少可用内容。
+
+### 13.5 实现边界与组件划分
+
+已新增并继续建议复用以下组件，而不是在四个 renderer 中拼接字符串：
+
+```text
+components/
+  expanded-tool-header.ts       // expanded header，复用 compact 的状态与链接语义
+  expanded-detail-rail.ts       // section / guide / footer 的布局容器
+  line-numbered-code-block.ts   // ANSI-safe code wrap、可选行号、语言高亮缓存
+  shell-command-block.ts        // Bash command layout、语义样式与 continuation
+  expanded-diff-block.ts        // 完整 diff 的语义着色与 ANSI-safe wrapping
+  tool-detail-footer.ts         // truncation、continuation、keyHint、full-output link
+renderers/
+  bash.ts                       // expanded Bash renderer
+  read.ts                       // expanded Read renderer
+  write.ts                      // expanded Write renderer
+  edit.ts                       // expanded Edit renderer
+```
+
+实现原则：
+
+1. expanded 时 `renderCall` / `renderResult` 使用插件组件，不再把内置 renderer 的组件树直接嵌入 self shell。
+2. `render-expanded-result.ts` 保留为 result shape 异常、未来未知 tool 或显式 native fallback 的兼容路径。
+3. 继续复用 Pi 导出的语言识别、语法高亮、key hint 和 diff 语义能力，但由本扩展负责布局、间距和 footer。
+4. 通过 `context.lastComponent` 与 row-local state 缓存解析后的原始行和 width 相关 render cache；主题切换时丢弃预烘焙 ANSI 样式并从原始数据重建。
+5. 保留现有 collapsed renderer 和 `DiffPreviewBlock` 行为；Expanded v1 只替换 `context.expanded === true` 分支。
+6. `edit` 的 async preview 计算与内置可视组件解耦：collapsed 可以延续当前预览机制，expanded 以最终 `details.diff` 为主，避免 nested Box / padding。
+
+### 13.6 分阶段交付
+
+1. **P1：基础布局 + bash / read（已实现）**
+   - 落地 detail rail、footer、code block、宽度处理和 truncation 分离。
+   - 覆盖最常使用且最能检验内容密度的 command output 与文件正文。
+2. **P2：write / edit（已实现）**
+   - 接入完整写入内容、增量高亮缓存和完整 diff block。
+   - expanded 状态不再嵌入内置 `edit` 可视组件。
+3. **P3：稳定性与回退（基础项已实现）**
+   - 对 native fallback、图片、错误、主题切换、窄终端和 streaming 做回归。
+   - 依据实际体验再决定是否需要 `expandedStyle: "structured" | "native"` 配置；P1/P2 不新增设置项。
+
+### 13.7 Expanded v1 验收标准
+
+- 展开任一已支持 tool 后，header、内容、footer 视觉层级一致，不出现重复标题、嵌套 Box 或双重 padding。
+- `bash` 的完整命令、完整可用 output、timeout / exit、truncation 和 full-output path 都可读。
+- `read` / `write` 的代码高亮、行号、范围和 continuation 信息准确；图片不重复渲染。
+- `edit` 的每个 diff 字符在 expanded 下可见或通过换行保留，不使用中间截断。
+- 在 48、64、80、120 列宽下每一行都不超过可用 width；OSC 8 路径链接不会因截断遗留未闭合序列。
+- running bash 更新不造成无界 transcript 增长；settled 后展示完整当前可用 output。
+- 主题切换、session restore、`/reload` 和原生 renderer fallback 不出现旧 ANSI 颜色或 stale component state。
+
+## 14. Expanded Bash 长命令格式化（`unbash` + 安全回退，已实现）
+
+### 14.1 决策
+
+Expanded Bash 的 `command` section 对长命令采用**保守解析 + 安全回退**：
+
+- 对能够完整识别的常见 shell 顶层结构，按逻辑 statement、pipeline 和参数边界格式化。
+- 对任何不完整、复杂或无法确认安全性的 shell 语法，保持原始命令，仅做现有的 ANSI-safe 视觉换行。
+- 格式化只影响 TUI 展示，绝不改写传给 execute 的 command、tool result、LLM context 或 session 内容。
+
+第一版采用 [`unbash`](https://github.com/webpro-nl/unbash) 作为 Bash AST 与 source range 的结构识别层，但**不使用其 printer**。不先为 `find` / `rg` / `git` 等单独实现命令专用 formatter。
+
+### 14.2 目标体验
+
+原始单行命令：
+
+```text
+git diff --stat -- extensions/compact-tool-ui; printf '\n--- new files ---\n'; find extensions/compact-tool-ui/components -maxdepth 1 -type f -name 'expanded-*.ts' -o -name 'line-numbered-code-block.ts' -o -name 'tool-detail-footer.ts' | sort; find extensions/compact-tool-ui/test -maxdepth 1 -type f -name 'expanded-components.test.ts' -print
+```
+
+在 expanded 视图中展示为：
+
+```text
+  ├─ command · 4 statements
+  │  git diff --stat -- extensions/compact-tool-ui;
+  │  printf '\n--- new files ---\n';
+  │  find extensions/compact-tool-ui/components \
+  │    -maxdepth 1 -type f \
+  │    -name 'expanded-*.ts' \
+  │    -o -name 'line-numbered-code-block.ts' \
+  │    -o -name 'tool-detail-footer.ts' |
+  │    sort;
+  │  find extensions/compact-tool-ui/test \
+  │    -maxdepth 1 -type f \
+  │    -name 'expanded-components.test.ts' -print
+```
+
+格式化规则：
+
+- 顶层 `;`：拆分 statement，并保留 `;`，使视觉文本仍忠实表达原有控制符。
+- 顶层 `&&` / `||`：在 operator 后换行并增加 continuation indent。
+- 顶层 `|` / `|&`：拆分 pipeline stage；operator 保留在前一行末尾。
+- 简单 command 内的普通参数：仅在 token 边界折行；需要把同一 simple command 延续到下一物理行时，显示 `\` continuation。
+- redirection 与其 target 必须保持相邻，不可在二者之间插入换行。
+- 引号、转义序列和 command substitution 作为不可拆 token 保留原样。
+- heredoc opener 与 body 使用原始物理行，不对 body 的内部结构做格式化。
+
+`command` section 在实际拆出了多个顶层 statement 时显示 `N statements` metadata；只有原始视觉换行时不额外显示“已格式化”标签，避免制造噪音。
+
+### 14.3 支持范围与安全回退
+
+第一版只格式化 `unbash` 可成功解析、无 errors、未超过 32 KiB command bytes / 512 AST tokens 且能映射到已支持 layout 的非复合 command list。`unbash` 对不完整输入可以返回 partial AST；partial AST 不是格式化许可，任何 parser error 或性能上限都必须回退。
+
+以下任一情况必须回退到 raw command 展示：
+
+- args 尚在 streaming 中，或 `unbash` 返回任意 parse error / 无法覆盖完整 source range。
+- heredoc 边界无法确认，或需要理解 heredoc body 才能继续解析。
+- shell comments、反引号 command substitution、`eval`、复杂 parameter expansion 等语法。
+- `if` / `for` / `while` / `case` / function、subshell、brace group、array 等复合 shell 构造。
+- AST 中存在尚未被 `bash-command-layout.ts` 明确支持的 node / operator。
+
+回退结果不能丢失字符、替换 token 或尝试修复命令；它只是把已 strip 的 ANSI 原始 command 交给现有的宽度换行 renderer。
+
+### 14.4 实现架构
+
+当前 `format/bash-command.ts` 与 `format/bash-command-summary.ts` 已各自实现轻量扫描；它们继续服务 collapsed/header 场景。长命令格式化不再新增第三套手写 parser，而是通过 `unbash` 获得 AST、operator 关系与精确 source range。
+
+`unbash` 只负责结构识别；layout 必须基于 `rawCommand.slice(node.pos, node.end)` 取得原始 token / quote / escape 文本。不得调用其 printer，因为 printer 的空白与注释保留策略不满足本扩展的原始文本和复制语义约束。
+
+已新增以下适配层：
+
+```text
+format/
+  unbash-adapter.ts              // parse、error gate、AST source range → 保守 layout model
+  bash-command.ts                // collapsed / header 的 command-name 高亮（保持现有实现）
+  bash-command-summary.ts        // collapsed 的语义摘要（保持现有实现）
+  bash-command-layout.ts         // layout model → statement / pipeline / continuation 行
+components/
+  shell-command-block.ts         // 语义样式、宽度感知布局、continuation indent
+```
+
+初始集成只替换 expanded command 的结构识别，不要求同时重写 collapsed summary / highlighter；后续仅在能减少重复逻辑时，再评估是否复用 `unbash-adapter` 的 token 元数据。
+
+实现时将 `unbash` 作为 runtime dependency 精确固定版本（本决策时为 `4.0.11`）：
+
+```json
+{
+  "dependencies": {
+    "unbash": "4.0.11"
+  }
+}
+```
+
+`ShellCommandBlock` 负责 expanded command 的样式与布局，不复用 `LineNumberedCodeBlock` 作为 command renderer：后者适合逐行代码内容，而 command block 需要了解 operator、续行符和 pipeline 缩进。
+
+当前 `expandedBashResult()` 使用 `ShellCommandBlock` 渲染适配后的 layout；解析失败或参数尚未完成时传入字符串 `stripAnsi(rawCommand)`，让 raw command 走组件的 `split("\n")` 分支，不丢失原始物理行。
+
+### 14.5 复制、语义与渲染约束
+
+formatter 只保证原始内容完整、顺序不变和视觉行不溢出。长 URL、glob、单引号字符串等不可拆 token 可能被视觉分段，当前不承诺从终端选择复制后仍保持等价 shell 语法；需要复制时应以后续的“复制原始 command”能力为准。
+
+无论 formatter 是否生效，都必须满足：
+
+- 原始 token 顺序、token 内容、quote 和 escape 不变。
+- 不对命令参数做 unquote、重新引用、路径规范化或语义摘要。
+- 单行过宽时仍使用 ANSI-safe wrapping；每个 TUI render line 不超过可用 width。
+- command name、operator、argument 和 continuation 使用不同主题 token，但不允许未闭合 ANSI / OSC 序列跨行泄漏。
+- formatter 仅在 `argsComplete`、`unbash` 无 errors 且 AST layout 完全受支持时启用；pending / partial call 一律走 raw 展示。
+
+### 14.6 测试与后续增强
+
+新增的 unit / renderer tests 至少覆盖：
+
+1. 本节示例中的顶层 `;`、pipeline、长 `find` 参数列表。
+2. `&&`、`||`、`|&`、redirection target、leading environment assignment。
+3. 引号中含有 `;` / `|`、escaped `\;`、`find -exec ... \;`、`$()` 和 heredoc。
+4. 未闭合 quote、partial args、comment、backtick、compound shell construct 均回退 raw renderer。
+5. 48、64、80、120 列宽下不溢出；格式化和 fallback 都保持稳定主题 / ANSI 行边界。
+
+命令专用增强（例如 `find` predicate 分组、`rg` option / pattern 分组）可以在通用 `unbash`-based formatter 稳定后作为第二层优化；它们不能绕过安全回退，也不能取代通用 AST layout。
 

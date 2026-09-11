@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createBashToolDefinition, initTheme } from "@earendil-works/pi-coding-agent";
+import { initTheme } from "@earendil-works/pi-coding-agent";
 import { registerCompactBash } from "../renderers/bash.js";
 import { registerCompactEdit } from "../renderers/edit.js";
 import { registerCompactRead } from "../renderers/read.js";
@@ -135,12 +135,12 @@ test("compact bash settles state when a partial run finishes while expanded", ()
 		assert.equal(typeof state.compactEndedAt, "number");
 		assert.equal(typeof state.endedAt, "number");
 		assert.equal(state.compactStatus, "success");
-		assert.equal(state.compactSummary, "1 output line");
+		assert.equal(state.compactSummary, "done");
 		assert.match(renderText(state.compactCallText), /^Bash /);
 
 		const reconstructed = tool.renderCall(args, theme, toolContext(state, toolCallId, args, undefined));
 		assert.match(renderText(reconstructed), /^Bash /);
-		assert.match(renderText(reconstructed), /1 output line/);
+		assert.match(renderText(reconstructed), /done/);
 	} finally {
 		global.setInterval = originalSetInterval;
 		global.clearInterval = originalClearInterval;
@@ -409,7 +409,26 @@ test("compact bash shows success output summary before duration when enabled", (
 
 	const text = renderText(state.compactCallText);
 	assert.match(text, /^Bash /);
-	assert.match(text, /2 output lines · 1\.[0-9]s/);
+	assert.match(text, /alpha · 1 more line · 1\.[0-9]s/);
+});
+
+test("compact bash drops sub-second durations from settled rows", () => {
+	const tool = captureRegisteredTool(registerCompactBash);
+	const args = { command: "echo hi" };
+	const toolCallId = "bash-fast-duration";
+	const state: any = {};
+
+	const call = tool.renderCall(args, theme, toolContext(state, toolCallId, args, undefined));
+	state.compactStartedAt = Date.now() - 120;
+	tool.renderResult(
+		{ content: [{ type: "text", text: "hi\n" }], details: undefined },
+		{ expanded: false, isPartial: false },
+		theme,
+		toolContext(state, toolCallId, args, call),
+	);
+
+	const text = renderText(state.compactCallText);
+	assert.equal(text, "Bash echo hi · hi");
 });
 
 test("compact bash includes timeout metadata when provided", () => {
@@ -425,6 +444,124 @@ test("compact bash includes timeout metadata when provided", () => {
 	assert.match(text, /timeout 30s/);
 	assert.match(text, /running/);
 	assert.match(text, /1\.[0-9]s/);
+});
+
+test("compact bash flags truncated output in the collapsed summary", () => {
+	const tool = captureRegisteredTool(registerCompactBash);
+	const args = { command: "npm test" };
+	const state: any = { compactStartedAt: Date.now() - 2400 };
+	const toolCallId = "bash-truncated-summary";
+	const output = `${Array.from({ length: 50 }, (_, index) => `line${index}`).join("\n")}\n`;
+
+	const call = tool.renderCall(args, theme, toolContext(state, toolCallId, args, undefined));
+	tool.renderResult(
+		{ content: [{ type: "text", text: output }], details: { truncation: { truncated: true, truncatedBy: "lines", outputLines: 50, totalLines: 500, maxLines: 50 } } },
+		{ expanded: false, isPartial: false },
+		theme,
+		toolContext(state, toolCallId, args, call),
+	);
+
+	const text = renderText(state.compactCallText);
+	assert.match(text, /^Bash npm test/);
+	assert.match(text, /50L · truncated · 2\.[0-9]s/);
+});
+
+test("compact bash leaves the summary unmarked when output was not truncated", () => {
+	const tool = captureRegisteredTool(registerCompactBash);
+	const args = { command: "npm test" };
+	const state: any = { compactStartedAt: Date.now() - 2400 };
+	const toolCallId = "bash-untruncated-summary";
+	const output = `${Array.from({ length: 50 }, (_, index) => `line${index}`).join("\n")}\n`;
+
+	const call = tool.renderCall(args, theme, toolContext(state, toolCallId, args, undefined));
+	tool.renderResult(
+		{ content: [{ type: "text", text: output }], details: { truncation: { truncated: false, truncatedBy: null, outputLines: 50, totalLines: 50 } } },
+		{ expanded: false, isPartial: false },
+		theme,
+		toolContext(state, toolCallId, args, call),
+	);
+
+	const text = renderText(state.compactCallText);
+	assert.match(text, /50L · 2\.[0-9]s/);
+	assert.doesNotMatch(text, /truncated/);
+});
+
+test("compact bash marks truncation even when the summary has no count", () => {
+	const tool = captureRegisteredTool(registerCompactBash);
+	const args = { command: "true" };
+	const state: any = { compactStartedAt: Date.now() - 2400 };
+	const toolCallId = "bash-truncated-no-output";
+
+	const call = tool.renderCall(args, theme, toolContext(state, toolCallId, args, undefined));
+	tool.renderResult(
+		{ content: [{ type: "text", text: "" }], details: { truncation: { truncated: true, truncatedBy: "lines", outputLines: 0, totalLines: 500 } } },
+		{ expanded: false, isPartial: false },
+		theme,
+		toolContext(state, toolCallId, args, call),
+	);
+
+	const text = renderText(state.compactCallText);
+	assert.match(text, /^Bash true · truncated/);
+});
+
+test("compact bash spends the reclaimed metadata width on the command", () => {
+	const tool = captureRegisteredTool(registerCompactBash);
+	const args = { command: "git diff -- web/src/view/alarm/components/AlarmTable.vue" };
+	const state: any = { compactStartedAt: Date.now() - 2400 };
+	const toolCallId = "bash-compact-count-width";
+	const output = `${Array.from({ length: 50 }, (_, index) => `+line${index}`).join("\n")}\n`;
+
+	const call = tool.renderCall(args, theme, toolContext(state, toolCallId, args, undefined));
+	tool.renderResult(
+		{ content: [{ type: "text", text: output }], details: undefined },
+		{ expanded: false, isPartial: false },
+		theme,
+		toolContext(state, toolCallId, args, call),
+	);
+
+	const text = renderText(state.compactCallText, 88);
+	assert.equal(text.split("\n").length, 1);
+	assert.match(text, /AlarmTable\.vue · 50L · 2\.[0-9]s/);
+});
+
+test("compact bash drops timeout metadata once the run settles", () => {
+	const tool = captureRegisteredTool(registerCompactBash);
+	const args = { command: "sleep 1", timeout: 30 };
+	const state: any = { compactStartedAt: Date.now() - 1500 };
+	const toolCallId = "bash-timeout-settled";
+
+	const call = tool.renderCall(args, theme, toolContext(state, toolCallId, args, undefined));
+	tool.renderResult(
+		{ content: [{ type: "text", text: "done\n" }], details: undefined },
+		{ expanded: false, isPartial: false },
+		theme,
+		toolContext(state, toolCallId, args, call),
+	);
+
+	const text = renderText(state.compactCallText);
+	assert.match(text, /^Bash /);
+	assert.doesNotMatch(text, /timeout 30s/);
+});
+
+test("compact bash keeps timeout metadata for a settled timeout failure", () => {
+	const tool = captureRegisteredTool(registerCompactBash);
+	const args = { command: "sleep 40", timeout: 30 };
+	const state: any = { compactStartedAt: Date.now() - 3000 };
+	const toolCallId = "bash-timeout-failure";
+
+	const call = tool.renderCall(args, theme, toolContext(state, toolCallId, args, undefined));
+	tool.renderResult(
+		{ content: [{ type: "text", text: "timed out\n" }], details: undefined },
+		{ expanded: false, isPartial: false },
+		theme,
+		{ ...toolContext(state, toolCallId, args, call), isError: true },
+	);
+
+	const text = renderText(state.compactCallText);
+	assert.match(text, /^Bash /);
+	// The configured timeout is gone, but the outcome itself still reports the cut-off.
+	assert.match(text, /timeout/);
+	assert.doesNotMatch(text, /timeout 30s/);
 });
 
 test("compact bash hides success output summary when disabled", () => {
@@ -443,7 +580,7 @@ test("compact bash hides success output summary when disabled", () => {
 
 	const text = renderText(state.compactCallText);
 	assert.match(text, /^Bash /);
-	assert.doesNotMatch(text, /output lines/);
+	assert.doesNotMatch(text, /more line|\d+L/);
 });
 
 test("compact bash does not show success output summary for empty output", () => {
@@ -462,7 +599,7 @@ test("compact bash does not show success output summary for empty output", () =>
 
 	const text = renderText(state.compactCallText);
 	assert.match(text, /^Bash /);
-	assert.doesNotMatch(text, /output line/);
+	assert.doesNotMatch(text, /more line|\d+L|truncated/);
 });
 
 test("compact bash shows running tail preview when enabled", () => {
@@ -479,7 +616,7 @@ test("compact bash shows running tail preview when enabled", () => {
 		toolContext(state, toolCallId, args, call),
 	);
 
-	assert.match(renderText(state.compactCallText), /3 lines so far/);
+	assert.match(renderText(state.compactCallText), /3L so far/);
 	assert.equal(renderText(result), "  │ b\n  │ c\n  ╰─");
 	assert.doesNotMatch(renderText(result), /^a/m);
 });
@@ -524,7 +661,7 @@ test("compact bash keeps long rg summaries on one line at common widths", () => 
 	for (const width of [75, 80, 85]) {
 		const text = renderText(state.compactCallText, width);
 		assert.equal(text.split("\n").length, 1);
-		assert.match(text, /3 lines so far/);
+		assert.match(text, /3L so far/);
 	}
 
 	tool.renderResult(
@@ -556,7 +693,7 @@ test("compact bash prioritizes result metadata on narrow widths", () => {
 
 	const narrow = renderText(state.compactCallText, 35);
 	assert.equal(narrow.split("\n").length, 1);
-	assert.match(narrow, /1 output line/);
+	assert.match(narrow, /ok/);
 	assert.match(narrow, /1\.[0-9]s/);
 	assert.doesNotMatch(narrow, /3 lines ·/);
 });
@@ -597,7 +734,7 @@ test("compact bash summarizes multiline python heredoc commands", () => {
 	const text = renderText(state.compactCallText);
 	assert.match(text, /^Bash python3 heredoc/);
 	assert.match(text, /3 lines/);
-	assert.match(text, /1 output line/);
+	assert.match(text, /ok/);
 	assert.doesNotMatch(text, /print\('hi'\)/);
 });
 
@@ -652,47 +789,42 @@ test("compact bash hides running tail preview when disabled", () => {
 		toolContext(state, toolCallId, args, call),
 	);
 
-	assert.match(renderText(state.compactCallText), /3 lines so far/);
+	assert.match(renderText(state.compactCallText), /3L so far/);
 	assert.equal(renderText(result), "");
 });
 
-test("compact bash defers expanded running output to the built-in renderer", () => {
-	const tool = captureRegisteredTool((pi, cwd) => registerCompactBash(pi, cwd, { runningTailPreview: true, previewLines: 2 }));
-	const original = createBashToolDefinition(process.cwd());
-	assert.ok(original.renderResult, "built-in bash renderer should expose renderResult");
-
+test("expanded bash renders a command rail and streaming output tail", () => {
+	const tool = captureRegisteredTool(registerCompactBash);
 	const args = { command: "npm test" };
-	const result = { content: [{ type: "text" as const, text: "a\nb\nc\n" }], details: undefined };
-	const wrappedState: any = {};
-	const originalState: any = {};
+	const state: any = {};
 	const toolCallId = "bash-running-expanded";
 
-	const wrappedCall = tool.renderCall(args, theme, toolContext(wrappedState, toolCallId, args, undefined));
-	const wrappedRendered = tool.renderResult(
-		result,
+	const call = tool.renderCall(args, theme, toolContext(state, toolCallId, args, undefined, true));
+	const result = tool.renderResult(
+		{ content: [{ type: "text" as const, text: "a\nb\nc\n" }], details: undefined },
 		{ expanded: true, isPartial: true },
 		theme,
-		toolContext(wrappedState, toolCallId, args, wrappedCall, true),
-	);
-	const originalRendered = original.renderResult(
-		result,
-		{ expanded: true, isPartial: true },
-		theme,
-		toolContext(originalState, toolCallId, args, undefined, true),
+		toolContext(state, toolCallId, args, call, true),
 	);
 
-	assert.equal(renderText(wrappedRendered), renderText(originalRendered));
+	assert.match(renderText(call), /^Bash npm test/);
+	assert.match(renderText(result), /├─ command/);
+	assert.match(renderText(result), /npm test/);
+	assert.match(renderText(result), /├─ output · 3 lines · streaming/);
+	assert.match(renderText(result), /╰─ collapse/);
 });
 
-test("expanded bash call does not pass compact call component to the built-in renderer", () => {
+test("expanded bash owns its header instead of invoking the built-in renderer", () => {
 	const tool = captureRegisteredTool(registerCompactBash);
 	const args = { command: "npm test" };
 	const state: any = {};
 	const toolCallId = "bash-call-isolation";
 
 	const compactCall = tool.renderCall(args, theme, toolContext(state, toolCallId, args, undefined));
-	assert.doesNotThrow(() => tool.renderCall(args, theme, toolContext(state, toolCallId, args, compactCall, true)));
-	assert.equal(state.builtInRendererState.renderCallCount, 1);
+	const expandedCall = tool.renderCall(args, theme, toolContext(state, toolCallId, args, compactCall, true));
+	assert.ok(expandedCall);
+	assert.ok(state.expandedCallHeader);
+	assert.equal(state.builtInRendererState, undefined);
 });
 
 test("compact write shows content size in the call header without inlining content", () => {
@@ -706,9 +838,29 @@ test("compact write shows content size in the call header without inlining conte
 
 	assert.match(text, /^Write /);
 	assert.match(text, /src\/generated\.ts/);
-	assert.match(text, /2 lines · 11 B/);
+	assert.match(text, /2L · 11 B/);
 	assert.doesNotMatch(text, /alpha/);
 	assert.doesNotMatch(text, /beta/);
+});
+
+test("compact write reports the content size in compact line units", () => {
+	const tool = captureRegisteredTool(registerCompactWrite);
+	const args = { path: "src/generated.ts", content: `${Array.from({ length: 214 }, () => "x").join("\n")}\n` };
+	const state: any = {};
+	const toolCallId = "write-line-unit";
+
+	const call = tool.renderCall(args, theme, toolContext(state, toolCallId, args, undefined));
+	tool.renderResult(
+		{ content: [{ type: "text", text: "Successfully wrote to src/generated.ts" }], details: undefined },
+		{ expanded: false, isPartial: false },
+		theme,
+		toolContext(state, toolCallId, args, call),
+	);
+
+	const text = renderText(state.compactCallText);
+	assert.match(text, /^Write src\/generated\.ts/);
+	assert.match(text, /214L · 428 B/);
+	assert.doesNotMatch(text, /214 lines/);
 });
 
 test("compact read/write/edit rows prioritize metadata on narrow widths", () => {
@@ -741,7 +893,7 @@ test("compact read/write/edit rows prioritize metadata on narrow widths", () => 
 
 		assert.equal(text.split("\n").length, 1);
 		assert.match(text, /^Write /);
-		assert.match(text, /2 lines · 11 B/);
+		assert.match(text, /2L · 11 B/);
 	}
 
 	{
@@ -767,23 +919,32 @@ test("compact read/write/edit rows prioritize metadata on narrow widths", () => 
 	}
 });
 
-test("expanded read/write results do not pass compact result components to built-in renderers", () => {
-	const result = { content: [{ type: "text", text: "alpha\nbeta" }], details: undefined };
+test("expanded read and write use the structured rail", () => {
+	const readTool = captureRegisteredTool(registerCompactRead);
+	const readState: any = {};
+	const readArgs = { path: "src/index.ts" };
+	const readResult = readTool.renderResult(
+		{ content: [{ type: "text", text: "alpha\nbeta" }], details: undefined },
+		{ expanded: true, isPartial: false },
+		theme,
+		toolContext(readState, "read-result-isolation", readArgs, undefined, true),
+	);
+	assert.match(renderText(readResult), /├─ content/);
+	assert.match(renderText(readResult), /alpha/);
+	assert.equal(readState.builtInRendererState, undefined);
 
-	for (const [label, register, args] of [
-		["read", registerCompactRead, { path: "src/index.ts" }],
-		["write", registerCompactWrite, { path: "src/generated.ts", content: "alpha\nbeta" }],
-	] as const) {
-		const tool = captureRegisteredTool(register);
-		const state: any = {};
-		const toolCallId = `${label}-result-isolation`;
-		const compactResult = tool.renderResult(result, { expanded: false, isPartial: false }, theme, toolContext(state, toolCallId, args, undefined));
-
-		assert.doesNotThrow(() => {
-			tool.renderResult(result, { expanded: true, isPartial: false }, theme, toolContext(state, toolCallId, args, compactResult, true));
-		});
-		assert.equal(state.builtInRendererState.renderResultCount, 1);
-	}
+	const writeTool = captureRegisteredTool(registerCompactWrite);
+	const writeState: any = {};
+	const writeArgs = { path: "src/generated.ts", content: "alpha\nbeta" };
+	const writeResult = writeTool.renderResult(
+		{ content: [{ type: "text", text: "alpha\nbeta" }], details: undefined },
+		{ expanded: true, isPartial: false },
+		theme,
+		toolContext(writeState, "write-result-isolation", writeArgs, undefined, true),
+	);
+	assert.match(renderText(writeResult), /├─ content/);
+	assert.match(renderText(writeResult), /alpha/);
+	assert.equal(writeState.builtInRendererState, undefined);
 });
 
 test("compact edit shows small diffs inline", () => {
@@ -986,6 +1147,25 @@ test("compact read stays successful after finishing while expanded", () => {
 	assert.doesNotMatch(text, /2 lines/);
 });
 
+test("compact read surfaces a user limit that stopped before EOF", () => {
+	const tool = captureRegisteredTool(registerCompactRead);
+	const args = { path: "src/large.ts", offset: 1, limit: 100 };
+	const state: any = {};
+	const toolCallId = "read-limit-remainder";
+
+	const call = tool.renderCall(args, theme, toolContext(state, toolCallId, args, undefined));
+	tool.renderResult(
+		{ content: [{ type: "text", text: "alpha\nbeta\n\n[4900 more lines in file. Use offset=101 to continue.]" }], details: undefined },
+		{ expanded: false, isPartial: false },
+		theme,
+		toolContext(state, toolCallId, args, call),
+	);
+
+	const text = renderText(state.compactCallText);
+	assert.match(text, /^Read src\/large\.ts:1-100/);
+	assert.match(text, /4900L more/);
+});
+
 test("compact read keeps truncation metadata but suppresses ordinary line counts", () => {
 	const tool = captureRegisteredTool(registerCompactRead);
 	const args = { path: "src/large.ts" };
@@ -1005,8 +1185,7 @@ test("compact read keeps truncation metadata but suppresses ordinary line counts
 
 	const text = renderText(state.compactCallText);
 	assert.match(text, /^Read /);
-	assert.match(text, /truncated/);
-	assert.doesNotMatch(text, /50 of 100 lines/);
+	assert.match(text, /50\/100L/);
 });
 
 test("compact read shows single image mime without a redundant image label", () => {
@@ -1080,5 +1259,5 @@ test("compact write stays successful after finishing while expanded", () => {
 
 	const text = renderText(collapsed);
 	assert.match(text, /^Write /);
-	assert.match(text, /2 lines/);
+	assert.match(text, /2L/);
 });

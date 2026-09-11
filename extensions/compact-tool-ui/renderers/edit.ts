@@ -1,12 +1,16 @@
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
-import { createEditToolDefinition } from "@earendil-works/pi-coding-agent";
+import { createEditToolDefinition, keyHint } from "@earendil-works/pi-coding-agent";
 import { DiffPreviewBlock } from "../components/diff-preview-block.js";
+import { ExpandedDetailRail, type ExpandedDetailSection } from "../components/expanded-detail-rail.js";
+import { ExpandedDiffBlock } from "../components/expanded-diff-block.js";
+import { ExpandedToolHeader } from "../components/expanded-tool-header.js";
+import { LineNumberedCodeBlock } from "../components/line-numbered-code-block.js";
+import { ToolDetailFooter } from "../components/tool-detail-footer.js";
 import { DEFAULT_EDIT_DISPLAY_OPTIONS, type EditDisplayOptions } from "../settings/options.js";
 import { editDiffStatText, editPathText, invalidText, metadataText, numericText, toolNameText } from "../style.js";
-import { emptyComponent, linkPath, shortPath, textBlocks } from "../tui-utils.js";
+import { countLines, emptyComponent, linkPath, shortPath, textBlocks } from "../tui-utils.js";
 import { type CompactSummaryRowState, ensureCompactToolRow, getCompactCallText, setCompactRow, settleCompactSummaryRow, settleCompactRow } from "./compact-text.js";
-import { compactEditError, editSummaryText, shouldInlineEditDiff, type EditArgs } from "./edit-helpers.js";
-import { getExpandedResultRenderer } from "./render-expanded-result.js";
+import { compactEditError, countEditDiffHunks, editSummaryText, shouldInlineEditDiff, type EditArgs } from "./edit-helpers.js";
 import { resolveToolRenderShell, type ToolRenderShellSource } from "./render-shell.js";
 import { resolveToolPath } from "./tool-args.js";
 
@@ -26,6 +30,7 @@ type BuiltInEditState = {
 };
 
 type CompactEditState = CompactSummaryRowState & {
+	expandedCallHeader?: ExpandedToolHeader;
 	builtInEditState?: BuiltInEditState;
 };
 
@@ -88,6 +93,26 @@ function finalDiff(result: any, state: CompactEditState): string | undefined {
 	return typeof result?.details?.diff === "string" ? result.details.diff : previewFromState(state)?.diff;
 }
 
+function expandedEditHeader(state: CompactEditState, target: string, summary: string | undefined, theme: Theme): ExpandedToolHeader {
+	const header = state.expandedCallHeader ?? new ExpandedToolHeader();
+	state.expandedCallHeader = header;
+	header.setParts(editPrefix(theme), target, summary ? formatEditSummary(summary, theme) : "");
+	return header;
+}
+
+function expandedEditResult(diff: string | undefined, rawError: string | undefined, theme: Theme, isError: boolean): ExpandedDetailRail {
+	const footer = new ToolDetailFooter();
+	footer.setText(keyHint("app.tools.expand", "collapse"));
+	const sections: ExpandedDetailSection[] = [];
+	if (isError) {
+		if (rawError) sections.push({ label: "error", content: new LineNumberedCodeBlock(rawError, theme, { showLineNumbers: false }) });
+	} else if (diff) {
+		const hunks = countEditDiffHunks(diff);
+		sections.push({ label: "diff", metadata: hunks > 0 ? `${hunks} hunks` : undefined, content: new ExpandedDiffBlock(diff, theme) });
+	}
+	return new ExpandedDetailRail(theme, sections, footer);
+}
+
 export function registerCompactEdit(
 	pi: ExtensionAPI,
 	cwd: string,
@@ -106,16 +131,18 @@ export function registerCompactEdit(
 		},
 		renderCall(args, theme, context) {
 			const state = context.state as CompactEditState;
-			if (context.expanded && original.renderCall) {
-				return renderBuiltInEditCall(original, args, theme, context, state) ?? emptyComponent();
+			// Let the built-in renderer compute and cache the async diff preview, but never
+			// embed its Box/component tree in the expanded rail.
+			renderBuiltInEditCall(original, args, theme, context, state);
+			const target = editTargetText(args as EditArgs, cwd, theme);
+			if (context.expanded) {
+				const preview = previewFromState(state);
+				const previewSummary = preview?.diff ? editSummaryText(preview.diff) : pendingSummary(state);
+				const error = preview?.error ? compactEditError(preview.error) : undefined;
+				return expandedEditHeader(state, target, error ? error : previewSummary ?? (!context.argsComplete ? "preparing" : undefined), theme);
 			}
 
-			// Let the built-in renderer compute and cache the async diff preview, but keep
-			// collapsed rendering compact and under this extension's control.
-			renderBuiltInEditCall(original, args, theme, context, state);
-
 			const row = ensureCompactToolRow(state, context.lastComponent);
-			const target = editTargetText(args as EditArgs, cwd, theme);
 			const preview = previewFromState(state);
 			const previewSummary = preview?.diff ? editSummaryText(preview.diff) : pendingSummary(state);
 			const error = preview?.error ? compactEditError(preview.error) : undefined;
@@ -127,17 +154,15 @@ export function registerCompactEdit(
 			const args = context.args as EditArgs;
 			const target = editTargetText(args, cwd, theme);
 			const callText = getCompactCallText(state);
-			const renderExpanded = getExpandedResultRenderer(original as any, result, options, theme, {
-				...context,
-				state: builtInEditState(state),
-				lastComponent: undefined,
-			} as any);
 
 			if (context.isError) {
 				const rawError = textBlocks(result);
 				const error = compactEditError(rawError);
 				settleCompactRow(state, callText, "failed", editPrefix(theme), target, metadataText([invalidText(error, theme)], theme));
-				if (renderExpanded) return renderExpanded();
+				if (context.expanded) {
+					expandedEditHeader(state, target, error, theme);
+					return expandedEditResult(undefined, rawError, theme, true);
+				}
 				return emptyComponent();
 			}
 
@@ -145,7 +170,10 @@ export function registerCompactEdit(
 			const summary = editSummaryText(diff);
 			settleCompactSummaryRow(state, callText, "success", summary, editPrefix(theme), target, formatEditSummary(summary, theme));
 
-			if (renderExpanded) return renderExpanded();
+			if (context.expanded) {
+				expandedEditHeader(state, target, summary, theme);
+				return expandedEditResult(diff, undefined, theme, false);
+			}
 			if (shouldInlineEditDiff(diff, resolveEditDisplayOptions(editOptionsSource).inlineDiffMaxLines)) return new DiffPreviewBlock(diff ?? "", theme);
 			return emptyComponent();
 		},

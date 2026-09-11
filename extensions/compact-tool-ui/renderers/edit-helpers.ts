@@ -47,6 +47,18 @@ export function editSummaryText(diff: string | undefined): string | undefined {
 	return editDiffStatText(summarizeEditDiff(diff));
 }
 
+export function countEditDiffHunks(diff: string | undefined): number {
+	if (!diff) return 0;
+	let hunks = 0;
+	let inHunk = false;
+	for (const line of stripAnsi(diff).split("\n")) {
+		const changed = /^(?:\+(?!\+)|-(?!-))/.test(line);
+		if (changed && !inHunk) hunks++;
+		inHunk = changed;
+	}
+	return hunks;
+}
+
 export function shouldInlineEditDiff(diff: string | undefined, maxLines = INLINE_DIFF_MAX_LINES): boolean {
 	const stat = summarizeEditDiff(diff);
 	return Boolean(diff && stat && stat.lines > 0 && (maxLines === 0 || stat.lines <= maxLines));

@@ -21,7 +21,7 @@ test("summarizeRead reports truncation for requested ranges", () => {
 		details: { truncation: { truncated: true, outputLines: 3, totalLines: 103 } },
 	};
 
-	assert.equal(summarizeRead(result, { offset: 10, limit: 3 }), "truncated");
+	assert.equal(summarizeRead(result), "3/103L");
 });
 
 test("summarizeRead keeps truncation metadata when no explicit range was requested", () => {
@@ -30,7 +30,18 @@ test("summarizeRead keeps truncation metadata when no explicit range was request
 		details: { truncation: { truncated: true, outputLines: 50, totalLines: 100 } },
 	};
 
-	assert.equal(summarizeRead(result), "truncated");
+	assert.equal(summarizeRead(result), "50/100L");
+});
+
+test("summarizeRead falls back to a bare marker when the ratio is unknown", () => {
+	assert.equal(
+		summarizeRead({ content: [{ type: "text", text: "a" }], details: { truncation: { truncated: true, outputLines: 0, totalLines: 1 } } }),
+		"truncated",
+	);
+	assert.equal(
+		summarizeRead({ content: [{ type: "text", text: "a" }], details: { truncation: { truncated: true, outputLines: 20, totalLines: 20 } } }),
+		"truncated",
+	);
 });
 
 test("summarizeRead reports image results", () => {
@@ -38,12 +49,20 @@ test("summarizeRead reports image results", () => {
 	assert.equal(summarizeRead({ content: [{ type: "image" }, { type: "image" }] }), "2 images");
 });
 
-test("summarizeRead suppresses ordinary continuation counts for explicit ranges", () => {
+test("summarizeRead surfaces a user limit that stopped before EOF", () => {
+	const result = {
+		content: [{ type: "text", text: "a\nb\n\n[4900 more lines in file. Use offset=101 to continue.]" }],
+	};
+
+	assert.equal(summarizeRead(result), "4900L more");
+});
+
+test("summarizeRead suppresses continuation notices without a remaining count", () => {
 	const result = {
 		content: [{ type: "text", text: "a\nb\n\n[something custom. Use offset=8 to continue.]" }],
 	};
 
-	assert.equal(summarizeRead(result, { offset: 6, limit: 2 }), undefined);
+	assert.equal(summarizeRead(result), undefined);
 });
 
 test("summarizeRead reports core truncation when a requested limit exceeds the output cap", () => {
@@ -52,7 +71,7 @@ test("summarizeRead reports core truncation when a requested limit exceeds the o
 		details: { truncation: { truncated: true, outputLines: 2000, totalLines: 5000 } },
 	};
 
-	assert.equal(summarizeRead(result, { offset: 1, limit: 5000 }), "truncated");
+	assert.equal(summarizeRead(result), "2000/5000L");
 });
 
 test("summarizeRead suppresses ordinary text line counts", () => {
@@ -65,5 +84,5 @@ test("summarizeRead reports first-line truncation for explicit ranges", () => {
 		details: { truncation: { truncated: true, outputLines: 0, totalLines: 1, firstLineExceedsLimit: true } },
 	};
 
-	assert.equal(summarizeRead(result, { offset: 10 }), "truncated");
+	assert.equal(summarizeRead(result), "truncated");
 });

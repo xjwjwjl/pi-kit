@@ -7,6 +7,8 @@ export {
 	countLines,
 	firstNonEmptyLine,
 	formatDuration,
+	formatLineCount,
+	formatVisibleDuration,
 	imageBlocks,
 	plural,
 	shortPath,

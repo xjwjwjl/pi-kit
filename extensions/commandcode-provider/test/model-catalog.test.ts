@@ -67,3 +67,32 @@ test("createCommandCodeModel uses deepseek thinking format for DeepSeek models",
         max: "max",
     });
 });
+
+test("createCommandCodeModel prefers API input modalities over the model name heuristic", () => {
+    const model = createCommandCodeModel({
+        id: "deepseek/deepseek-v4.1-flash",
+        name: "DeepSeek V4.1 Flash",
+        capabilities: { input_modalities: ["text", "image"] },
+    });
+
+    assert.deepEqual(model.input, ["text", "image"]);
+});
+
+test("createCommandCodeModel honors an explicit API capability denial", () => {
+    const model = createCommandCodeModel({
+        id: "deepseek/deepseek-v4-flash-vision-exp",
+        name: "DeepSeek V4 Flash Vision",
+        capabilities: { supports_vision: false },
+    });
+
+    assert.deepEqual(model.input, ["text"]);
+});
+
+test("createCommandCodeModel recognizes the current DeepSeek Flash slug without capability metadata", () => {
+    const model = createCommandCodeModel({
+        id: "deepseek/deepseek-v4.1-flash",
+        name: "DeepSeek V4.1 Flash",
+    });
+
+    assert.deepEqual(model.input, ["text", "image"]);
+});

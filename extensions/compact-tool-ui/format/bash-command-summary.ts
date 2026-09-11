@@ -13,6 +13,7 @@ export type BashCommandDisplay = {
 const MAX_INLINE_COMMAND_CHARS = 64;
 const MAX_SEARCH_SUMMARY_CHARS = 48;
 const ELLIPSIS = "…";
+const MIDDLE_ELLIPSIS = " … ";
 
 function normalizeCommand(command: string): string {
 	return stripAnsi(command).replace(/\r\n?/g, "\n");
@@ -79,14 +80,54 @@ function summarizeMultilineCommand(command: string): BashCommandDisplay {
 	return { text, metadata: lineMetadata(command), summarized: true };
 }
 
-function truncateText(value: string, maxChars: number): string {
+function truncateHead(value: string, maxChars: number): string {
 	if (value.length <= maxChars) return value;
 	if (maxChars <= ELLIPSIS.length) return ELLIPSIS;
 	return `${value.slice(0, Math.max(1, maxChars - ELLIPSIS.length))}${ELLIPSIS}`;
 }
 
+function snapWindow(budget: number): number {
+	return Math.max(4, Math.floor(budget / 4));
+}
+
+/** Snap a head slice to the closest word boundary so commands are not cut mid-token. */
+function snapHeadBoundary(value: string, budget: number): number {
+	const previous = value.lastIndexOf(" ", budget);
+	const next = value.indexOf(" ", budget);
+	const backDistance = previous > 0 ? budget - previous : Number.POSITIVE_INFINITY;
+	const forwardDistance = next >= 0 ? next - budget : Number.POSITIVE_INFINITY;
+	const window = snapWindow(budget);
+	if (backDistance <= window && backDistance <= forwardDistance) return previous;
+	if (forwardDistance <= window) return next;
+	return budget;
+}
+
+/** Snap a tail slice forward to the nearest word boundary so trailing paths and flags stay intact. */
+function snapTailStart(value: string, budget: number): number {
+	const start = value.length - budget;
+	const space = value.indexOf(" ", start);
+	return space >= 0 && space - start <= snapWindow(budget) ? space + 1 : start;
+}
+
+/**
+ * Truncate from the middle: the command name stays readable and the tail keeps its
+ * final subcommand, `--flag`, or path even when the command exceeds the inline budget.
+ */
+function truncateMiddle(value: string, maxChars: number): string {
+	if (value.length <= maxChars) return value;
+	if (maxChars <= MIDDLE_ELLIPSIS.length + 2) return ELLIPSIS;
+
+	const budget = maxChars - MIDDLE_ELLIPSIS.length;
+	const headBudget = Math.floor(budget / 2);
+	const headEnd = snapHeadBoundary(value, headBudget);
+	const tailBudget = Math.max(1, budget - headEnd);
+	const head = value.slice(0, headEnd).trimEnd();
+	const tail = value.slice(snapTailStart(value, tailBudget)).trimStart();
+	return `${head}${MIDDLE_ELLIPSIS}${tail}`;
+}
+
 function truncateSingleLine(command: string): string {
-	return truncateText(command, MAX_INLINE_COMMAND_CHARS);
+	return truncateMiddle(command, MAX_INLINE_COMMAND_CHARS);
 }
 
 type ShellSegment = {
@@ -223,8 +264,8 @@ function isFixedStringSearch(words: string[]): boolean {
 
 function formatSearchPattern(pattern: string, literal: boolean, maxChars?: number): string {
 	if (maxChars === undefined) return literal ? pattern : `/${pattern}/`;
-	if (literal) return truncateText(pattern, maxChars);
-	return `/${truncateText(pattern, Math.max(1, maxChars - 2))}/`;
+	if (literal) return truncateHead(pattern, maxChars);
+	return `/${truncateHead(pattern, Math.max(1, maxChars - 2))}/`;
 }
 
 function summarizeSearchLabel(command: string, pattern: string, path: string, literal: boolean): string {

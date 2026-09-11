@@ -8,6 +8,21 @@ export function getAgentDir() {
 
 export async function initTheme() {}
 
+export function keyHint(_keybinding: string, description: string) {
+	return description;
+}
+
+export function getLanguageFromPath(filePath: string): string | undefined {
+	const extension = filePath.split(".").pop()?.toLowerCase();
+	return extension && ["ts", "tsx", "js", "jsx", "json", "md", "css", "html", "py", "go", "rs"].includes(extension)
+		? extension
+		: undefined;
+}
+
+export function highlightCode(code: string, _language?: string): string[] {
+	return code.split("\n");
+}
+
 export function getSettingsListTheme() {
 	return {};
 }

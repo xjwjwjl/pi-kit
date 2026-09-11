@@ -38,6 +38,9 @@ const PARAM_TOKENS: Record<string, ThemeToken> = {
 	command: "syntaxFunction",
 	flag: "accent",
 	env: "syntaxType",
+	operator: "syntaxOperator",
+	continuation: "dim",
+	redirection: "syntaxOperator",
 	secretLabel: "mdHeading",
 	secretValue: "dim",
 
@@ -135,6 +138,18 @@ export function commandNameText(value: string, theme: Theme): string {
 
 export function bashArgumentText(value: string, theme: Theme): string {
 	return theme.fg("muted", value);
+}
+
+export function shellOperatorText(value: string, theme: Theme): string {
+	return paramText("operator", value, theme);
+}
+
+export function shellContinuationText(value: string, theme: Theme): string {
+	return paramText("continuation", value, theme);
+}
+
+export function shellRedirectionText(value: string, theme: Theme): string {
+	return paramText("redirection", value, theme);
 }
 
 export function outputPreviewText(value: string, theme: Theme): string {

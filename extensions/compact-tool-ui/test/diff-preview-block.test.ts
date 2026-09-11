@@ -19,22 +19,22 @@ test("DiffPreviewBlock keeps long logical diff lines on one screen row", () => {
 	].join("\n");
 	const lines = new DiffPreviewBlock(diff, theme).render(80);
 
-	assert.equal(lines.length, 4, "one blank line, two logical diff lines, and the closing guide");
+	assert.equal(lines.length, 3, "two logical diff lines and the closing guide");
 	for (const line of lines) {
 		assert.ok(visibleWidth(line) <= 80);
 		assert.ok(visibleWidth(line) <= 76, "leaves a right-edge guard to prevent terminal auto-wrap");
 	}
-	assert.match(lines[1] ?? "", /^  │ -82 /);
+	assert.match(lines[0] ?? "", /^  │ -82 /);
+	assert.match(lines[0] ?? "", /…/);
+	assert.match(lines[0] ?? "", /"3 search lines"\);$/);
+	assert.match(lines[1] ?? "", /^  │ \+86 /);
 	assert.match(lines[1] ?? "", /…/);
-	assert.match(lines[1] ?? "", /"3 search lines"\);$/);
-	assert.match(lines[2] ?? "", /^  │ \+86 /);
-	assert.match(lines[2] ?? "", /…/);
-	assert.match(lines[2] ?? "", /"1 output line"\);$/);
+	assert.match(lines[1] ?? "", /"1 output line"\);$/);
 });
 
 test("DiffPreviewBlock normalizes tabs before measuring and rendering", () => {
 	const diff = '+35 \tif (normalized.startsWith("~/") || (process.platform === "win32" && normalized.startsWith("~\\\\"))) {';
-	const line = new DiffPreviewBlock(diff, theme).render(80)[1] ?? "";
+	const line = new DiffPreviewBlock(diff, theme).render(80)[0] ?? "";
 
 	assert.doesNotMatch(line, /\t/);
 	assert.match(line, /^  │ \+35    if /);
