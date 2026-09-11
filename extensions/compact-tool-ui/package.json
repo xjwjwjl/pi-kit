@@ -25,7 +25,8 @@
   ],
   "scripts": {
     "test": "node --experimental-strip-types --import ./test/register-ts-loader.mjs --test test/**/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.79.10",
@@ -41,8 +42,5 @@
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*"
-  },
-  "dependencies": {
-    "unbash": "4.0.11"
   }
 }

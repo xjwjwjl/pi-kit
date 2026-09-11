@@ -1,6 +1,6 @@
 # Pi Tools UI 展示优化设计草案
 
-> 状态：MVP v0 与 Expanded v1（统一 detail rail、`bash` / `read` / `write` / `edit` expanded renderer）已实现；Expanded Bash 长命令安全格式化、性能护栏与 truncation/pipeline/flag 细节增强已实现
+> 状态：MVP v0 与 Expanded v1（统一 detail rail、`bash` / `read` / `write` / `edit` expanded renderer）已实现；Expanded Bash 原始命令展示、ANSI-safe 换行与 truncation 细节已实现
 > 目录：`extensions/compact-tool-ui/`  
 > 目标：先用扩展覆盖内置 `bash` / `write` / `read` / `edit` 的 renderer 进行体验验证，设计稳定后再考虑 upstream patch。
 
@@ -864,124 +864,71 @@ renderers/
 - running bash 更新不造成无界 transcript 增长；settled 后展示完整当前可用 output。
 - 主题切换、session restore、`/reload` 和原生 renderer fallback 不出现旧 ANSI 颜色或 stale component state。
 
-## 14. Expanded Bash 长命令格式化（`unbash` + 安全回退，已实现）
+## 14. Expanded Bash 原始命令展示（无额外 parser，已实现）
 
 ### 14.1 决策
 
-Expanded Bash 的 `command` section 对长命令采用**保守解析 + 安全回退**：
+Expanded Bash 的 `command` section 不再尝试理解或重排 shell 语法：
 
-- 对能够完整识别的常见 shell 顶层结构，按逻辑 statement、pipeline 和参数边界格式化。
-- 对任何不完整、复杂或无法确认安全性的 shell 语法，保持原始命令，仅做现有的 ANSI-safe 视觉换行。
-- 格式化只影响 TUI 展示，绝不改写传给 execute 的 command、tool result、LLM context 或 session 内容。
+- 保留 `rawCommand` 的原始字符、空白、引号、转义和物理换行。
+- 只移除 ANSI 控制序列，再进行宽度感知的视觉换行。
+- 不拆分 `;`、`&&`、`||`、`|`、`|&`，也不插入 shell continuation 符号。
+- 展示逻辑只影响 TUI，不改写传给 execute 的 command、tool result、LLM context 或 session 内容。
 
-第一版采用 [`unbash`](https://github.com/webpro-nl/unbash) 作为 Bash AST 与 source range 的结构识别层，但**不使用其 printer**。不先为 `find` / `rg` / `git` 等单独实现命令专用 formatter。
+这样可以删除额外的 Bash parser 依赖，并避免为展示目的维护一套 shell 语法兼容层。collapsed/header 场景继续使用现有的轻量扫描和语义摘要。
 
 ### 14.2 目标体验
 
-原始单行命令：
+原始命令：
 
 ```text
-git diff --stat -- extensions/compact-tool-ui; printf '\n--- new files ---\n'; find extensions/compact-tool-ui/components -maxdepth 1 -type f -name 'expanded-*.ts' -o -name 'line-numbered-code-block.ts' -o -name 'tool-detail-footer.ts' | sort; find extensions/compact-tool-ui/test -maxdepth 1 -type f -name 'expanded-components.test.ts' -print
+git diff --stat -- extensions/compact-tool-ui; printf '\n--- new files ---\n'; find extensions/compact-tool-ui/components -maxdepth 1 -type f -name 'expanded-*.ts' -o -name 'line-numbered-code-block.ts' -o -name 'tool-detail-footer.ts' | sort
 ```
 
-在 expanded 视图中展示为：
+在 expanded 视图中保持同一条命令，只在终端宽度不足时进行视觉换行：
 
 ```text
-  ├─ command · 4 statements
-  │  git diff --stat -- extensions/compact-tool-ui;
-  │  printf '\n--- new files ---\n';
-  │  find extensions/compact-tool-ui/components \
-  │    -maxdepth 1 -type f \
-  │    -name 'expanded-*.ts' \
-  │    -o -name 'line-numbered-code-block.ts' \
-  │    -o -name 'tool-detail-footer.ts' |
-  │    sort;
-  │  find extensions/compact-tool-ui/test \
-  │    -maxdepth 1 -type f \
-  │    -name 'expanded-components.test.ts' -print
+  ├─ command
+  │  git diff --stat -- extensions/compact-tool-ui; printf '\n--- new files ---\n'; find extensions/compact-tool-ui/components -maxdepth 1 -type f -name 'expanded-*.ts' -o -name 'line-numbered-code-block.ts' -o -name 'tool-detail-footer.ts' | sort
 ```
 
-格式化规则：
+展示规则：
 
-- 顶层 `;`：拆分 statement，并保留 `;`，使视觉文本仍忠实表达原有控制符。
-- 顶层 `&&` / `||`：在 operator 后换行并增加 continuation indent。
-- 顶层 `|` / `|&`：拆分 pipeline stage；operator 保留在前一行末尾。
-- 简单 command 内的普通参数：仅在 token 边界折行；需要把同一 simple command 延续到下一物理行时，显示 `\` continuation。
-- redirection 与其 target 必须保持相邻，不可在二者之间插入换行。
-- 引号、转义序列和 command substitution 作为不可拆 token 保留原样。
-- heredoc opener 与 body 使用原始物理行，不对 body 的内部结构做格式化。
+- 不对顶层 shell operator 做结构化拆分。
+- 不对参数、重定向、glob、command substitution 或 heredoc 做语义解释。
+- 超宽物理行使用 ANSI-safe wrapping；换行仅是视觉换行，不改变命令文本。
+- 多行命令保留原始物理行，不合并或重排 heredoc body。
 
-`command` section 在实际拆出了多个顶层 statement 时显示 `N statements` metadata；只有原始视觉换行时不额外显示“已格式化”标签，避免制造噪音。
+### 14.3 实现架构
 
-### 14.3 支持范围与安全回退
+`format/bash-command.ts` 与 `format/bash-command-summary.ts` 继续服务 collapsed/header 场景；expanded command 直接把已 strip ANSI 的原始文本交给 `ShellCommandBlock`。
 
-第一版只格式化 `unbash` 可成功解析、无 errors、未超过 32 KiB command bytes / 512 AST tokens 且能映射到已支持 layout 的非复合 command list。`unbash` 对不完整输入可以返回 partial AST；partial AST 不是格式化许可，任何 parser error 或性能上限都必须回退。
-
-以下任一情况必须回退到 raw command 展示：
-
-- args 尚在 streaming 中，或 `unbash` 返回任意 parse error / 无法覆盖完整 source range。
-- heredoc 边界无法确认，或需要理解 heredoc body 才能继续解析。
-- shell comments、反引号 command substitution、`eval`、复杂 parameter expansion 等语法。
-- `if` / `for` / `while` / `case` / function、subshell、brace group、array 等复合 shell 构造。
-- AST 中存在尚未被 `bash-command-layout.ts` 明确支持的 node / operator。
-
-回退结果不能丢失字符、替换 token 或尝试修复命令；它只是把已 strip 的 ANSI 原始 command 交给现有的宽度换行 renderer。
-
-### 14.4 实现架构
-
-当前 `format/bash-command.ts` 与 `format/bash-command-summary.ts` 已各自实现轻量扫描；它们继续服务 collapsed/header 场景。长命令格式化不再新增第三套手写 parser，而是通过 `unbash` 获得 AST、operator 关系与精确 source range。
-
-`unbash` 只负责结构识别；layout 必须基于 `rawCommand.slice(node.pos, node.end)` 取得原始 token / quote / escape 文本。不得调用其 printer，因为 printer 的空白与注释保留策略不满足本扩展的原始文本和复制语义约束。
-
-已新增以下适配层：
+当前结构保持最小化：
 
 ```text
 format/
-  unbash-adapter.ts              // parse、error gate、AST source range → 保守 layout model
-  bash-command.ts                // collapsed / header 的 command-name 高亮（保持现有实现）
-  bash-command-summary.ts        // collapsed 的语义摘要（保持现有实现）
-  bash-command-layout.ts         // layout model → statement / pipeline / continuation 行
+  bash-command.ts                // collapsed / header 的 command-name 高亮
+  bash-command-summary.ts        // collapsed 的语义摘要
 components/
-  shell-command-block.ts         // 语义样式、宽度感知布局、continuation indent
+  shell-command-block.ts         // 原始命令的 ANSI-safe 视觉换行
 ```
 
-初始集成只替换 expanded command 的结构识别，不要求同时重写 collapsed summary / highlighter；后续仅在能减少重复逻辑时，再评估是否复用 `unbash-adapter` 的 token 元数据。
+`ShellCommandBlock` 不调用 shell parser，也不生成新的 command layout。`expandedBashResult()` 始终传入 `stripAnsi(rawCommand)`；Bash 的 execute 逻辑仍然委托 Pi 原始内置 tool。
 
-实现时将 `unbash` 作为 runtime dependency 精确固定版本（本决策时为 `4.0.11`）：
+### 14.4 复制、语义与渲染约束
 
-```json
-{
-  "dependencies": {
-    "unbash": "4.0.11"
-  }
-}
-```
+无论 collapsed 还是 expanded，都必须满足：
 
-`ShellCommandBlock` 负责 expanded command 的样式与布局，不复用 `LineNumberedCodeBlock` 作为 command renderer：后者适合逐行代码内容，而 command block 需要了解 operator、续行符和 pipeline 缩进。
+- 原始字符顺序、空白、quote、escape 和物理换行不被改写。
+- 不对命令参数做 unquote、重新引用、路径规范化或语义重排。
+- 每个 TUI render line 不超过可用 width，且不会泄漏未闭合 ANSI / OSC 序列。
+- 视觉换行不应被误解为可直接复制回 shell 的新命令；需要复制时应以后续的“复制原始 command”能力为准。
 
-当前 `expandedBashResult()` 使用 `ShellCommandBlock` 渲染适配后的 layout；解析失败或参数尚未完成时传入字符串 `stripAnsi(rawCommand)`，让 raw command 走组件的 `split("\n")` 分支，不丢失原始物理行。
+### 14.5 测试
 
-### 14.5 复制、语义与渲染约束
+测试重点调整为：
 
-formatter 只保证原始内容完整、顺序不变和视觉行不溢出。长 URL、glob、单引号字符串等不可拆 token 可能被视觉分段，当前不承诺从终端选择复制后仍保持等价 shell 语法；需要复制时应以后续的“复制原始 command”能力为准。
-
-无论 formatter 是否生效，都必须满足：
-
-- 原始 token 顺序、token 内容、quote 和 escape 不变。
-- 不对命令参数做 unquote、重新引用、路径规范化或语义摘要。
-- 单行过宽时仍使用 ANSI-safe wrapping；每个 TUI render line 不超过可用 width。
-- command name、operator、argument 和 continuation 使用不同主题 token，但不允许未闭合 ANSI / OSC 序列跨行泄漏。
-- formatter 仅在 `argsComplete`、`unbash` 无 errors 且 AST layout 完全受支持时启用；pending / partial call 一律走 raw 展示。
-
-### 14.6 测试与后续增强
-
-新增的 unit / renderer tests 至少覆盖：
-
-1. 本节示例中的顶层 `;`、pipeline、长 `find` 参数列表。
-2. `&&`、`||`、`|&`、redirection target、leading environment assignment。
-3. 引号中含有 `;` / `|`、escaped `\;`、`find -exec ... \;`、`$()` 和 heredoc。
-4. 未闭合 quote、partial args、comment、backtick、compound shell construct 均回退 raw renderer。
-5. 48、64、80、120 列宽下不溢出；格式化和 fallback 都保持稳定主题 / ANSI 行边界。
-
-命令专用增强（例如 `find` predicate 分组、`rg` option / pattern 分组）可以在通用 `unbash`-based formatter 稳定后作为第二层优化；它们不能绕过安全回退，也不能取代通用 AST layout。
-
+1. expanded Bash 保留复杂命令的原始文本。
+2. 多行命令和 heredoc 保留原始物理行。
+3. 48、64、80、120 列宽下 ANSI-safe wrapping 不溢出。
+4. collapsed summary、运行状态、错误输出和 expanded detail rail 不依赖额外 shell parser。

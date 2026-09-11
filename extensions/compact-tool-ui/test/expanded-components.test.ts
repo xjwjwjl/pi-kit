@@ -75,31 +75,23 @@ test("expanded detail rail and code block stay within narrow widths", () => {
 	assert.match(wide, /1 alpha/);
 });
 
-test("expanded bash formats supported command structure and keeps unsafe syntax raw", () => {
+test("expanded bash keeps command text raw", () => {
 	const tool = captureRegisteredTool(registerCompactBash);
-	const args = { command: "echo a && pwd || printf x; cat input |& grep foo | sort" };
-	const state: any = {};
+	const command = "echo a && pwd || printf x; cat input |& grep foo | sort";
+	const args = { command };
 	const result = tool.renderResult(
 		{ content: [{ type: "text", text: "ok" }], details: undefined },
 		{ expanded: true, isPartial: false },
 		theme,
-		context(state, args),
+		context({}, args),
 	);
 	const text = render(result, 120).join("\n");
-	assert.match(text, /├─ command · 2 statements · 3 stages/);
-	assert.match(text, /echo a &&/);
-	assert.match(text, /  pwd \|\|/);
-	assert.match(text, /cat input \|&/);
-	assert.match(text, /  grep foo \|/);
-
-	const unsafeArgs = { command: "if true; then echo yes; fi" };
-	const unsafe = tool.renderResult(
-		{ content: [{ type: "text", text: "ok" }], details: undefined },
-		{ expanded: true, isPartial: false },
-		theme,
-		context({}, unsafeArgs),
-	);
-	assert.match(render(unsafe, 120).join("\n"), /if true; then echo yes; fi/);
+	assert.match(text, /├─ command/);
+	assert.ok(text.includes(command));
+	assert.doesNotMatch(text, /statements|stages/);
+	for (const width of [48, 64, 80, 120]) {
+		assert.ok(render(result, width).every((line) => visibleWidth(line) <= width), `command overflow at ${width}`);
+	}
 
 	const partial = tool.renderResult(
 		{ content: [{ type: "text", text: "ok" }], details: undefined },
@@ -107,7 +99,7 @@ test("expanded bash formats supported command structure and keeps unsafe syntax 
 		theme,
 		context({}, args, true, false),
 	);
-	assert.match(render(partial, 120).join("\n"), /echo a && pwd/);
+	assert.ok(render(partial, 120).join("\n").includes(command));
 });
 
 test("expanded streaming bash labels the visible tail against the total output", () => {

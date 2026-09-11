@@ -9,8 +9,6 @@ import { OutputPreviewBlock } from "../components/output-preview-block.js";
 import { ToolDetailFooter } from "../components/tool-detail-footer.js";
 import { commandText } from "../format/bash-command.js";
 import { summarizeBashCommand, type BashCommandDisplay } from "../format/bash-command-summary.js";
-import { adaptBashCommand, type BashCommandLayout } from "../format/unbash-adapter.js";
-import { layoutBashCommand } from "../format/bash-command-layout.js";
 import { DEFAULT_BASH_DISPLAY_OPTIONS, type BashDisplayOptions } from "../settings/options.js";
 import { type ToolUiStatus, mutedMetadataText, toolNameText } from "../style.js";
 import { countLines, emptyComponent, formatVisibleDuration, linkPath, stripAnsi, textBlocks } from "../tui-utils.js";
@@ -34,15 +32,8 @@ type BashRefreshTimerEntry = {
 /** Maximum tail lines kept for a streaming expanded bash output. */
 const STREAMING_OUTPUT_TAIL_LINES = 28;
 
-type ExpandedCommandCache = {
-	source: string;
-	argsComplete: boolean;
-	layout?: BashCommandLayout;
-};
-
 type CompactBashState = CompactSummaryState<CompactToolRow> & BuiltInRendererSlots<BuiltInBashState> & {
 	expandedCallHeader?: ExpandedToolHeader;
-	expandedCommandCache?: ExpandedCommandCache;
 	compactStartedAt?: number;
 	compactEndedAt?: number;
 	compactInterval?: NodeJS.Timeout;
@@ -246,15 +237,6 @@ function expandedBashCall(
 	return header;
 }
 
-function resolveExpandedCommandLayout(state: CompactBashState, rawCommand: string, argsComplete: boolean): BashCommandLayout | undefined {
-	const source = stripAnsi(rawCommand);
-	const cached = state.expandedCommandCache;
-	if (cached?.source === source && cached.argsComplete === argsComplete) return cached.layout;
-	const layout = adaptBashCommand(source, argsComplete);
-	state.expandedCommandCache = { source, argsComplete, layout };
-	return layout;
-}
-
 function bashTruncationFooter(truncation: any): string {
 	const outputLines = truncation?.outputLines;
 	const totalLines = truncation?.totalLines;
@@ -272,7 +254,6 @@ function bashTruncationFooter(truncation: any): string {
 
 function expandedBashResult(
 	rawCommand: string,
-	commandLayout: BashCommandLayout | undefined,
 	output: string,
 	result: any,
 	isPartial: boolean,
@@ -294,14 +275,9 @@ function expandedBashResult(
 	footerParts.push(keyHint("app.tools.expand", "collapse"));
 	footer.setText(footerParts.join(" · "));
 
-	const commandRenderLayout = commandLayout ? layoutBashCommand(commandLayout) : undefined;
-	const renderedCommand = commandRenderLayout ?? stripAnsi(rawCommand);
-	const commandMetadataParts: string[] = [];
-	if (commandLayout?.formatted && commandLayout.statementCount > 1) commandMetadataParts.push(`${commandLayout.statementCount} statements`);
-	if (commandRenderLayout?.pipelineStages && commandRenderLayout.pipelineStages > 0) commandMetadataParts.push(`${commandRenderLayout.pipelineStages} stages`);
-	const commandMetadata = commandMetadataParts.length > 0 ? commandMetadataParts.join(" · ") : undefined;
 	const sections: ExpandedDetailSection[] = [
-		{ label: "command", metadata: commandMetadata, content: new ShellCommandBlock(renderedCommand, theme) },
+		// Keep the command exactly as supplied; ShellCommandBlock only applies ANSI-safe wrapping.
+		{ label: "command", content: new ShellCommandBlock(stripAnsi(rawCommand), theme) },
 	];
 	if (displayOutput) {
 		const shownLines = countLines(displayOutput);
@@ -397,7 +373,6 @@ export function registerCompactBash(pi: ExtensionAPI, cwd: string, displayOption
 			const timeout = resolveBashTimeout(bashArgs);
 			const callText = getBashCallText(state);
 			const displayOptions = resolveBashDisplayOptions(displayOptionsSource);
-			const commandLayout = context.expanded ? resolveExpandedCommandLayout(state, rawCommand, context.argsComplete) : undefined;
 
 			if (options.isPartial && !context.isError) {
 				const hasOutput = hasMeaningfulOutput(output);
@@ -407,7 +382,7 @@ export function registerCompactBash(pi: ExtensionAPI, cwd: string, displayOption
 				const metadata = compactBashMetadata(state, compactStatus, command, timeout, duration, true, theme, displayOptions);
 				callText && setBashText(callText, command, metadata, theme);
 				if (context.expanded) expandedBashCall(state, command, metadata, theme);
-				if (context.expanded) return expandedBashResult(rawCommand, commandLayout, output, result, true, theme, context.cwd);
+				if (context.expanded) return expandedBashResult(rawCommand, output, result, true, theme, context.cwd);
 				if (displayOptions.runningTailPreview) {
 					const preview = previewTail(output, displayOptions.previewLines);
 					if (preview) return renderOutputPreview(preview, theme);
@@ -421,7 +396,7 @@ export function registerCompactBash(pi: ExtensionAPI, cwd: string, displayOption
 				const metadata = compactBashMetadata(state, "failed", command, timeout, duration, context.executionStarted, theme, displayOptions);
 				callText && setBashText(callText, command, metadata, theme);
 				if (context.expanded) expandedBashCall(state, command, metadata, theme);
-				if (context.expanded) return expandedBashResult(rawCommand, commandLayout, output || raw, result, false, theme, context.cwd);
+				if (context.expanded) return expandedBashResult(rawCommand, output || raw, result, false, theme, context.cwd);
 				const preview = tail(output || raw);
 				if (!preview) return emptyComponent();
 				return renderOutputPreview(preview, theme);
@@ -433,7 +408,7 @@ export function registerCompactBash(pi: ExtensionAPI, cwd: string, displayOption
 			const metadata = compactBashMetadata(state, "success", command, timeout, duration, context.executionStarted, theme, displayOptions);
 			callText && setBashText(callText, command, metadata, theme);
 			if (context.expanded) expandedBashCall(state, command, metadata, theme);
-			if (context.expanded) return expandedBashResult(rawCommand, commandLayout, output, result, false, theme, context.cwd);
+			if (context.expanded) return expandedBashResult(rawCommand, output, result, false, theme, context.cwd);
 			if (displayOptions.successfulTailPreview) {
 				const preview = previewTail(output, displayOptions.previewLines);
 				if (preview) return renderOutputPreview(preview, theme);
