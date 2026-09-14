@@ -1,13 +1,12 @@
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { createWriteToolDefinition, formatSize, getLanguageFromPath, highlightCode, keyHint } from "@earendil-works/pi-coding-agent";
-import { CompactHintBlock } from "../components/compact-hint-block.js";
 import { ExpandedDetailRail, type ExpandedDetailSection } from "../components/expanded-detail-rail.js";
 import { ExpandedToolHeader } from "../components/expanded-tool-header.js";
 import { LineNumberedCodeBlock } from "../components/line-numbered-code-block.js";
 import { ToolDetailFooter } from "../components/tool-detail-footer.js";
 import { invalidText, metadataText, numericText, toolNameText, writePathText } from "../style.js";
 import { countLines, emptyComponent, formatLineCount, linkPath, shortPath, stripAnsi, textBlocks, trimTrailingEmptyLines } from "../tui-utils.js";
-import { compactFileToolError, compactFileToolHint } from "./compact-error.js";
+import { compactFileToolError } from "./compact-error.js";
 import { type CompactSummaryRowState, ensureCompactToolRow, getCompactCallText, setCompactRow, settleCompactSummaryRow, settleCompactRow } from "./compact-text.js";
 import { type BuiltInRendererSlots } from "./render-expanded-result.js";
 import { resolveToolRenderShell, type ToolRenderShellSource } from "./render-shell.js";
@@ -105,10 +104,6 @@ function expandedWriteResult(
 	const rawError = stripAnsi(textBlocks(result));
 	const footer = new ToolDetailFooter();
 	const footerParts = [] as string[];
-	if (isError) {
-		const hint = compactFileToolHint(rawError);
-		if (hint) footerParts.push(hint);
-	}
 	footerParts.push(keyHint("app.tools.expand", "collapse"));
 	footer.setText(footerParts.join(" · "));
 
@@ -158,13 +153,13 @@ export function registerCompactWrite(pi: ExtensionAPI, cwd: string, renderShellS
 			if (context.isError) {
 				const rawError = textBlocks(result);
 				const error = compactFileToolError(rawError);
-				const hint = compactFileToolHint(rawError);
 				settleCompactRow(state, callText, "failed", writePrefix(theme), writeTargetText(displayPath, rawPath, cwd, theme), metadataText([invalidText(error, theme)], theme));
 				if (context.expanded) {
 					expandedWriteHeader(state, context.args as WriteArgs, writeTargetText(displayPath, rawPath, cwd, theme), theme, context.argsComplete, error);
 					return expandedWriteResult(result, context.args as WriteArgs, state, theme, true);
 				}
-				return hint ? new CompactHintBlock(hint, theme) : emptyComponent();
+				// A failed write keeps only the one-line error row; the full error stays available through expand.
+				return emptyComponent();
 			}
 
 			const summary = summarizeWrite(context.args as WriteArgs);

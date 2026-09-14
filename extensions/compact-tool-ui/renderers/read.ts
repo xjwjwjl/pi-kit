@@ -1,13 +1,12 @@
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { createReadToolDefinition, getLanguageFromPath, highlightCode, keyHint } from "@earendil-works/pi-coding-agent";
-import { CompactHintBlock } from "../components/compact-hint-block.js";
 import { ExpandedDetailRail, type ExpandedDetailSection } from "../components/expanded-detail-rail.js";
 import { ExpandedToolHeader } from "../components/expanded-tool-header.js";
 import { LineNumberedCodeBlock } from "../components/line-numbered-code-block.js";
 import { ToolDetailFooter } from "../components/tool-detail-footer.js";
 import { invalidText, metadataText, paramText, readMetadataText, readPathText, toolNameText } from "../style.js";
 import { countLines, emptyComponent, formatLineCount, imageBlocks, linkPath, shortPath, textBlocks } from "../tui-utils.js";
-import { compactFileToolError, compactFileToolHint } from "./compact-error.js";
+import { compactFileToolError } from "./compact-error.js";
 import { type CompactSummaryRowState, ensureCompactToolRow, getCompactCallText, setCompactRow, settleCompactSummaryRow, settleCompactRow } from "./compact-text.js";
 import { readContinuationInfo, stripReadContinuationNotice, stripReadTruncationNotice, summarizeRead } from "./read-helpers.js";
 import { type BuiltInRendererSlots } from "./render-expanded-result.js";
@@ -141,13 +140,14 @@ export function registerCompactRead(pi: ExtensionAPI, cwd: string, renderShellSo
 			if (context.isError) {
 				const rawError = textBlocks(result);
 				const error = compactFileToolError(rawError);
-				const hint = compactFileToolHint(rawError);
 				settleCompactRow(state, callText, "failed", readPrefix(theme), target, metadataText([invalidText(error, theme)], theme));
 				if (context.expanded) {
 					expandedReadHeader(state, target, error, theme);
 					return expandedReadResult(state, result, args, theme, true);
 				}
-				return hint ? new CompactHintBlock(hint, theme) : emptyComponent();
+				// A failed read keeps only the one-line error row: the path and reason already say
+				// what happened, and the full error stays available through expand.
+				return emptyComponent();
 			}
 
 			const summary = summarizeRead(result);

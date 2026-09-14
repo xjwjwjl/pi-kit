@@ -21,7 +21,7 @@
 
 MVP v0 优先从最容易造成噪音的内置工具开始：
 
-1. `bash`：成功只显示命令摘要、输出摘要和耗时，耗时统一放在 metadata 最后且低于 1s 不展示；多行 / Python heredoc / 长命令默认压缩成一行；`timeout` 只在运行中显示在 collapsed metadata 中，命令结束后移除（`timeout` / `aborted` 结果仍由 result summary 表达）；内容行数 ≤ 2 的普通命令直接显示首行内容（如 `bash echo hi · hi`），行数 ≥ 3 用 `NL` 计数（如 `50L`），计数只算非空行，输出被内置限制截断时追加 `truncated` 标记；`rg/find/ls` 等常见命令输出会显示 `matches` / `paths` / `entries` 语义摘要，空结果显示 `no matches` / `no paths` / `empty`，`git diff` / `git status --short` 空结果显示 `no changes` / `clean`；失败显示 10 行 tail，running 显示已输出行数（`NL so far`）和耗时。
+1. `bash`：成功只显示命令摘要、输出摘要和耗时，耗时统一放在 metadata 最后且低于 1s 不展示；多行 / Python heredoc / 长命令默认压缩成一行；`timeout` 只在运行中显示在 collapsed metadata 中，命令结束后移除（`timeout` / `aborted` 结果仍由 result summary 表达）；内容行数 ≤ 2 的普通命令直接显示首行内容（如 `bash echo hi · hi`），行数 ≥ 3 用 `NL` 计数（如 `50L`），计数只算非空行，输出被内置限制截断时追加 `truncated` 标记；`rg/find/ls` 等常见命令输出会显示 `matches` / `paths` / `entries` 语义摘要，空结果显示 `no matches` / `no paths` / `empty`，`git diff` / `git status --short` 空结果显示 `no changes` / `clean`；失败只显示一行分类摘要（`test failed` / `tsc errors` / `command not found` / `timeout` / `exit <code>`），完整错误靠展开，`failedTailPreview` 打开后才追加最后 N 行；running 显示已输出行数（`NL so far`）和耗时。
 2. `write`：成功只显示路径、行数和大小（`write src/generated.ts · 214L · 6.8 KB`），展开后看写入内容。
 3. `read`：普通文本成功只显示路径和可选行号范围；截断时显示 `2000/9000L`、用户 `limit` 提前结束时显示 `4900L more`，图片显示 mime；展开后看文件内容。
 4. `edit`：64 行以内 diff 默认 inline 展示，大 diff 只显示路径和 diff stat，展开后看完整 diff；失败时显示精简错误。
@@ -49,7 +49,7 @@ Expanded v1：展开 `bash` / `read` / `write` / `edit` 时使用统一 detail r
 可配置项包括：
 
 - `Tool render shell`：`self` 保持当前无外框 compact 行；`default` 使用 pi 原本 boxed shell / padding / 背景，更接近展开后的原生外观。
-- Bash running tail preview / success tail preview / preview lines / success output summary。
+- Bash running tail preview / success tail preview / failure tail preview / preview lines / success output summary。
 - Edit inline diff max lines：默认 `64`，设为 `0` 时所有 diff 都在 collapsed 视图 inline 展示。
 
 配置只写入 Pi 当前 agent 目录（默认 `~/.pi/agent`，可由 `PI_CODING_AGENT_DIR` 覆盖）中的 `settings.json` 的 `compactToolUi`：
@@ -61,6 +61,7 @@ Expanded v1：展开 `bash` / `read` / `write` / `edit` 时使用统一 detail r
     "bash": {
       "runningTailPreview": false,
       "successfulTailPreview": true,
+      "failedTailPreview": false,
       "previewLines": 5,
       "successfulOutputSummary": true
     },
@@ -79,7 +80,8 @@ Expanded v1：展开 `bash` / `read` / `write` / `edit` 时使用统一 detail r
 - `execute` 始终委托原始内置 tool definition，不改变 tool 执行语义。
 - 通过 `...original` 保留内置 schema、description、prompt metadata 和 result shape。
 - collapsed 视图使用 compact renderer；expanded 的 `bash` / `read` 使用统一 detail rail，`write` / `edit` 保留原始 renderer 作为兼容路径。
-- `read` / `write` / `edit` 失败时使用 compact error reason；有明确修复方向时显示一行 compact hint。
+- `read` / `write` / `edit` 失败时只保留一行 compact error reason，不额外显示 hint；完整错误靠展开。
+- `bash` 失败时 collapsed 只保留一行分类摘要，不再默认贴出错误尾部；需要时用 `failedTailPreview` 恢复 tail 预览。
 - 默认 `renderShell: "self"` 去掉默认 Box/cell 背景与内边距；可在设置里切到 `default`，让 tool 行使用 pi 原本外层 shell。
 - settings 命令只在 TUI 中调用 `ctx.ui.custom()`；print / JSON / RPC 等非 TUI 模式不会打开自定义组件，也不会覆盖内置工具。
 

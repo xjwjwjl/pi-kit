@@ -2,6 +2,7 @@ export type BashDisplayOptions = {
 	successfulOutputSummary?: boolean;
 	runningTailPreview?: boolean;
 	successfulTailPreview?: boolean;
+	failedTailPreview?: boolean;
 	previewLines?: number;
 };
 
@@ -9,6 +10,7 @@ export const DEFAULT_BASH_DISPLAY_OPTIONS: Required<BashDisplayOptions> = {
 	successfulOutputSummary: true,
 	runningTailPreview: false,
 	successfulTailPreview: false,
+	failedTailPreview: false,
 	previewLines: 2,
 };
 

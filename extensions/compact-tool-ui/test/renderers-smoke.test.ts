@@ -393,6 +393,45 @@ test("compact bash classifies tsc failures in the collapsed header", () => {
 	assert.match(text, /tsc errors · exit 2/);
 });
 
+test("compact bash collapses failures to the header by default", () => {
+	const tool = captureRegisteredTool(registerCompactBash);
+	const args = { command: "pnpm test" };
+	const state: any = { compactStartedAt: Date.now() - 1500 };
+	const toolCallId = "bash-failure-collapsed";
+
+	const call = tool.renderCall(args, theme, toolContext(state, toolCallId, args, undefined));
+	const result = tool.renderResult(
+		{ content: [{ type: "text", text: "FAIL src/app.test.ts\nTests: 1 failed, 3 passed\nCommand exited with code 1\n" }], details: undefined },
+		{ expanded: false, isPartial: false },
+		theme,
+		{ ...toolContext(state, toolCallId, args, call), isError: true },
+	);
+
+	assert.match(renderText(state.compactCallText), /test failed · exit 1/);
+	assert.equal(renderText(result), "");
+});
+
+test("compact bash keeps a failure tail preview when enabled", () => {
+	const tool = captureRegisteredTool((pi, cwd) => registerCompactBash(pi, cwd, { failedTailPreview: true, previewLines: 2 }));
+	const args = { command: "pnpm test" };
+	const state: any = { compactStartedAt: Date.now() - 1500 };
+	const toolCallId = "bash-failure-preview";
+
+	const call = tool.renderCall(args, theme, toolContext(state, toolCallId, args, undefined));
+	const result = tool.renderResult(
+		{ content: [{ type: "text", text: "line-1\nline-2\nline-3\nCommand exited with code 1\n" }], details: undefined },
+		{ expanded: false, isPartial: false },
+		theme,
+		{ ...toolContext(state, toolCallId, args, call), isError: true },
+	);
+
+	assert.match(renderText(state.compactCallText), /exit 1/);
+	const text = renderText(result);
+	assert.match(text, /│ line-2/);
+	assert.match(text, /│ line-3/);
+	assert.doesNotMatch(text, /line-1/);
+});
+
 test("compact bash shows success output summary before duration when enabled", () => {
 	const tool = captureRegisteredTool((pi, cwd) => registerCompactBash(pi, cwd, { successfulOutputSummary: true }));
 	const args = { command: "printf 'alpha\\nbeta\\n'" };
@@ -1052,7 +1091,7 @@ test("compact edit hides hints for all collapsed edit errors", () => {
 	assert.equal(renderText(result), "");
 });
 
-test("compact read normalizes file errors with actionable hints", () => {
+test("compact read keeps failed rows to a single error line", () => {
 	const tool = captureRegisteredTool(registerCompactRead);
 	const args = { path: "src/missing.ts" };
 	const state: any = {};
@@ -1069,10 +1108,10 @@ test("compact read normalizes file errors with actionable hints", () => {
 	const header = renderText(state.compactCallText);
 	assert.match(header, /^Read /);
 	assert.match(header, /path not found/);
-	assert.match(renderText(result), /╰─ check file path/);
+	assert.equal(renderText(result), "");
 });
 
-test("compact write normalizes file errors with actionable hints", () => {
+test("compact write keeps failed rows to a single error line", () => {
 	const tool = captureRegisteredTool(registerCompactWrite);
 	const args = { path: "src/secret.ts", content: "alpha" };
 	const state: any = {};
@@ -1089,7 +1128,7 @@ test("compact write normalizes file errors with actionable hints", () => {
 	const header = renderText(state.compactCallText);
 	assert.match(header, /^Write /);
 	assert.match(header, /permission denied/);
-	assert.match(renderText(result), /╰─ check file permissions/);
+	assert.equal(renderText(result), "");
 });
 
 test("compact read stays successful after finishing while expanded", () => {

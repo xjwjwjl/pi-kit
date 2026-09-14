@@ -11,6 +11,7 @@ function applyCompactToolUiOptions(target: MutableCompactToolUiOptions, source: 
 	target.bash.successfulOutputSummary = source.bash.successfulOutputSummary;
 	target.bash.runningTailPreview = source.bash.runningTailPreview;
 	target.bash.successfulTailPreview = source.bash.successfulTailPreview;
+	target.bash.failedTailPreview = source.bash.failedTailPreview;
 	target.bash.previewLines = source.bash.previewLines;
 	target.edit.inlineDiffMaxLines = source.edit.inlineDiffMaxLines;
 	target.renderShell = source.renderShell;
@@ -27,6 +28,10 @@ function updateBashDisplayOption(options: BashDisplayOptions, id: string, value:
 	}
 	if (id === "successfulTailPreview") {
 		options.successfulTailPreview = value === "on";
+		return;
+	}
+	if (id === "failedTailPreview") {
+		options.failedTailPreview = value === "on";
 		return;
 	}
 	if (id === "previewLines") {
@@ -63,6 +68,13 @@ function settingItems(options: MutableCompactToolUiOptions): SettingItem[] {
 			label: "Bash success tail preview",
 			description: "Keep showing the bash tail preview after a successful command finishes.",
 			currentValue: options.bash.successfulTailPreview ? "on" : "off",
+			values: ["on", "off"],
+		},
+		{
+			id: "failedTailPreview",
+			label: "Bash failure tail preview",
+			description: "Show the trailing output lines for failed bash commands in collapsed tool rows.",
+			currentValue: options.bash.failedTailPreview ? "on" : "off",
 			values: ["on", "off"],
 		},
 		{

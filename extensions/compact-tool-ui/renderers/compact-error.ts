@@ -14,10 +14,3 @@ export function compactFileToolError(text: string): string {
 
 	return compactFallbackError(stripped);
 }
-
-export function compactFileToolHint(text: string): string | undefined {
-	const error = compactFileToolError(text);
-	if (error === "path not found") return "check file path";
-	if (error === "permission denied") return "check file permissions";
-	return undefined;
-}

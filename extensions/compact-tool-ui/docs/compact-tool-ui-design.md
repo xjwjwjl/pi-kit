@@ -34,7 +34,7 @@ pi 的内置 tools 已经支持自定义 TUI 渲染：
 
 ### 2.3 失败优先诊断
 
-失败时默认展示足够有用的错误尾部或错误原因，而不是只显示失败状态，也不是无差别展示完整输出。
+失败时 collapsed 用一行 compact reason 表达错误类别（如 `test failed · exit 1`），完整错误通过 expand 查看，而不是只显示失败状态，也不是无差别展示完整输出。
 
 ### 2.4 展开保留细节
 
@@ -77,13 +77,10 @@ edit src/tools/bash.ts                          +6 -2
  ...
 ```
 
-失败时即使不展开，也应能看到关键错误：
+失败时即使不展开，也应能判断关键错误类别：
 
 ```text
-bash pnpm test                                  exit 1 · 8.4s
-FAIL src/foo.test.ts
-Expected: 1
-Received: 2
+bash pnpm test                                  test failed · exit 1 · 8.4s
 ```
 
 ## 4. 通用信息层级
@@ -120,7 +117,7 @@ Summary 负责表达 tool 的结果摘要：
 Preview 应根据状态和 expanded 决定是否展示：
 
 - collapsed + success：默认尽量少展示。
-- collapsed + failure：展示关键错误尾部。
+- collapsed + failure：默认只保留一行失败摘要（如 `test failed · exit 1`）；可通过 `failedTailPreview` 选择是否额外展示错误尾部。
 - expanded：展示完整可用预览或当前内置 renderer 的完整内容。
 - partial/running：MVP v0 当前只更新 header 状态与已输出行数，不展示 tail preview。
 
@@ -140,17 +137,13 @@ Preview 应根据状态和 expanded 决定是否展示：
 
 具体 key 应通过 `keyHint("app.tools.expand", "to expand")` 获取。
 
-失败态统一使用 compact reason；如果存在明确、低噪音、可执行的修复建议，则在下一行显示 compact hint：
+失败态统一使用 compact reason；本扩展当前不再输出下一行 compact hint，失败只保留一行错误摘要，完整错误靠展开：
 
 ```text
 read src/missing.ts                              path not found
-  ╰─ check file path
 write src/secret.ts                              permission denied
-  ╰─ check file permissions
 edit src/config.ts                               oldText not found
 ```
-
-hint 文案使用动词短语，不加句号；无法给出明确行动建议时不显示 hint。
 
 ## 5. 各内置 tool 的展示策略
 
@@ -196,18 +189,17 @@ MVP v0 不设置小文件例外：所有成功 `read` 在 collapsed 状态默认
 
 ### 错误态
 
-显示错误原因：
+只显示错误原因，不额外占一行；完整错误靠展开：
 
 ```text
 read src/missing.ts                              path not found
-  ╰─ check file path
 ```
 
 ## 5.2 bash
 
 ### 当前倾向
 
-`bash` 是最容易刷屏的 tool。成功时默认应该非常克制，失败时默认展示关键错误。多行命令，尤其是 `python3 - <<'PY'` 这类 heredoc，在 collapsed 状态下也会造成大量噪音，因此命令本身也需要一行摘要化。
+`bash` 是最容易刷屏的 tool。成功时默认应该非常克制，失败时默认只用一行分类摘要表达错误（`test failed` / `tsc errors` / `command not found` / `exit <code>`），完整错误通过 expand 查看，避免失败现场长期占据会话。多行命令，尤其是 `python3 - <<'PY'` 这类 heredoc，在 collapsed 状态下也会造成大量噪音，因此命令本身也需要一行摘要化。
 
 ### running 状态
 
@@ -246,15 +238,12 @@ bash npm test                                   50L · truncated · 12.4s
 ### error collapsed
 
 ```text
-bash pnpm build                                 exit 1 · 9.7s
-src/app.ts:42:13 - error TS2322: ...
+bash pnpm build                                 tsc errors · exit 2 · 9.7s
 
-bash python3 heredoc                            73 lines · 2.8 KB · exit 1 · 0.4s
-Traceback (most recent call last):
-...
+bash pnpm test                                  test failed · exit 1 · 4.1s
 ```
 
-失败时默认展示最后 8-12 行，优先展示错误尾部；命令仍保持一行摘要。
+失败时 collapsed 只展示一行分类摘要（类型识别、退出码、耗时），不再默认贴出错误尾部；`failedTailPreview` 打开后才会追加最后 N 行（N 取 `previewLines`）。完整 output 始终通过 expand 查看。
 
 ### expanded
 
@@ -327,11 +316,10 @@ MVP v0 不设置小文件例外：所有成功 `write` 在 collapsed 状态默�
 
 ### error collapsed
 
-显示精简错误；有明确修复方向时显示一行 compact hint：
+只显示精简错误，不额外占用一行：
 
 ```text
 write src/generated.ts                          permission denied
-  ╰─ check file permissions
 ```
 
 ### expanded
@@ -448,7 +436,7 @@ MVP v0 首先覆盖三个最容易造成噪音的内置 tool：
 | 决策 | 结论 |
 |------|------|
 | `bash` 成功时是否默认显示输出 | 不显示正文，只显示摘要 |
-| `bash` 失败时默认展示多少行 tail | 10 行 |
+| `bash` 失败时是否默认展示 tail | 默认不展示，只保留一行分类摘要；`failedTailPreview` 开启后展示最后 N 行 |
 | `write` 成功时是否默认显示正文 | 不显示正文，只显示摘要 |
 | `read` 成功时是否默认显示正文 | 不显示正文，只显示摘要 |
 | 是否加状态符号 | 不加状态符号，状态由 metadata / error reason / 颜色上下文承担 |
@@ -467,14 +455,14 @@ MVP v0 首先覆盖三个最容易造成噪音的内置 tool：
 - success collapsed：内置 bash tool 截断输出时（`details.truncation.truncated`）在摘要后追加 `truncated`，无摘要时单独显示 `truncated`。
 - success collapsed：`rg` / `grep` 使用 `N matches`，带 context 时使用 `N search lines`，空输出使用 `no matches`；`find` / `rg --files` 使用 `N paths`，`find ... | wc -l` 使用 `N files`，空输出使用 `no paths`；纯 `ls` 使用 `N entries`，空输出使用 `empty`；`git diff` 类空输出使用 `no changes`，`git status --short` / `--porcelain` 空输出使用 `clean`。
 - duration：耗时低于 1s 时不展示；命令无输出且无适用语义时只显示耗时（或什么都不显示）。
-- error collapsed：显示 `bash <command summary> · exit <code> · <duration>`，并展示最后 10 行输出。
+- error collapsed：显示 `bash <command summary> · <failure class> · exit <code> · <duration>`，默认不展示输出；`failedTailPreview` 打开时追加最后 N 行（N 取 `previewLines`）。
 - expanded：委托原始 renderer，展示完整当前可用输出、完整命令、截断信息和 full output path。
 
 #### write
 
 - success collapsed：只显示摘要，例如 `write src/generated.ts · 214L · 6.8 KB`；行数使用与 `bash` 相同的 `NL` 单位。
 - 不设置小文件例外。
-- error collapsed：显示 compact reason；有明确修复方向时显示 compact hint，例如 `write src/generated.ts · permission denied` + `check file permissions`。
+- error collapsed：只显示 compact reason，例如 `write src/generated.ts · permission denied`；不显示下一行 compact hint，完整错误靠展开（与 read / edit 一致）。
 - expanded：委托原始 renderer，展示写入内容预览和语法高亮。
 
 #### read
@@ -483,7 +471,7 @@ MVP v0 首先覆盖三个最容易造成噪音的内置 tool：
 - 带范围时显示 `path:start-end`。
 - 截断时按内置上限显示 `outputLines/totalLinesL`（例如 `2000/9000L`），比值不可用时显示 `truncated`；用户 `limit` 提前结束时显示 `NL more`（例如 `4900L more`）。
 - 不设置小文件例外。
-- error collapsed：显示 compact reason；有明确修复方向时显示 compact hint，例如 `read src/missing.ts · path not found` + `check file path`。
+- error collapsed：只显示 compact reason，例如 `read src/missing.ts · path not found`；不显示下一行 compact hint，完整错误靠展开（与 edit 一致）。
 - expanded：委托原始 renderer，展示文件内容、语法高亮和截断信息。
 
 #### edit
@@ -516,7 +504,7 @@ MVP v0 首先覆盖三个最容易造成噪音的内置 tool：
 
 1. [x] `bash`
    - 成功默认摘要。
-   - 失败默认 tail。
+   - 失败默认一行分类摘要，tail 预览可选。
    - running 更新状态与已输出行数。
 2. [x] `write`
    - 成功默认摘要。
@@ -543,7 +531,7 @@ MVP v0 首先覆盖三个最容易造成噪音的内置 tool：
    - [x] 小 diff inline。
    - [x] 大 diff 只显示 header。
    - [x] diff stat。
-8. [x] 通用 compact error / hint 文案统一（read / write / edit）。
+8. [x] 通用 compact error 文案统一（read / write / edit）。
 9. 截断、full output、耗时格式统一。
 
 ## 8. 可能的配置项
@@ -669,7 +657,7 @@ tools: {
 - 连续多个 `read` 不应明显刷屏。
 - 成功的 `write` 不应默认展示大段文件内容。
 - 成功的 `bash` 不应默认展示大段命令输出。
-- 失败的 `bash` 不展开也能看到关键错误。
+- 失败的 `bash` collapsed 一行即可看出错误类别（如 `test failed · exit 1`），完整错误展开可见。
 
 ### 展开体验
 
@@ -804,7 +792,7 @@ Edit src/router.ts · +12 −4
 | pending | tool / target / preparing | 可省略，或展示已完整的 command/content | 无 |
 | running | running 或 stream summary / elapsed | bash 显示 tail；其他 tool 展示稳定 preview | `streaming` 信息可放 section 标题 |
 | success | 结果摘要 / duration | 完整可用内容 | `Ctrl+O collapse` |
-| failure | compact reason / exit / duration | 完整 error 与可用诊断 | 修复 hint、收起提示 |
+| failure | compact reason / exit / duration | 完整 error 与可用诊断 | 收起提示 |
 | truncated | 正常结果摘要 | 已保留的可用内容 | warning、比例、next offset 或 full-output path |
 
 宽度分级：

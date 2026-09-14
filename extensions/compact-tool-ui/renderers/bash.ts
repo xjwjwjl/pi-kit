@@ -397,9 +397,13 @@ export function registerCompactBash(pi: ExtensionAPI, cwd: string, displayOption
 				callText && setBashText(callText, command, metadata, theme);
 				if (context.expanded) expandedBashCall(state, command, metadata, theme);
 				if (context.expanded) return expandedBashResult(rawCommand, output || raw, result, false, theme, context.cwd);
-				const preview = tail(output || raw);
-				if (!preview) return emptyComponent();
-				return renderOutputPreview(preview, theme);
+				// Failures collapse to the one-line row like every other outcome; the full error
+				// stays available through expand so a failing command cannot hold the transcript open.
+				if (displayOptions.failedTailPreview) {
+					const preview = previewTail(output || raw, displayOptions.previewLines);
+					if (preview) return renderOutputPreview(preview, theme);
+				}
+				return emptyComponent();
 			}
 
 			const outputSummary = summarizeSuccessfulBashOutput(output, rawCommand);

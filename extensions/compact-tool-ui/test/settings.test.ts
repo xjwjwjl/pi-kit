@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { loadCompactToolUiSettings, saveCompactToolUiSettings } from "../settings/compact-tool-ui.js";
+import { effectiveCompactToolUiSettings, loadCompactToolUiSettings, saveCompactToolUiSettings } from "../settings/compact-tool-ui.js";
 
 async function withTempHomeAndProject(fn: (paths: { home: string; cwd: string }) => Promise<void>) {
 	const root = await mkdtemp(path.join(os.tmpdir(), "compact-tool-ui-settings-"));
@@ -78,6 +78,21 @@ test("settings load migrates legacy settledTailPreview to successfulTailPreview"
 		const loaded = await loadCompactToolUiSettings();
 		assert.equal(loaded.effective.bash?.successfulTailPreview, true);
 		assert.equal("settledTailPreview" in (loaded.effective.bash ?? {}), false);
+	});
+});
+
+test("settings default failure tail preview off and persist it", async () => {
+	await withTempHomeAndProject(async ({ home }) => {
+		const settingsPath = path.join(home, ".pi", "agent", "settings.json");
+		assert.equal(effectiveCompactToolUiSettings((await loadCompactToolUiSettings()).settings).bash.failedTailPreview, false);
+
+		await writeFile(settingsPath, JSON.stringify({ compactToolUi: { bash: { failedTailPreview: true } } }));
+		const loaded = await loadCompactToolUiSettings();
+		assert.equal(loaded.effective.bash?.failedTailPreview, true);
+
+		await saveCompactToolUiSettings({ bash: { failedTailPreview: false } });
+		const saved = JSON.parse(await readFile(settingsPath, "utf8"));
+		assert.equal(saved.compactToolUi.bash.failedTailPreview, false);
 	});
 });
 

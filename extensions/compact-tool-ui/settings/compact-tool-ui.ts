@@ -45,6 +45,7 @@ function normalizeBashDisplayOptions(value: unknown): BashDisplayOptions | undef
 	if (typeof record.runningTailPreview === "boolean") options.runningTailPreview = record.runningTailPreview;
 	if (typeof record.successfulTailPreview === "boolean") options.successfulTailPreview = record.successfulTailPreview;
 	else if (typeof record.settledTailPreview === "boolean") options.successfulTailPreview = record.settledTailPreview;
+	if (typeof record.failedTailPreview === "boolean") options.failedTailPreview = record.failedTailPreview;
 	if (typeof record.previewLines === "number" && Number.isFinite(record.previewLines)) {
 		options.previewLines = Math.max(1, Math.floor(record.previewLines));
 	}
@@ -84,6 +85,7 @@ function definedBashDisplayOptions(options: BashDisplayOptions | undefined): Bas
 	if (options.successfulOutputSummary !== undefined) defined.successfulOutputSummary = options.successfulOutputSummary;
 	if (options.runningTailPreview !== undefined) defined.runningTailPreview = options.runningTailPreview;
 	if (options.successfulTailPreview !== undefined) defined.successfulTailPreview = options.successfulTailPreview;
+	if (options.failedTailPreview !== undefined) defined.failedTailPreview = options.failedTailPreview;
 	if (options.previewLines !== undefined) defined.previewLines = options.previewLines;
 	return hasKeys(defined) ? defined : undefined;
 }
