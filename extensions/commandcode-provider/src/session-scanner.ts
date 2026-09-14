@@ -85,14 +85,20 @@ function nonNegativeNumber(value: unknown): number {
 }
 
 function stringField(obj: any, field: string): string | null {
-    const value = obj?.[field] ?? obj?.message?.[field];
+    const value = obj?.[field]
+        ?? obj?.message?.[field]
+        ?? obj?.details?.[field]
+        ?? obj?.message?.details?.[field];
     if (typeof value !== "string") return null;
     const trimmed = value.trim();
     return trimmed || null;
 }
 
 function sessionUsage(obj: any): any | null {
-    const usage = obj?.usage ?? obj?.message?.usage;
+    const usage = obj?.usage
+        ?? obj?.message?.usage
+        ?? obj?.details?.usage
+        ?? obj?.message?.details?.usage;
     return usage && typeof usage === "object" && !Array.isArray(usage) ? usage : null;
 }
 
@@ -206,11 +212,12 @@ interface ParsedUsageEntry {
 }
 
 /**
- * Scan the local Pi session store for Command Code assistant messages and
- * aggregate token/cost/session usage into the given time ranges.
+ * Scan the local Pi session store for usage-bearing entries associated with
+ * Command Code and aggregate token/cost/session usage into the given ranges.
  *
- * Source records are nested, e.g.:
- *   { type: "message", message: { role: "assistant", provider: "commandcode", model, usage: {...} }, timestamp }
+ * Assistant records identify their provider directly. Compaction records inherit
+ * the active provider from model changes/assistant messages; tool results are
+ * included only when they explicitly identify Command Code.
  */
 export async function scanSessionsInRanges(
     ranges: Array<TimeRange | null>,
@@ -234,14 +241,43 @@ export async function scanSessionsInRanges(
         try {
             stream = fs.createReadStream(filePath, { encoding: "utf-8" });
             rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+            let activeProvider: string | null = null;
+            let activeModel: string | null = null;
             for await (const line of rl) {
                 const trimmed = line.trim();
                 if (!trimmed) continue;
                 let obj: any;
                 try { obj = JSON.parse(trimmed); } catch { quality.malformedLines += 1; continue; }
                 if (!obj || typeof obj !== "object" || Array.isArray(obj)) { quality.malformedLines += 1; continue; }
+                if (obj?.type === "model_change") {
+                    activeProvider = stringField(obj, "provider");
+                    activeModel = stringField(obj, "modelId") ?? stringField(obj, "model");
+                    continue;
+                }
+                if (obj?.type === "session") continue;
+
                 const source = obj?.message ?? obj;
-                if (source?.role !== "assistant" || source?.provider !== "commandcode") continue;
+                const role = source?.role;
+                const explicitProvider = stringField(obj, "provider");
+                const explicitModel = sessionModel(obj);
+                let model: string;
+                if (role === "assistant") {
+                    if (explicitProvider) {
+                        activeProvider = explicitProvider;
+                        activeModel = explicitModel === "unknown" ? activeModel : explicitModel;
+                    }
+                    if (explicitProvider !== "commandcode") continue;
+                    model = explicitModel === "unknown" ? activeModel ?? "unknown" : explicitModel;
+                } else if (obj?.type === "compaction") {
+                    if (activeProvider !== "commandcode") continue;
+                    model = explicitModel === "unknown" ? activeModel ?? "unknown" : explicitModel;
+                } else if (role === "toolResult") {
+                    if (explicitProvider !== "commandcode") continue;
+                    model = explicitModel === "unknown" ? activeModel ?? "unknown" : explicitModel;
+                } else {
+                    continue;
+                }
+
                 const timestamp = messageTimestampMs(obj);
                 const usage = sessionUsage(obj);
                 if (timestamp === null || !usage) continue;
@@ -249,7 +285,7 @@ export async function scanSessionsInRanges(
                     range && timestamp >= range.start.getTime() && timestamp < range.end.getTime() ? [index] : [],
                 );
                 if (indexes.length === 0) continue;
-                entries.push({ entryId: sessionEntryId(obj), model: sessionModel(obj), usage, indexes });
+                entries.push({ entryId: sessionEntryId(obj), model, usage, indexes });
             }
             completed = true;
         } catch {
