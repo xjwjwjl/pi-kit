@@ -87,8 +87,10 @@ start "" wt new-tab -p <g> --startingDirectory <dir> -- "bash -c cd \"<dir>\" &&
 **结论 / 可靠做法**：
 - 用 `-p` 明确指定 **Git Bash profile 的 GUID**。
 - 不要硬编码单个 GUID：从 `%LOCALAPPDATA%\Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json`
-  的 `profiles.list` 里按 `name` 含 `bash` 或 `commandline` 含 `bash.exe` 过滤挑选，
-  优先取显式配置 `bash.exe` 的，回退到默认 profile。
+  的 `profiles.list` 里按 `name` 含 `bash` / `source: "Git"` / `commandline` 含 `bash.exe` 过滤挑选，
+  回退到默认 profile。
+- **必须排除 commandline 指向已不存在路径的坏 profile**（见「坑 6」），并优先未 `hidden`、
+  `source: "Git"` 的条目；挑选逻辑见 `pickBashProfile()`。
 - settings.json 路径里的包 ID（`..._8wekyb3d8bbwe`）是稳定的。
 
 ---
@@ -98,6 +100,29 @@ start "" wt new-tab -p <g> --startingDirectory <dir> -- "bash -c cd \"<dir>\" &&
 **现象/结论**：`--startingDirectory` 要用 **Windows 形式路径**（`path.win32.normalize`），
 虽然 bash 内部 `$PWD` 是 POSIX 形式，但 WT 的起始目录参数认 Windows 路径。已验证
 传正斜杠的 Windows 路径能正确进入目标目录。
+
+---
+
+## 坑 6：指定了一个 commandline 已失效的 profile → 分屏报 0x80070002
+
+**现象**：扩展新建的标签页本身正常（命令体是显式传的 `bash -c "exec pi"`，走 PATH 解析），
+但在这标签里 `alt+d` 分屏 / duplicate pane 时报错：
+
+```
+[出现错误 2147942402 (0x80070002) (启动“C:\Users\admin\scoop\apps\git\current\bin\bash.exe”时)]
+系统找不到指定的文件。
+```
+
+**原因**：分屏会**重跑该 pane 所属 profile 的 `commandline`**。如果 `-p` 选中的 profile
+`commandline` 指向一个已经不存在的路径（这里是 scoop 卸载/迁移 git 后遗留的隐藏 profile），
+新 pane 就启动失败。旧版挑选逻辑取「第一个 commandline 含 `bash.exe` 的 profile」，
+恰好命中了这条死配置；而标签页创建当时没暴露问题，只在分屏时才炸。
+
+**结论 / 可靠做法**：
+- 挑选 profile 时，对 `commandline` 里 path 形状的可执行文件做 `existsSync` 校验，失效的直接跳过。
+- 优先 `!hidden`，其次 `source: "Git"`（WT 自动生成的 git-bash profile，永远跟随实际安装路径）。
+- 自己的 WT `settings.json` 里若留着这类死 profile，从 Settings UI 删掉或指向现有 bash
+  （`C:\Program Files\Git\bin\bash.exe`）；注意 WT 运行时改文件可能被它退出时回写覆盖。
 
 ---
 
@@ -136,6 +161,6 @@ return await new Promise((resolve) => {
 
 要点回顾：
 1. 启动走 `cmd` 隐式 shell + 裸 `wt`（PATH 解析别名）。
-2. `-p` 指定 Git Bash profile。
+2. `-p` 指定 Git Bash profile（含失效校验，见坑 6）。
 3. 路径只经 `--startingDirectory`，命令体极简、单层引号、不含 `&&`/路径/重定向。
 4. `exec` 配 `unref` + `timeout`，绝不阻塞调用方。
