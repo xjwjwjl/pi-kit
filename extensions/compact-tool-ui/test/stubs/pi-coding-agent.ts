@@ -2,6 +2,8 @@ import os from "node:os";
 import path from "node:path";
 import { Text } from "./pi-tui.js";
 
+export const CONFIG_DIR_NAME = ".pi";
+
 export function getAgentDir() {
 	return process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent");
 }
@@ -26,6 +28,7 @@ export function highlightCode(code: string, _language?: string): string[] {
 export function getSettingsListTheme() {
 	return {};
 }
+
 
 export function formatSize(bytes: number): string {
 	if (bytes < 1024) return `${bytes} B`;

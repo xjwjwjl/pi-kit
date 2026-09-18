@@ -412,7 +412,7 @@ test("compact bash collapses failures to the header by default", () => {
 });
 
 test("compact bash keeps a failure tail preview when enabled", () => {
-	const tool = captureRegisteredTool((pi, cwd) => registerCompactBash(pi, cwd, { failedTailPreview: true, previewLines: 2 }));
+	const tool = captureRegisteredTool((pi, cwd) => registerCompactBash(pi, cwd, { tailPreview: "failed", previewLines: 2 }));
 	const args = { command: "pnpm test" };
 	const state: any = { compactStartedAt: Date.now() - 1500 };
 	const toolCallId = "bash-failure-preview";
@@ -432,8 +432,25 @@ test("compact bash keeps a failure tail preview when enabled", () => {
 	assert.doesNotMatch(text, /line-1/);
 });
 
-test("compact bash shows success output summary before duration when enabled", () => {
-	const tool = captureRegisteredTool((pi, cwd) => registerCompactBash(pi, cwd, { successfulOutputSummary: true }));
+test("compact bash stays quiet on success in failed tail preview mode", () => {
+	const tool = captureRegisteredTool((pi, cwd) => registerCompactBash(pi, cwd, { tailPreview: "failed", previewLines: 2 }));
+	const args = { command: "printf 'alpha\\nbeta\\ngamma\\n'" };
+	const state: any = {};
+	const toolCallId = "bash-failed-mode-success";
+
+	const call = tool.renderCall(args, theme, toolContext(state, toolCallId, args, undefined));
+	const result = tool.renderResult(
+		{ content: [{ type: "text", text: "alpha\nbeta\ngamma\n" }], details: undefined },
+		{ expanded: false, isPartial: false },
+		theme,
+		toolContext(state, toolCallId, args, call),
+	);
+
+	assert.equal(renderText(result), "");
+});
+
+test("compact bash shows success output summary before duration", () => {
+	const tool = captureRegisteredTool(registerCompactBash);
 	const args = { command: "printf 'alpha\\nbeta\\n'" };
 	const state: any = { compactStartedAt: Date.now() - 1500 };
 	const toolCallId = "bash-success-summary-on";
@@ -603,27 +620,8 @@ test("compact bash keeps timeout metadata for a settled timeout failure", () => 
 	assert.doesNotMatch(text, /timeout 30s/);
 });
 
-test("compact bash hides success output summary when disabled", () => {
-	const tool = captureRegisteredTool((pi, cwd) => registerCompactBash(pi, cwd, { successfulOutputSummary: false }));
-	const args = { command: "printf 'alpha\\nbeta\\n'" };
-	const state: any = {};
-	const toolCallId = "bash-success-summary-off";
-
-	const call = tool.renderCall(args, theme, toolContext(state, toolCallId, args, undefined));
-	tool.renderResult(
-		{ content: [{ type: "text", text: "alpha\nbeta\n" }], details: undefined },
-		{ expanded: false, isPartial: false },
-		theme,
-		toolContext(state, toolCallId, args, call),
-	);
-
-	const text = renderText(state.compactCallText);
-	assert.match(text, /^Bash /);
-	assert.doesNotMatch(text, /more line|\d+L/);
-});
-
 test("compact bash does not show success output summary for empty output", () => {
-	const tool = captureRegisteredTool((pi, cwd) => registerCompactBash(pi, cwd, { successfulOutputSummary: true }));
+	const tool = captureRegisteredTool(registerCompactBash);
 	const args = { command: "true" };
 	const state: any = {};
 	const toolCallId = "bash-success-summary-empty";
@@ -642,7 +640,7 @@ test("compact bash does not show success output summary for empty output", () =>
 });
 
 test("compact bash shows running tail preview when enabled", () => {
-	const tool = captureRegisteredTool((pi, cwd) => registerCompactBash(pi, cwd, { runningTailPreview: true, previewLines: 2 }));
+	const tool = captureRegisteredTool((pi, cwd) => registerCompactBash(pi, cwd, { tailPreview: "running", previewLines: 2 }));
 	const args = { command: "npm test" };
 	const state: any = {};
 	const toolCallId = "bash-running-preview-on";
@@ -778,7 +776,7 @@ test("compact bash summarizes multiline python heredoc commands", () => {
 });
 
 test("compact bash keeps tail preview after success when enabled", () => {
-	const tool = captureRegisteredTool((pi, cwd) => registerCompactBash(pi, cwd, { successfulTailPreview: true, previewLines: 2 }));
+	const tool = captureRegisteredTool((pi, cwd) => registerCompactBash(pi, cwd, { tailPreview: "all", previewLines: 2 }));
 	const args = { command: "printf 'alpha\\nbeta\\ngamma\\n'" };
 	const state: any = {};
 	const toolCallId = "bash-settled-preview";
@@ -815,7 +813,7 @@ test("compact bash hides tail preview after success by default", () => {
 });
 
 test("compact bash hides running tail preview when disabled", () => {
-	const tool = captureRegisteredTool((pi, cwd) => registerCompactBash(pi, cwd, { runningTailPreview: false }));
+	const tool = captureRegisteredTool((pi, cwd) => registerCompactBash(pi, cwd, { tailPreview: "off" }));
 	const args = { command: "npm test" };
 	const state: any = {};
 	const toolCallId = "bash-running-preview-off";
@@ -1049,6 +1047,25 @@ test("compact edit shows configured large diffs inline when the max lines is 0",
 
 	assert.match(renderText(state.compactCallText), /\+70 -0/);
 	assert.match(renderText(result), /  │ \+70 added\n  ╰─$/);
+});
+
+test("compact edit hides the diff when the inline preview maximum is never", () => {
+	const tool = captureRegisteredTool((pi, cwd) => registerCompactEdit(pi, cwd, { inlineDiffMaxLines: -1 }));
+	const args = { path: "src/session.ts", edits: [{ oldText: "old", newText: "new" }] };
+	const state: any = {};
+	const toolCallId = "edit-never-diff";
+	const diff = Array.from({ length: 3 }, (_, i) => `+${i + 1} added`).join("\n");
+
+	const call = tool.renderCall(args, theme, toolContext(state, toolCallId, args, undefined));
+	const result = tool.renderResult(
+		{ content: [{ type: "text", text: "Successfully replaced 1 block(s) in src/session.ts." }], details: { diff } },
+		{ expanded: false, isPartial: false },
+		theme,
+		toolContext(state, toolCallId, args, call),
+	);
+
+	assert.match(renderText(state.compactCallText), /\+3 -0/);
+	assert.equal(renderText(result), "");
 });
 
 test("compact edit shows missing text errors in the header without a hint", () => {

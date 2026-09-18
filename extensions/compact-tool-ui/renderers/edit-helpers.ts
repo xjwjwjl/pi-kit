@@ -19,8 +19,6 @@ export type EditDiffStat = {
 	lines: number;
 };
 
-const INLINE_DIFF_MAX_LINES = 64;
-
 export function summarizeEditDiff(diff: string | undefined): EditDiffStat | undefined {
 	if (typeof diff !== "string") return undefined;
 	const lines = trimTrailingEmptyLines(stripAnsi(diff).split("\n"));
@@ -59,7 +57,9 @@ export function countEditDiffHunks(diff: string | undefined): number {
 	return hunks;
 }
 
-export function shouldInlineEditDiff(diff: string | undefined, maxLines = INLINE_DIFF_MAX_LINES): boolean {
+/** `maxLines` is `-1` (never), `0` (unlimited), or a positive line threshold. */
+export function shouldInlineEditDiff(diff: string | undefined, maxLines: number): boolean {
+	if (maxLines < 0) return false;
 	const stat = summarizeEditDiff(diff);
 	return Boolean(diff && stat && stat.lines > 0 && (maxLines === 0 || stat.lines <= maxLines));
 }

@@ -9,7 +9,7 @@ import { OutputPreviewBlock } from "../components/output-preview-block.js";
 import { ToolDetailFooter } from "../components/tool-detail-footer.js";
 import { commandText } from "../format/bash-command.js";
 import { summarizeBashCommand, type BashCommandDisplay } from "../format/bash-command-summary.js";
-import { DEFAULT_BASH_DISPLAY_OPTIONS, type BashDisplayOptions } from "../settings/options.js";
+import { DEFAULT_BASH_DISPLAY_OPTIONS, type BashDisplayOptions, type BashTailPreview } from "../settings/options.js";
 import { type ToolUiStatus, mutedMetadataText, toolNameText } from "../style.js";
 import { countLines, emptyComponent, formatVisibleDuration, linkPath, stripAnsi, textBlocks } from "../tui-utils.js";
 import { hasMeaningfulOutput, outputLineCount, previewTail, splitBashStatus, summarizeBashStream, summarizeFailedBashOutput, summarizeSuccessfulBashOutput, tail } from "./bash-helpers.js";
@@ -49,6 +49,15 @@ export type BashDisplayOptionsSource = BashDisplayOptions | (() => BashDisplayOp
 function resolveBashDisplayOptions(source: BashDisplayOptionsSource | undefined): Required<BashDisplayOptions> {
 	const value = typeof source === "function" ? source() : source;
 	return { ...DEFAULT_BASH_DISPLAY_OPTIONS, ...value };
+}
+
+type BashPreviewPhase = "running" | "success" | "failed";
+
+/** `failed` is the "quiet on success, verbose when something breaks" mode. */
+function tailPreviewEnabled(mode: BashTailPreview, phase: BashPreviewPhase): boolean {
+	if (mode === "off") return false;
+	if (mode === "all") return true;
+	return mode === phase;
 }
 
 function bashCommand(args: BashArgs): string {
@@ -114,13 +123,12 @@ function compactBashMetadata(
 	duration: string | undefined,
 	executionStarted: boolean,
 	theme: Theme,
-	displayOptions: Required<BashDisplayOptions>,
 ): BashMetadata {
 	const active = status === "running" || status === "pending";
 	// The configured timeout only matters while the command can still be cut off; once settled it
 	// is noise, and `timeout`/`aborted` outcomes already surface through the result summary.
 	const activeTimeout = active ? timeout : undefined;
-	const summary = status === "success" && !displayOptions.successfulOutputSummary ? undefined : state.compactSummary;
+	const summary = state.compactSummary;
 	const runningSummary = executionStarted ? summary ?? "running" : summary;
 	const resultSummary = active ? runningSummary : summary;
 	const full = mutedMetadataText([command.metadata, activeTimeout, resultSummary, duration], theme);
@@ -349,7 +357,7 @@ export function registerCompactBash(pi: ExtensionAPI, cwd: string, displayOption
 			const end = status === "success" || status === "failed" ? state.compactEndedAt ?? Date.now() : Date.now();
 			const duration = startedAt === undefined ? undefined : formatVisibleDuration(end - startedAt);
 			const displayOptions = resolveBashDisplayOptions(displayOptionsSource);
-			const metadata = compactBashMetadata(state, status, command, timeout, duration, context.executionStarted, theme, displayOptions);
+			const metadata = compactBashMetadata(state, status, command, timeout, duration, context.executionStarted, theme);
 			if (context.expanded) return expandedBashCall(state, command, metadata, theme);
 
 			const text = ensureBashCallText(state, context.lastComponent);
@@ -379,11 +387,11 @@ export function registerCompactBash(pi: ExtensionAPI, cwd: string, displayOption
 				const compactStatus: ToolUiStatus = hasOutput ? "running" : "pending";
 				const streamSummary = summarizeBashStream(output);
 				settleCompactState(state, compactStatus, streamSummary);
-				const metadata = compactBashMetadata(state, compactStatus, command, timeout, duration, true, theme, displayOptions);
+				const metadata = compactBashMetadata(state, compactStatus, command, timeout, duration, true, theme);
 				callText && setBashText(callText, command, metadata, theme);
 				if (context.expanded) expandedBashCall(state, command, metadata, theme);
 				if (context.expanded) return expandedBashResult(rawCommand, output, result, true, theme, context.cwd);
-				if (displayOptions.runningTailPreview) {
+				if (tailPreviewEnabled(displayOptions.tailPreview, "running")) {
 					const preview = previewTail(output, displayOptions.previewLines);
 					if (preview) return renderOutputPreview(preview, theme);
 				}
@@ -393,13 +401,13 @@ export function registerCompactBash(pi: ExtensionAPI, cwd: string, displayOption
 			if (context.isError) {
 				const failureSummary = summarizeFailedBashOutput(status, output || raw, rawCommand);
 				settleCompactState(state, "failed", failureSummary);
-				const metadata = compactBashMetadata(state, "failed", command, timeout, duration, context.executionStarted, theme, displayOptions);
+				const metadata = compactBashMetadata(state, "failed", command, timeout, duration, context.executionStarted, theme);
 				callText && setBashText(callText, command, metadata, theme);
 				if (context.expanded) expandedBashCall(state, command, metadata, theme);
 				if (context.expanded) return expandedBashResult(rawCommand, output || raw, result, false, theme, context.cwd);
 				// Failures collapse to the one-line row like every other outcome; the full error
 				// stays available through expand so a failing command cannot hold the transcript open.
-				if (displayOptions.failedTailPreview) {
+				if (tailPreviewEnabled(displayOptions.tailPreview, "failed")) {
 					const preview = previewTail(output || raw, displayOptions.previewLines);
 					if (preview) return renderOutputPreview(preview, theme);
 				}
@@ -409,11 +417,11 @@ export function registerCompactBash(pi: ExtensionAPI, cwd: string, displayOption
 			const outputSummary = summarizeSuccessfulBashOutput(output, rawCommand);
 			const truncatedSummary = bashOutputTruncated(result) ? withTruncationMarker(outputSummary) : outputSummary;
 			settleCompactState(state, "success", truncatedSummary);
-			const metadata = compactBashMetadata(state, "success", command, timeout, duration, context.executionStarted, theme, displayOptions);
+			const metadata = compactBashMetadata(state, "success", command, timeout, duration, context.executionStarted, theme);
 			callText && setBashText(callText, command, metadata, theme);
 			if (context.expanded) expandedBashCall(state, command, metadata, theme);
 			if (context.expanded) return expandedBashResult(rawCommand, output, result, false, theme, context.cwd);
-			if (displayOptions.successfulTailPreview) {
+			if (tailPreviewEnabled(displayOptions.tailPreview, "success")) {
 				const preview = previewTail(output, displayOptions.previewLines);
 				if (preview) return renderOutputPreview(preview, theme);
 			}

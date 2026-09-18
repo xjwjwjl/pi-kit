@@ -12,18 +12,13 @@ export class Text {
 }
 
 export class Container {
-	addChild(_component: unknown, _x?: number, _y?: number) {}
-	invalidate() {}
-	render(_width: number): string[] {
-		return [];
+	children: unknown[] = [];
+	addChild(component: unknown, _x?: number, _y?: number) {
+		this.children.push(component);
 	}
-}
-
-export class SettingsList {
-	constructor(..._args: unknown[]) {}
-	handleInput(_data: string) {}
-	render(_width: number): string[] {
-		return [];
+	invalidate() {}
+	render(width: number): string[] {
+		return this.children.flatMap((child) => (child as { render?: (w: number) => string[] }).render?.(width) ?? []);
 	}
 }
 
@@ -35,9 +30,74 @@ export type SettingItem = {
 	values?: string[];
 };
 
+/** Test double that mirrors pi-tui's activation: cycle to the next value and report the change. */
+export class SettingsList {
+	static instances: SettingsList[] = [];
+	items: SettingItem[];
+	private onChange: (id: string, newValue: string) => void;
+	constructor(items: SettingItem[], _maxVisible: number, _theme: unknown, onChange: (id: string, newValue: string) => void, _onCancel: () => void, _options?: unknown) {
+		this.items = items;
+		this.onChange = onChange;
+		SettingsList.instances.push(this);
+	}
+	updateValue(id: string, newValue: string) {
+		const item = this.items.find((candidate) => candidate.id === id);
+		if (item) item.currentValue = newValue;
+	}
+	handleInput(_data: string) {}
+	render(_width: number): string[] {
+		return this.items.map((item) => `${item.label}  ${item.currentValue ?? ""}`);
+	}
+	/** Test helper: activate an item the way pi-tui does when Enter or Space is pressed. */
+	activate(id: string) {
+		const item = this.items.find((candidate) => candidate.id === id);
+		if (!item?.values || item.values.length === 0) return;
+		const index = item.values.indexOf(item.currentValue ?? "");
+		const next = item.values[(index + 1) % item.values.length];
+		if (next === undefined) return;
+		item.currentValue = next;
+		this.onChange(item.id, next);
+	}
+}
+
 export type Component = {
 	render(width: number): string[];
 };
+
+const SELECT_KEY_SEQUENCES: Record<string, string[]> = {
+	"tui.select.up": ["\x1b[A"],
+	"tui.select.down": ["\x1b[B"],
+	"tui.select.pageUp": ["\x1b[5~"],
+	"tui.select.pageDown": ["\x1b[6~"],
+	"tui.select.confirm": ["\r", "\n"],
+	"tui.select.cancel": ["\x1b", "\x03"],
+};
+
+const KEY_SEQUENCES: Record<string, string[]> = {
+	up: ["\x1b[A"],
+	down: ["\x1b[B"],
+	left: ["\x1b[D"],
+	right: ["\x1b[C"],
+	backspace: ["\x7f", "\b"],
+	delete: ["\x1b[3~"],
+	tab: ["\t"],
+	enter: ["\r"],
+	escape: ["\x1b"],
+};
+
+/** Test double for pi-tui's keybinding lookup, limited to the select bindings used here. */
+export function getKeybindings() {
+	return {
+		matches(data: string, binding: string) {
+			return SELECT_KEY_SEQUENCES[binding]?.includes(data) ?? false;
+		},
+	};
+}
+
+/** Test double for pi-tui's key matcher, limited to the keys the panel intercepts. */
+export function matchesKey(data: string, keyId: string) {
+	return KEY_SEQUENCES[keyId]?.includes(data) ?? false;
+}
 
 const CSI_SEQUENCE = /^\x1b\[[0-?]*[ -/]*[@-~]/;
 const OSC_SEQUENCE = /^\x1b\][\s\S]*?(?:\x07|\x1b\\)/;

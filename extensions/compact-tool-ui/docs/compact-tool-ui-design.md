@@ -117,7 +117,7 @@ Summary 负责表达 tool 的结果摘要：
 Preview 应根据状态和 expanded 决定是否展示：
 
 - collapsed + success：默认尽量少展示。
-- collapsed + failure：默认只保留一行失败摘要（如 `test failed · exit 1`）；可通过 `failedTailPreview` 选择是否额外展示错误尾部。
+- collapsed + failure：默认只保留一行失败摘要（如 `test failed · exit 1`）；可通过 `bash.tailPreview: "failed"` / `"all"` 选择是否额外展示错误尾部。
 - expanded：展示完整可用预览或当前内置 renderer 的完整内容。
 - partial/running：MVP v0 当前只更新 header 状态与已输出行数，不展示 tail preview。
 
@@ -243,7 +243,7 @@ bash pnpm build                                 tsc errors · exit 2 · 9.7s
 bash pnpm test                                  test failed · exit 1 · 4.1s
 ```
 
-失败时 collapsed 只展示一行分类摘要（类型识别、退出码、耗时），不再默认贴出错误尾部；`failedTailPreview` 打开后才会追加最后 N 行（N 取 `previewLines`）。完整 output 始终通过 expand 查看。
+失败时 collapsed 只展示一行分类摘要（类型识别、退出码、耗时），不再默认贴出错误尾部；`bash.tailPreview` 为 `"failed"` / `"all"` 时才会追加最后 N 行（N 取 `previewLines`）。完整 output 始终通过 expand 查看。
 
 ### expanded
 
@@ -257,7 +257,7 @@ bash pnpm test                                  test failed · exit 1 · 4.1s
 
 ### 当前倾向
 
-`edit` 是文件变更类 tool，默认不应完全静默；但大 diff 也不应刷屏。当前策略是：64 行以内 diff collapsed 直接展示，大 diff collapsed 只保留一行摘要，展开后看完整 diff。collapsed 预览中每个逻辑 diff 行最多占一条终端行；过长内容采用中间省略，保留行首定位和行尾结果，避免软换行扰乱 diff 边界。`compactToolUi.edit.inlineDiffMaxLines` 可以调整阈值，设为 `0` 时不限制行数。
+`edit` 是文件变更类 tool，默认不应完全静默；但大 diff 也不应刷屏。当前策略是：64 行以内 diff collapsed 直接展示，大 diff collapsed 只保留一行摘要，展开后看完整 diff。collapsed 预览中每个逻辑 diff 行最多占一条终端行；过长内容采用中间省略，保留行首定位和行尾结果，避免软换行扰乱 diff 边界。`compactToolUi.edit.inlineDiffMaxLines` 可以调整阈值：设为 `0` 时不限制行数，设为 `-1`（设置 UI 显示为 `never`）时从不内联。
 
 ### collapsed
 
@@ -436,7 +436,7 @@ MVP v0 首先覆盖三个最容易造成噪音的内置 tool：
 | 决策 | 结论 |
 |------|------|
 | `bash` 成功时是否默认显示输出 | 不显示正文，只显示摘要 |
-| `bash` 失败时是否默认展示 tail | 默认不展示，只保留一行分类摘要；`failedTailPreview` 开启后展示最后 N 行 |
+| `bash` 失败时是否默认展示 tail | 默认不展示，只保留一行分类摘要；`bash.tailPreview` 为 `failed` / `all` 时展示最后 N 行 |
 | `write` 成功时是否默认显示正文 | 不显示正文，只显示摘要 |
 | `read` 成功时是否默认显示正文 | 不显示正文，只显示摘要 |
 | 是否加状态符号 | 不加状态符号，状态由 metadata / error reason / 颜色上下文承担 |
@@ -447,7 +447,7 @@ MVP v0 首先覆盖三个最容易造成噪音的内置 tool：
 #### bash
 
 - running：显示 `bash <command summary> · running · <elapsed>`；如果已有输出，则切换为 `bash <command summary> · <n>L so far · <elapsed>`。
-- running：默认不展示 tail preview；可通过配置开启最后 N 行 preview。
+- running：默认不展示 tail preview；`bash.tailPreview` 设为 `running` / `all` 时展示最后 N 行 preview。
 - timeout：调用参数提供 `timeout` 时，只在该命令处于 running / pending 时于 collapsed metadata 中显示 `timeout Ns`；命令结束后移除该字段。
 - collapsed command：短单行命令原样显示；`rg` / `grep` / `find` / 纯 `ls` 使用语义 label，例如 `rg /pattern/ in path`、`find *.ts in .`、`ls src`；长单行命令截断但不额外显示字符数；多行命令压缩为 `shell script · N lines · size`；Python heredoc 压缩为 `python3 heredoc · N lines · size`。
 - success collapsed：只显示摘要，例如 `bash pnpm test · 38L · 12.4s` 或 `bash git status --short · M a.vue · 1 more line`。
@@ -455,7 +455,7 @@ MVP v0 首先覆盖三个最容易造成噪音的内置 tool：
 - success collapsed：内置 bash tool 截断输出时（`details.truncation.truncated`）在摘要后追加 `truncated`，无摘要时单独显示 `truncated`。
 - success collapsed：`rg` / `grep` 使用 `N matches`，带 context 时使用 `N search lines`，空输出使用 `no matches`；`find` / `rg --files` 使用 `N paths`，`find ... | wc -l` 使用 `N files`，空输出使用 `no paths`；纯 `ls` 使用 `N entries`，空输出使用 `empty`；`git diff` 类空输出使用 `no changes`，`git status --short` / `--porcelain` 空输出使用 `clean`。
 - duration：耗时低于 1s 时不展示；命令无输出且无适用语义时只显示耗时（或什么都不显示）。
-- error collapsed：显示 `bash <command summary> · <failure class> · exit <code> · <duration>`，默认不展示输出；`failedTailPreview` 打开时追加最后 N 行（N 取 `previewLines`）。
+- error collapsed：显示 `bash <command summary> · <failure class> · exit <code> · <duration>`，默认不展示输出；`bash.tailPreview` 为 `failed` / `all` 时追加最后 N 行（N 取 `previewLines`）。
 - expanded：委托原始 renderer，展示完整当前可用输出、完整命令、截断信息和 full output path。
 
 #### write
@@ -477,7 +477,7 @@ MVP v0 首先覆盖三个最容易造成噪音的内置 tool：
 #### edit
 
 - success collapsed：显示 diff stat，例如 `edit src/session.ts · +93 -41`。
-- 小 diff collapsed：默认 inline 展示 64 行以内 diff；`inlineDiffMaxLines: 0` 时不限行数。
+- 小 diff collapsed：默认 inline 展示 64 行以内 diff；`inlineDiffMaxLines: 0` 时不限行数，`-1`（`never`）时从不内联。
 - 大 diff collapsed：只显示 header，不展示 changed lines / hidden lines / expand hint。
 - error collapsed：只显示精简错误，不显示下一行 compact hint，避免错误态占用额外行。
 - expanded：委托原始 renderer，展示完整 diff。
@@ -536,7 +536,13 @@ MVP v0 首先覆盖三个最容易造成噪音的内置 tool：
 
 ## 8. 可能的配置项
 
-当前 `compactToolUi` 设置只保存到全局 `~/.pi/agent/settings.json`，不再读取或写入项目级 `.pi/settings.json`。已有 `bash` 预览、`edit.inlineDiffMaxLines` 和 `renderShell` 等配置。后续可考虑：
+`compactToolUi` 配置面已收敛到 4 项：`renderShell`、`bash.tailPreview`、`bash.previewLines`、`edit.inlineDiffMaxLines`，并分为全局 `~/.pi/agent/settings.json` 与项目 `<cwd>/.pi/settings.json` 两层：
+
+- 读取：`全局 ← 项目` 逐字段覆盖，缺字段继承下一层，最后叠上内置默认值。
+- 写入：设置面板的 `Settings scope` 选择写入层；选 `inherit`（项目层）/ `unset`（全局层）会从该层删掉对应键，实现回退。所有行统一循环取值。按键：`↑↓` 移动，`←→` 与 `Enter`/`Space` 换一档（scope 行即切层），`Tab` 切层，`Backspace`/`Delete` 清掉当前行在当前层的键，`Esc` 关闭面板；面板不做模糊搜索。写入只替换本扩展拥有的键，同文件其他设置不受影响；写入会做串行化合并且写盘失败时回滚内存值。
+- 门禁：项目层只在 pi 判定文件夹可信（`ctx.isProjectTrusted()`）时读取；未信任时忽略并提示一次。工具注册留在扩展加载阶段，项目层在 `session_start` 解析并刷新渲染器读取的 options ref。
+
+后续可考虑：
 
 ```ts
 toolsDisplay: "compact" | "normal" | "verbose"

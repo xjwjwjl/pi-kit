@@ -6,7 +6,7 @@ import { ExpandedDiffBlock } from "../components/expanded-diff-block.js";
 import { ExpandedToolHeader } from "../components/expanded-tool-header.js";
 import { LineNumberedCodeBlock } from "../components/line-numbered-code-block.js";
 import { ToolDetailFooter } from "../components/tool-detail-footer.js";
-import { DEFAULT_EDIT_DISPLAY_OPTIONS, type EditDisplayOptions } from "../settings/options.js";
+import { DEFAULT_EDIT_DISPLAY_OPTIONS, type EditDisplayOptions, normalizeInlineDiffMaxLines } from "../settings/options.js";
 import { editDiffStatText, editPathText, invalidText, metadataText, numericText, toolNameText } from "../style.js";
 import { countLines, emptyComponent, linkPath, shortPath, textBlocks } from "../tui-utils.js";
 import { type CompactSummaryRowState, ensureCompactToolRow, getCompactCallText, setCompactRow, settleCompactSummaryRow, settleCompactRow } from "./compact-text.js";
@@ -38,11 +38,7 @@ type EditDisplayOptionsSource = EditDisplayOptions | (() => EditDisplayOptions |
 
 function resolveEditDisplayOptions(source: EditDisplayOptionsSource): Required<EditDisplayOptions> {
 	const value = typeof source === "function" ? source() : source;
-	const inlineDiffMaxLines =
-		typeof value?.inlineDiffMaxLines === "number" && Number.isFinite(value.inlineDiffMaxLines)
-			? Math.max(0, Math.floor(value.inlineDiffMaxLines))
-			: DEFAULT_EDIT_DISPLAY_OPTIONS.inlineDiffMaxLines;
-	return { inlineDiffMaxLines };
+	return { inlineDiffMaxLines: normalizeInlineDiffMaxLines(value?.inlineDiffMaxLines ?? DEFAULT_EDIT_DISPLAY_OPTIONS.inlineDiffMaxLines) };
 }
 
 function editTargetText(args: EditArgs, cwd: string, theme: Theme): string {

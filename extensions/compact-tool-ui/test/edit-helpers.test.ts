@@ -13,9 +13,10 @@ test("editSummaryText reports diff stat", () => {
 });
 
 test("shouldInlineEditDiff only allows small diffs", () => {
-	assert.equal(shouldInlineEditDiff("-1 old\n+1 new"), true);
-	assert.equal(shouldInlineEditDiff(Array.from({ length: 65 }, (_, i) => ` ${i} line`).join("\n")), false);
+	assert.equal(shouldInlineEditDiff("-1 old\n+1 new", 64), true);
+	assert.equal(shouldInlineEditDiff(Array.from({ length: 65 }, (_, i) => ` ${i} line`).join("\n"), 64), false);
 	assert.equal(shouldInlineEditDiff(Array.from({ length: 65 }, (_, i) => ` ${i} line`).join("\n"), 0), true);
+	assert.equal(shouldInlineEditDiff("-1 old\n+1 new", -1), false);
 });
 
 test("compactEditError shortens common edit errors", () => {
