@@ -8,6 +8,7 @@
 | `reset-credit/` | `reset-credit/index.ts` | `/codex-reset-credit` 查询/消费 reset credit |
 | `fast-mode/` | `fast-mode/index.ts` | `openai-codex` 请求默认 `service_tier: priority` |
 | `websearch/` | `websearch/index.ts` | Codex 模型原生 `web_search` 能力 |
+| `imagegen/` | `imagegen/index.ts` | Codex OAuth 生图（默认 Flare，支持并发生成 1–4 张；`/codex-image-model` 切换模型） |
 
 ## 注册
 
@@ -36,3 +37,4 @@ cd extensions/codex && npm run check
 
 - 聚合包仅声明入口与脚本，不共享子包源码；子包之间通过 `pi.events` 事件通信。
 - 底层 reset-credit / usage 接口是 Codex 内部接口，非公开稳定 API。
+- `imagegen` 调用 Codex Images 内部接口，可能随服务端调整；详见子包 README。
