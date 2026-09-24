@@ -1,6 +1,6 @@
 # Pi Database
 
-A new multi-source Pi extension for MySQL and ClickHouse. It is independent from `pi-mysql` and `pi-clickhouse`; installing or testing it does not change those extensions or Pi global settings.
+A multi-source Pi extension for MySQL and ClickHouse. It replaces the earlier single-dialect `pi-mysql` and `pi-clickhouse` extensions.
 
 ## Config
 
@@ -57,10 +57,11 @@ When a tool omits `source`, it must pass `dialect` (`mysql` or `clickhouse`) to 
 ## Commands
 
 - `/database status`: opens an interactive tree of configured sources (`↑↓` select, `Enter` expand/collapse details, `Esc` close).
-- `/database on`: enables the plugin; creates a version 2 template when no local or inherited config exists.
+- `/database init`: creates a version 2 template at the current project directory without overwriting an existing or inherited config.
+- `/database on`: enables the plugin for the current project; use `/database init` first when no config exists.
 - `/database off`: disables the plugin for the current project.
 
-The `/database` command is always available, even before a `.pi/databases.json` exists; `status` reports the missing-config error and `on` creates a template without overwriting an existing config. Tool definitions are registered at startup so persisted tool rows can recover their custom TUI renderers; the `database_*` tools are active only when a config file is found and `enabled` is not `false`.
+The `/database` command is always available, even before a `.pi/databases.json` exists; `status` reports the missing-config error and `init` creates a template without overwriting an existing config. Tool definitions are registered at startup so persisted tool rows can recover their custom TUI renderers; the `database_*` tools are active only when a config file is found and `enabled` is not `false`.
 
 The footer status badge shows only plugin state: `database: on` or `database: off`. An invalid config shows `database: config error` in red. Use `/database status` to inspect sources in a compact list.
 
@@ -86,11 +87,12 @@ MySQL:
   UPDATE ... WHERE
   DELETE ... WHERE (always confirmed)
   TRUNCATE [TABLE] <table> (always confirmed)
-  DROP TABLE / DROP DATABASE (single object; always confirmed)
+  DROP TABLE / DROP VIEW / DROP DATABASE (single object; always confirmed)
   RENAME TABLE <a> TO <b> (single pair; always confirmed)
   REPLACE INTO ... VALUES (always confirmed)
   CREATE DATABASE [IF NOT EXISTS] ...
   CREATE TABLE ... (...)
+  CREATE [OR REPLACE] VIEW <view> [(columns)] AS SELECT ...
   ALTER TABLE ... ADD COLUMN / ADD INDEX / ADD PRIMARY KEY / ADD UNIQUE / ADD FOREIGN KEY / ADD CONSTRAINT / ADD CHECK
   ALTER TABLE ... DROP COLUMN / DROP INDEX / DROP PRIMARY KEY / DROP FOREIGN KEY / DROP CONSTRAINT (always confirmed)
   ALTER TABLE ... MODIFY / CHANGE / RENAME COLUMN / RENAME INDEX / RENAME TO (always confirmed)
@@ -116,6 +118,8 @@ ClickHouse:
 `INSERT ... SELECT` and destructive operations (`DELETE`, `TRUNCATE`, `DROP`, `RENAME`, `REPLACE`, and destructive `ALTER`) run only when `allow_write: true` on the selected source and always go through interactive confirmation first, independent of `write_confirm`. They are accepted only in restricted forms: `INSERT ... SELECT` must be `INSERT INTO <table> [(columns)] SELECT ...`; `DELETE` and `ALTER TABLE ... DELETE` require a `WHERE` clause; `DROP` and `TRUNCATE` are single-object; `RENAME` is a single pair; `REPLACE` is `VALUES`-only; destructive `ALTER` is limited to single actions like `DROP COLUMN`, `MODIFY`, `CHANGE`, `RENAME COLUMN`, or `CLEAR COLUMN` (MySQL allows several comma-separated actions as long as each is ADD or a supported destructive action). Any other form is rejected.
 
 ClickHouse materialized views use the normal create policy: `write_confirm` controls whether creation asks for confirmation, including the supported `ON CLUSTER` variants. Only `CREATE MATERIALIZED VIEW ... TO ... AS SELECT ...` and `CREATE MATERIALIZED VIEW ... ENGINE = ... AS SELECT ...` are supported. The `CREATE OR REPLACE` variant of those forms is allowed but always requires interactive confirmation. `POPULATE`, refreshable/window views, `DEFINER`, and `SQL SECURITY` are rejected.
+
+MySQL views use the normal create policy as well: `CREATE [OR REPLACE] VIEW <view> [(columns)] AS SELECT ...` is accepted in that restricted form only (no `ALGORITHM`, `DEFINER`, or `SQL SECURITY` clauses) and `DROP VIEW` is a single-object drop. Replacing a view does not force confirmation; dropping one always confirms.
 
 Replacement writes, drops, truncates, renames, derived table creation, destructive `ALTER` outside the supported restricted actions, ClickHouse mutations (except the restricted `ALTER TABLE ... DELETE WHERE` and destructive actions), `ON CLUSTER` outside the supported materialized-view forms, other admin operations, and multiple statements are rejected (the restricted `INSERT ... SELECT` and destructive forms are available through `database_write` when `allow_write: true`, always with confirmation). `database_write` accepts one SQL statement per call; for multi-step operations, use separate calls, handle each result independently, pass `database` instead of `USE`, and do not assume atomic execution. If a confirmed write times out or loses its connection, the result reports `outcome: "unknown"`; inspect with `database_query` or metadata tools before any further action, and never retry automatically.
 

@@ -164,11 +164,11 @@ function resolveDefaultSources(value: unknown, sources: readonly ResolvedSource[
 export function loadProjectConfig(cwd: string): ResolvedProjectConfig {
   const configPath = findProjectConfigPath(cwd);
   if (!configPath) {
-    throw new Error(`No database config found for ${cwd}. Run /database on to create .pi/databases.json.`);
+    throw new Error(`No database config found for ${cwd}. Run /database init to create .pi/databases.json.`);
   }
   const root = parseConfig(configPath);
   if (root.version !== 2 || !Array.isArray(root.sources) || !isRecord(root.default_sources)) {
-    throw new Error(`Invalid ${configPath}: expected a version 2 config with default_sources and a sources array. Run /database on for a fresh template.`);
+    throw new Error(`Invalid ${configPath}: expected a version 2 config with default_sources and a sources array. Run /database init for a fresh template.`);
   }
   if (Object.prototype.hasOwnProperty.call(root, "default_source")) {
     throw new Error(`Invalid ${configPath}: default_source is no longer supported; use default_sources instead.`);
@@ -207,7 +207,16 @@ export function databaseStatusText(config: { enabled?: boolean }): string {
   return config.enabled === false ? "database: off" : "database: on";
 }
 
+function buildDatabaseBootstrapPrompt(): string {
+  return [
+    "The pi-database extension is installed, but no project database configuration (.pi/databases.json) was found.",
+    "For pi-database initialization requests, use the /database init command to create the project template; do not guess database settings, edit the config manually, or search for a local database client.",
+    "Do not call database_* tools until .pi/databases.json exists and is enabled. After initialization, use the database_* tool family and follow its source-selection and write-safety rules."
+  ].join("\n");
+}
+
 export function buildDatabaseContextPrompt(cwd: string): string | undefined {
+  if (!findProjectConfigPath(cwd)) return buildDatabaseBootstrapPrompt();
   try {
     const config = loadProjectConfig(cwd);
     if (!config.enabled) return undefined;
@@ -221,7 +230,7 @@ export function buildDatabaseContextPrompt(cwd: string): string | undefined {
       "For requests about these configured databases, use the database_* tool family.",
       "Use database_list_tables only when the database is known; use database_search_tables when the target table is unknown; use database_describe_table before guessing columns; use database_ping for connectivity; and use database_query only for read-only SQL.",
       "Default sources select only connections, never databases. When source is omitted, pass dialect to select that dialect's configured default; an explicit source must match dialect when both are passed. With multiple sources and neither source nor dialect, call database_list_sources first. For database_query and database_list_tables, always pass database. If the database is unknown, call database_list_databases first.",
-      "Use database_write only for an explicit user-requested allowed change. It accepts exactly one supported SQL statement per call. For multi-step operations, use separate calls and handle each result independently; do not submit scripts, semicolon-separated statements, or USE/database-selection statements, do not assume the sequence is atomic, and pass database instead of USE. It requires database for table-scoped writes; omit database only for CREATE DATABASE and DROP DATABASE. ClickHouse supports CREATE MATERIALIZED VIEW ... TO ... AS SELECT or ... ENGINE = ... AS SELECT forms, including ON CLUSTER. CREATE OR REPLACE and INSERT ... SELECT (INSERT INTO <table> [(columns)] SELECT ...) always require interactive confirmation; POPULATE, refreshable/window views, DEFINER, and SQL SECURITY are rejected. It follows the selected source's confirmation policy and must not be retried automatically after a timeout or connection loss.",
+      "Use database_write only for an explicit user-requested allowed change. It accepts exactly one supported SQL statement per call. For multi-step operations, use separate calls and handle each result independently; do not submit scripts, semicolon-separated statements, or USE/database-selection statements, do not assume the sequence is atomic, and pass database instead of USE. It requires database for table-scoped writes; omit database only for CREATE DATABASE and DROP DATABASE. ClickHouse supports CREATE MATERIALIZED VIEW ... TO ... AS SELECT or ... ENGINE = ... AS SELECT forms, including ON CLUSTER. MySQL supports CREATE [OR REPLACE] VIEW <view> [(columns)] AS SELECT ... (no ALGORITHM, DEFINER, or SQL SECURITY) and single-object DROP VIEW; replacing a view follows the source write_confirm policy. ClickHouse CREATE OR REPLACE materialized-view variants and INSERT ... SELECT (INSERT INTO <table> [(columns)] SELECT ...) always require interactive confirmation; POPULATE, refreshable/window views, DEFINER, and SQL SECURITY are rejected. It follows the selected source's confirmation policy and must not be retried automatically after a timeout or connection loss.",
       "DELETE, TRUNCATE, DROP, RENAME, REPLACE, and destructive ALTER (DROP/MODIFY/CHANGE/RENAME column, etc.) statements always require interactive confirmation regardless of write_confirm.",
       "If database_write returns blocked or unsupported, stop. State the selected source, dialect, and allow_write setting, then ask the user what to do. If its outcome is unknown, first verify the database with database_query or metadata tools and do not retry automatically. Do not bypass this policy with non-database_* tools or config edits."
     ].join("\n");

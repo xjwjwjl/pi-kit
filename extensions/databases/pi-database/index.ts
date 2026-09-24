@@ -996,10 +996,10 @@ function refreshDatabaseStatus(pi: ExtensionAPI, ctx: DatabaseStatusContext): vo
 function registerCommands(pi: ExtensionAPI): void {
   pi.registerCommand("database", {
     description: "Show or control the project database plugin",
-    argumentHint: "status|on|off",
+    argumentHint: "status|init|on|off",
     getArgumentCompletions: (prefix: string) => {
       const normalized = prefix.trim().toLowerCase();
-      return ["status", "on", "off"]
+      return ["status", "init", "on", "off"]
         .filter((value) => value.startsWith(normalized))
         .map((value) => ({ value, label: value }));
     },
@@ -1021,8 +1021,24 @@ function registerCommands(pi: ExtensionAPI): void {
         return;
       }
 
+      if (command === "init") {
+        try {
+          const result = initializeProjectConfig(getContextCwd(ctx));
+          refreshDatabaseStatus(pi, ctx);
+          if (result.created) {
+            ctx.ui.notify(`Initialized project database config at ${result.configPath}.`, "info");
+          } else {
+            ctx.ui.notify(`Database project config is already available at ${result.configPath}.`, "info");
+          }
+        } catch (error) {
+          refreshDatabaseStatus(pi, ctx);
+          ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+        }
+        return;
+      }
+
       if (command !== "on" && command !== "off") {
-        ctx.ui.notify("Usage: /database status|on|off", "warning");
+        ctx.ui.notify("Usage: /database status|init|on|off", "warning");
         return;
       }
 
@@ -1249,7 +1265,7 @@ function registerTools(pi: ExtensionAPI): void {
     promptSnippet: "Execute a dialect-specific write (data or schema change) using the selected source policy",
     promptGuidelines: [
       "Use database_write only for an explicit user-requested change after selecting the correct source; never use bash or a local database client as a write fallback.",
-      "database_write accepts exactly one supported SQL statement per call. For multi-step operations, use separate calls and handle each result independently; do not submit scripts, semicolon-separated statements, or USE/database-selection statements, and do not assume the sequence is atomic. Pass database instead of USE. It requires database for table-scoped writes; omit database only for CREATE DATABASE and DROP DATABASE. ClickHouse supports standard CREATE MATERIALIZED VIEW ... TO ... AS SELECT or ... ENGINE = ... AS SELECT forms, including ON CLUSTER. CREATE OR REPLACE variants and INSERT ... SELECT (INSERT INTO <table> [(columns)] SELECT ...) require forced interactive confirmation; POPULATE, refreshable/window views, DEFINER, and SQL SECURITY are rejected. It follows the selected source confirmation policy and rejects unsupported SQL. DELETE, TRUNCATE, DROP, RENAME, REPLACE, and destructive ALTER (DROP/MODIFY/CHANGE/RENAME column, etc.) always require interactive confirmation regardless of write_confirm. If it returns blocked, stop and explain the selected source policy to the user.",
+      "database_write accepts exactly one supported SQL statement per call. For multi-step operations, use separate calls and handle each result independently; do not submit scripts, semicolon-separated statements, or USE/database-selection statements, and do not assume the sequence is atomic. Pass database instead of USE. It requires database for table-scoped writes; omit database only for CREATE DATABASE and DROP DATABASE. ClickHouse supports standard CREATE MATERIALIZED VIEW ... TO ... AS SELECT or ... ENGINE = ... AS SELECT forms, including ON CLUSTER. MySQL supports CREATE [OR REPLACE] VIEW <view> [(columns)] AS SELECT ... (no ALGORITHM, DEFINER, or SQL SECURITY) and single-object DROP VIEW; replacing a view follows the source write_confirm policy. ClickHouse CREATE OR REPLACE materialized-view variants and INSERT ... SELECT (INSERT INTO <table> [(columns)] SELECT ...) require forced interactive confirmation; POPULATE, refreshable/window views, DEFINER, and SQL SECURITY are rejected. It follows the selected source confirmation policy and rejects unsupported SQL. DELETE, TRUNCATE, DROP, RENAME, REPLACE, and destructive ALTER (DROP/MODIFY/CHANGE/RENAME column, etc.) always require interactive confirmation regardless of write_confirm. If it returns blocked, stop and explain the selected source policy to the user.",
       "If database_write reports outcome unknown after a timeout or lost connection, first use database_query or metadata tools to verify database state; do not retry automatically and never use bash or a database client to bypass policy."
     ],
     parameters: WriteParams,

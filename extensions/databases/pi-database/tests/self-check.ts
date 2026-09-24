@@ -229,10 +229,25 @@ async function testDynamicRegistration() {
   const databaseCommand = commandDefinitions.get("database");
   assert.equal(typeof databaseCommand?.handler, "function");
   assert.deepEqual(databaseCommand?.getArgumentCompletions?.("of"), [{ value: "off", label: "off" }]);
+  assert.deepEqual(databaseCommand?.getArgumentCompletions?.("in"), [{ value: "init", label: "init" }]);
   assert.equal(tools.length, 8, "tool definitions are registered before session_start for restored TUI rows");
   await handlers.get("session_start")![0]!({}, ctx);
   assert.deepEqual(activeTools, ["read", "bash", "edit", "write"]);
   assert.deepEqual(statuses, [undefined]);
+  const bootstrapPrompt = await handlers.get("before_agent_start")![0]!({ cwd: dir, systemPrompt: "base" }, ctx);
+  assert.equal(typeof bootstrapPrompt, "object");
+  assert.match(String((bootstrapPrompt as { systemPrompt?: string }).systemPrompt), /pi-database initialization requests/);
+  assert.match(String((bootstrapPrompt as { systemPrompt?: string }).systemPrompt), /\/database init/);
+  assert.deepEqual(activeTools, ["read", "bash", "edit", "write"]);
+
+  const initDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-command-init-"));
+  const initCtx = { ...ctx, cwd: initDir, ui: { ...ctx.ui, setStatus() {} } };
+  await databaseCommand!.handler!("init", initCtx);
+  assert.equal(loadProjectConfig(initDir).enabled, true);
+  assert.match(notifications.at(-1)?.message ?? "", /Initialized project database config/);
+  assert.deepEqual(activeTools, ["read", "bash", "edit", "write", ...databaseTools]);
+  await databaseCommand!.handler!("off", initCtx);
+  assert.deepEqual(activeTools, ["read", "bash", "edit", "write"]);
 
   await databaseCommand!.handler!("on", ctx);
   assert.equal(loadProjectConfig(dir).enabled, true);
@@ -301,7 +316,11 @@ function testDatabaseContextPrompt() {
   });
   assert.equal(buildDatabaseContextPrompt(disabledDir), undefined);
   const noConfigDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-database-no-prompt-"));
-  assert.equal(buildDatabaseContextPrompt(noConfigDir), undefined);
+  const bootstrapPrompt = buildDatabaseContextPrompt(noConfigDir) ?? "";
+  assert.match(bootstrapPrompt, /pi-database extension is installed/);
+  assert.match(bootstrapPrompt, /\/database init/);
+  assert.doesNotMatch(bootstrapPrompt, /README\.md|SKILL\.md/);
+  assert.match(bootstrapPrompt, /Do not call database_\* tools/);
 }
 
 async function testToolPromptMetadata() {
@@ -964,6 +983,14 @@ async function testWriteBoundaries() {
   assert.equal(mysqlAdapter.validateWrite(mysql, "CREATE DATABASE IF NOT EXISTS app_db").databaseRequired, false);
   assert.equal(mysqlAdapter.validateWrite(mysql, "CREATE TABLE audit_log (id bigint)").statementKind, "create");
   assert.equal(mysqlAdapter.validateWrite(mysql, "CREATE TABLE audit_log (id bigint)").databaseRequired, true);
+  assert.equal(mysqlAdapter.validateWrite(mysql, "CREATE VIEW v_alarm_type_catalog AS SELECT id FROM alarm_builtin_config").statementKind, "create");
+  assert.equal(mysqlAdapter.validateWrite(mysql, "CREATE VIEW v_alarm_type_catalog AS SELECT id FROM alarm_builtin_config").databaseRequired, true);
+  assert.equal(mysqlAdapter.validateWrite(mysql, "CREATE VIEW v_alarm_type_catalog AS SELECT id FROM alarm_builtin_config").forceConfirm, undefined);
+  assert.equal(mysqlAdapter.validateWrite(mysql, "CREATE OR REPLACE VIEW `v_alarm_type_catalog` (`scope`, `code`) AS SELECT 'builtin' AS scope, code FROM alarm_builtin_config").statementKind, "create");
+  assert.equal(mysqlAdapter.validateWrite(mysql, "CREATE OR REPLACE VIEW app_db.v_catalog AS SELECT id FROM alarm_builtin_config").databaseRequired, true);
+  assert.throws(() => mysqlAdapter.validateWrite(mysql, "CREATE ALGORITHM = MERGE VIEW v AS SELECT id FROM alarm_builtin_config"), /support only/);
+  assert.throws(() => mysqlAdapter.validateWrite(mysql, "CREATE VIEW v AS TABLE alarm_builtin_config"), /support only/);
+  assert.throws(() => mysqlAdapter.validateWrite(mysql, "CREATE OR REPLACE VIEW v"), /support only/);
   assert.equal(mysqlAdapter.validateWrite(mysql, "ALTER TABLE users ADD COLUMN nickname varchar(32)").statementKind, "alter");
   assert.equal(mysqlAdapter.validateWrite(mysql, "ALTER TABLE users ADD COLUMN nickname varchar(32)").forceConfirm, undefined);
   assert.equal(mysqlAdapter.validateWrite(mysql, "ALTER TABLE users ADD PRIMARY KEY (id)").forceConfirm, undefined);
@@ -1002,7 +1029,10 @@ async function testWriteBoundaries() {
   assert.equal(mysqlAdapter.validateWrite(mysql, "DROP DATABASE IF EXISTS app_db").statementKind, "drop");
   assert.equal(mysqlAdapter.validateWrite(mysql, "DROP DATABASE IF EXISTS app_db").databaseRequired, false);
   assert.throws(() => mysqlAdapter.validateWrite(mysql, "DROP TABLE users, orders"), /single-object/);
-  assert.throws(() => mysqlAdapter.validateWrite(mysql, "DROP VIEW IF EXISTS v"), /single-object/);
+  assert.equal(mysqlAdapter.validateWrite(mysql, "DROP VIEW IF EXISTS v_alarm_type_catalog").statementKind, "drop");
+  assert.equal(mysqlAdapter.validateWrite(mysql, "DROP VIEW IF EXISTS v_alarm_type_catalog").databaseRequired, true);
+  assert.equal(mysqlAdapter.validateWrite(mysql, "DROP VIEW `v_alarm_type_catalog`").statementKind, "drop");
+  assert.throws(() => mysqlAdapter.validateWrite(mysql, "DROP VIEW v1, v2"), /single-object/);
   assert.equal(mysqlAdapter.validateWrite(mysql, "RENAME TABLE users TO users_archive").statementKind, "rename");
   assert.equal(mysqlAdapter.validateWrite(mysql, "RENAME TABLE app_db.users TO archive.users").databaseRequired, true);
   assert.throws(() => mysqlAdapter.validateWrite(mysql, "RENAME TABLE a TO b, c TO d"), /single-pair/);

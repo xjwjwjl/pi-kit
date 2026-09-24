@@ -38,6 +38,8 @@ const DROP_TABLE_PATTERN = new RegExp(`^DROP\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?${
 const DROP_DATABASE_PATTERN = new RegExp(`^DROP\\s+DATABASE\\s+(?:IF\\s+EXISTS\\s+)?${IDENTIFIER}$`, "i");
 const RENAME_TABLE_PATTERN = new RegExp(`^RENAME\\s+TABLE\\s+${TABLE_IDENTIFIER}\\s+TO\\s+${TABLE_IDENTIFIER}$`, "i");
 const REPLACE_PATTERN = new RegExp(`^REPLACE\\s+INTO\\s+${TABLE_IDENTIFIER}(?:\\s*\\([^)]*\\))?\\s+VALUES\\s*\\(`, "i");
+const CREATE_VIEW_PATTERN = new RegExp(`^CREATE\\s+(?:OR\\s+REPLACE\\s+)?VIEW\\s+${TABLE_IDENTIFIER}(?:\\s*\\([^)]*\\))?\\s+AS\\s+SELECT\\b`, "i");
+const DROP_VIEW_PATTERN = new RegExp(`^DROP\\s+VIEW\\s+(?:IF\\s+EXISTS\\s+)?${TABLE_IDENTIFIER}$`, "i");
 
 function asString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
@@ -170,8 +172,9 @@ function validateWrite(source: ResolvedSource, statement: string): ValidatedWrit
   }
   if (keyword === "DROP") {
     if (DROP_TABLE_PATTERN.test(normalized)) return { statement: normalized, statementKind: "drop", databaseRequired: true };
+    if (DROP_VIEW_PATTERN.test(normalized)) return { statement: normalized, statementKind: "drop", databaseRequired: true };
     if (DROP_DATABASE_PATTERN.test(normalized)) return { statement: normalized, statementKind: "drop", databaseRequired: false };
-    throw new DatabasePolicyError("MySQL writes support only single-object DROP TABLE and DROP DATABASE statements.");
+    throw new DatabasePolicyError("MySQL writes support only single-object DROP TABLE, DROP VIEW, and DROP DATABASE statements.");
   }
   if (keyword === "RENAME") {
     if (!RENAME_TABLE_PATTERN.test(normalized)) throw new DatabasePolicyError("MySQL writes support only single-pair RENAME TABLE statements.");
@@ -188,8 +191,9 @@ function validateWrite(source: ResolvedSource, statement: string): ValidatedWrit
     }
     return { statement: normalized, statementKind: "create", databaseRequired: true };
   }
+  if (keyword === "CREATE" && CREATE_VIEW_PATTERN.test(normalized)) return { statement: normalized, statementKind: "create", databaseRequired: true };
   if (keyword === "ALTER") return validateAlter(normalized);
-  throw new DatabasePolicyError("MySQL writes support only INSERT ... VALUES, INSERT ... SELECT, UPDATE ... WHERE, DELETE ... WHERE, TRUNCATE, DROP, RENAME, REPLACE, CREATE DATABASE, CREATE TABLE, and ALTER TABLE ADD or single destructive actions (DROP, MODIFY, CHANGE, RENAME, ALTER, CONVERT).");
+  throw new DatabasePolicyError("MySQL writes support only INSERT ... VALUES, INSERT ... SELECT, UPDATE ... WHERE, DELETE ... WHERE, TRUNCATE, DROP TABLE/VIEW/DATABASE, RENAME, REPLACE, CREATE DATABASE, CREATE TABLE, CREATE VIEW, and ALTER TABLE ADD or single destructive actions (DROP, MODIFY, CHANGE, RENAME, ALTER, CONVERT).");
 }
 
 function rowValues(row: unknown, columns: string[]): unknown[] {
