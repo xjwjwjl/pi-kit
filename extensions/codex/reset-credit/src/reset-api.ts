@@ -75,8 +75,10 @@ export async function consumeResetCredit(
 }
 
 export function buildConsumeResetCreditPayload(request: ConsumeResetCreditRequest): Record<string, string> {
+	// Wire format of the Codex backend client (codex-rs/backend-client):
+	// the idempotency key is sent as `redeem_request_id`.
 	return {
-		idempotency_key: request.idempotencyKey,
+		redeem_request_id: request.idempotencyKey,
 		...(request.creditId ? { credit_id: request.creditId } : {}),
 	};
 }
@@ -98,10 +100,31 @@ export function parseResetCreditsResponse(value: unknown): ResetCreditsSnapshot 
 }
 
 export function parseConsumeResetCreditResponse(value: unknown): ResetCreditOutcome {
-	if (!isRecord(value) || !isResetCreditOutcome(value.outcome)) {
-		throw new Error("invalid reset-credit consume response");
+	// Backend responds with { code: "reset" | "nothing_to_reset" | "no_credit" | "already_redeemed", windows_reset }.
+	// Older/unknown deployments may use `outcome` with camelCase values, so accept both spellings.
+	if (!isRecord(value)) throw new Error("invalid reset-credit consume response");
+	const outcome = normalizeConsumeOutcome(value.code ?? value.outcome);
+	if (!outcome) throw new Error("invalid reset-credit consume response");
+	return outcome;
+}
+
+function normalizeConsumeOutcome(value: unknown): ResetCreditOutcome | undefined {
+	if (typeof value !== "string") return undefined;
+	switch (value) {
+		case "reset":
+			return "reset";
+		case "nothing_to_reset":
+		case "nothingToReset":
+			return "nothingToReset";
+		case "no_credit":
+		case "noCredit":
+			return "noCredit";
+		case "already_redeemed":
+		case "alreadyRedeemed":
+			return "alreadyRedeemed";
+		default:
+			return undefined;
 	}
-	return value.outcome;
 }
 
 interface CurlRequestOptions {
@@ -159,7 +182,7 @@ function curlRequest(
 			} else if (code === 0) {
 				finish(() => resolve(stdout));
 			} else {
-				rejectOnce(new Error(`curl exit ${code}: ${stderr.trim() || stdout.slice(0, 160).trim()}`));
+				rejectOnce(new Error(formatCurlFailure(code, stderr, stdout)));
 			}
 		});
 		signal?.addEventListener("abort", onAbort, { once: true });
@@ -232,13 +255,6 @@ function nonNegativeInteger(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
 }
 
-function isResetCreditOutcome(value: unknown): value is ResetCreditOutcome {
-	return value === "reset"
-		|| value === "nothingToReset"
-		|| value === "noCredit"
-		|| value === "alreadyRedeemed";
-}
-
 function createAbortError(): Error {
 	const error = new Error("curl request cancelled");
 	error.name = "AbortError";
@@ -251,6 +267,18 @@ function isAbortError(error: unknown): boolean {
 
 function curlEscape(value: string): string {
 	return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+/**
+ * curl exits non-zero on HTTP errors (`--fail-with-body`) and prints the error to
+ * stderr while the response body lands on stdout; surface both so backend
+ * validation messages are not lost.
+ */
+function formatCurlFailure(code: number | null, stderr: string, stdout: string): string {
+	const status = stderr.trim() || `curl exit ${code ?? "unknown"}`;
+	const body = stdout.trim().replace(/\s+/g, " ");
+	if (!body) return status;
+	return `${status}; response body: ${body.length > 300 ? `${body.slice(0, 300)}…` : body}`;
 }
 
 function describeError(error: unknown): string {

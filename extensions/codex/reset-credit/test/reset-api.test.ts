@@ -7,13 +7,14 @@ import {
 } from "../src/reset-api.ts";
 
 test("builds the reset-credit payload using the backend field names", () => {
+	// Mirrors codex-rs/backend-client: the idempotency key is `redeem_request_id`.
 	assert.deepEqual(
-		buildConsumeResetCreditPayload({ idempotencyKey: "attempt-1", creditId: "credit-1" }),
-		{ idempotency_key: "attempt-1", credit_id: "credit-1" },
+		buildConsumeResetCreditPayload({ idempotencyKey: "redeem-123", creditId: "credit-1" }),
+		{ redeem_request_id: "redeem-123", credit_id: "credit-1" },
 	);
 	assert.deepEqual(
-		buildConsumeResetCreditPayload({ idempotencyKey: "attempt-2" }),
-		{ idempotency_key: "attempt-2" },
+		buildConsumeResetCreditPayload({ idempotencyKey: "redeem-456" }),
+		{ redeem_request_id: "redeem-456" },
 	);
 });
 
@@ -79,12 +80,20 @@ test("keeps null expiry explicit and rejects invalid timestamps", () => {
 	assert.equal(result.credits[3]!.expires_at, 1788895070);
 });
 
-test("accepts every documented consume outcome and rejects unknown outcomes", () => {
-	for (const outcome of ["reset", "nothingToReset", "noCredit", "alreadyRedeemed"] as const) {
-		assert.equal(parseConsumeResetCreditResponse({ outcome }), outcome);
-	}
+test("parses the backend consume `code` values and legacy `outcome` values", () => {
+	assert.equal(parseConsumeResetCreditResponse({ code: "reset", windows_reset: 2 }), "reset");
+	assert.equal(parseConsumeResetCreditResponse({ code: "nothing_to_reset" }), "nothingToReset");
+	assert.equal(parseConsumeResetCreditResponse({ code: "no_credit" }), "noCredit");
+	assert.equal(parseConsumeResetCreditResponse({ code: "already_redeemed" }), "alreadyRedeemed");
+	// Legacy camelCase spellings remain accepted.
+	assert.equal(parseConsumeResetCreditResponse({ outcome: "reset" }), "reset");
+	assert.equal(parseConsumeResetCreditResponse({ outcome: "nothingToReset" }), "nothingToReset");
 	assert.throws(
-		() => parseConsumeResetCreditResponse({ outcome: "unexpected" }),
+		() => parseConsumeResetCreditResponse({ code: "unexpected" }),
+		/invalid reset-credit consume response/,
+	);
+	assert.throws(
+		() => parseConsumeResetCreditResponse({}),
 		/invalid reset-credit consume response/,
 	);
 });

@@ -1,10 +1,11 @@
-import { DynamicBorder, type KeybindingsManager, type Theme } from "@earendil-works/pi-coding-agent";
+import { DynamicBorder, type Theme } from "@earendil-works/pi-coding-agent";
 import {
 	Container,
 	SelectList,
 	Spacer,
 	Text,
 	type Component,
+	type KeybindingsManager,
 	type SelectItem,
 	type SelectListLayoutOptions,
 	type SelectListTheme,
@@ -27,6 +28,7 @@ export class ResetCreditPicker extends Container {
 	private readonly credits: ResetCredit[];
 	private readonly now: Date;
 	private readonly theme: Theme;
+	private readonly keybindings: KeybindingsManager;
 	private readonly onDone: (result: ResetPickerResult) => void;
 	private selectedIndex: number | null = null;
 	private stage: "select" | "confirm" = "select";
@@ -36,13 +38,14 @@ export class ResetCreditPicker extends Container {
 		credits: ResetCredit[],
 		now: Date,
 		theme: Theme,
-		_keybindings: KeybindingsManager,
+		keybindings: KeybindingsManager,
 		onDone: (result: ResetPickerResult) => void,
 	) {
 		super();
 		this.credits = credits;
 		this.now = now;
 		this.theme = theme;
+		this.keybindings = keybindings;
 		this.onDone = onDone;
 		this.rebuild();
 	}
@@ -62,14 +65,16 @@ export class ResetCreditPicker extends Container {
 			return;
 		}
 
-		// Confirm stage: enter confirms, escape returns to selection.
-		if (data === "enter") {
+		// Confirm stage: confirm consumes, cancel returns to the selection.
+		// Raw terminal input ("\r", "\x1b") must be matched through the app keybindings,
+		// never compared against "enter"/"escape" literals.
+		if (this.keybindings.matches(data, "tui.select.confirm")) {
 			const index = this.selectedIndex ?? 0;
 			const credit = this.credits[index];
 			if (credit) this.onDone({ creditId: credit.id });
-		} else if (data === "escape") {
+		} else if (this.keybindings.matches(data, "tui.select.cancel")) {
+			// Keep selectedIndex so the list reopens on the same credit.
 			this.stage = "select";
-			this.selectedIndex = null;
 			this.rebuild();
 		}
 	}
@@ -114,6 +119,10 @@ export class ResetCreditPicker extends Container {
 			this.selectTheme(),
 			this.selectLayout(),
 		);
+		// Coming back from the confirm stage: restore the highlighted credit.
+		if (this.selectedIndex !== null && items[this.selectedIndex]) {
+			this.selectList.setSelectedIndex(this.selectedIndex);
+		}
 		this.selectList.onSelect = (item) => {
 			const index = items.findIndex((it) => it.value === item.value);
 			if (index >= 0 && this.credits[index]) {
