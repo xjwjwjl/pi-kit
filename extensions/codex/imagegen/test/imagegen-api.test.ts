@@ -9,10 +9,16 @@ import {
   generateCodexImage,
   generateCodexImageBatch,
   isCodexModel,
+  loadReferenceImages,
   MAX_CODEX_IMAGE_BATCH_COUNT,
+  DEFAULT_CODEX_IMAGE_SIZE,
+  MAX_IMAGE_BYTES,
+  MAX_REFERENCE_IMAGES,
   parseCodexImageResponse,
+  resolveCodexImageEditUrl,
   resolveCodexImageGenerationUrl,
   resolveImageOutputRelativePath,
+  validateCodexImageSize,
 } from "../src/imagegen-api.ts";
 
 const AUTH = {
@@ -26,6 +32,11 @@ test("identifies only the Codex Responses provider", () => {
   assert.equal(isCodexModel({ provider: "openai-codex", api: "openai-responses" }), false);
   assert.equal(isCodexModel({ provider: "openai", api: "openai-codex-responses" }), false);
   assert.equal(isCodexModel(undefined), false);
+});
+
+test("enforces the 20 MiB image limit and 25-image batch limit", () => {
+  assert.equal(MAX_IMAGE_BYTES, 20 * 1024 * 1024);
+  assert.equal(MAX_CODEX_IMAGE_BATCH_COUNT, 25);
 });
 
 test("resolves the Codex Images generation endpoint from provider base URLs", () => {
@@ -46,17 +57,45 @@ test("resolves the Codex Images generation endpoint from provider base URLs", ()
   assert.throws(() => resolveCodexImageGenerationUrl("not a URL"), /Invalid/);
 });
 
-test("builds single-image requests for Flare by default and Sunburst on selection", () => {
+test("builds single-image requests for Sunburst by default and Flare on selection", () => {
   assert.deepEqual(buildCodexImageRequest("  A paper-cut landscape  "), {
-    model: "gpt-image-2.5-flare",
+    model: "gpt-image-2.5-sunburst",
     prompt: "A paper-cut landscape",
     n: 1,
-    quality: "medium",
+    quality: "high",
     size: "auto",
   });
-  assert.equal(buildCodexImageRequest("A detailed portrait", "sunburst").model, "gpt-image-2.5-sunburst");
+  assert.equal(DEFAULT_CODEX_IMAGE_SIZE, "auto");
+  assert.equal(buildCodexImageRequest("A horizontal landscape", "sunburst", "high", [], "1536x1024").size, "1536x1024");
+  assert.equal(buildCodexImageRequest("A detailed portrait", "flare").model, "gpt-image-2.5-flare");
+  assert.equal(buildCodexImageRequest("A detailed portrait", "sunburst", "high").quality, "high");
   assert.throws(() => buildCodexImageRequest("  "), /must not be empty/);
+  assert.equal(validateCodexImageSize("1024x1536"), "1024x1536");
+  assert.equal(validateCodexImageSize("3840x2160"), "3840x2160");
+  assert.throws(() => validateCodexImageSize("1920x1080"), /multiples of 16/);
+  assert.throws(() => validateCodexImageSize("512x512"), /between 655360 and 8294400/);
+  assert.throws(() => validateCodexImageSize("4096x1024"), /must not exceed 3840/);
+  assert.throws(() => validateCodexImageSize("3840x1024"), /aspect ratio/);
+  assert.throws(() => validateCodexImageSize("landscape"), /WIDTHxHEIGHT/);
   assert.throws(() => buildCodexImageRequest("x".repeat(20_001)), /character limit/);
+});
+
+test("rejects unsupported explicit sizes before sending a request", async () => {
+  let fetchCalled = false;
+  await assert.rejects(
+    generateCodexImage({
+      prompt: "A horizontal landscape",
+      size: "1920x1080",
+      cwd: tmpdir(),
+      auth: AUTH,
+      fetchImpl: async () => {
+        fetchCalled = true;
+        return new Response("{}", { status: 200 });
+      },
+    }),
+    /multiples of 16/,
+  );
+  assert.equal(fetchCalled, false);
 });
 
 test("runs count requests concurrently, each requesting one image", async () => {
@@ -67,12 +106,12 @@ test("runs count requests concurrently, each requesting one image", async () => 
   let started = 0;
   let releaseGate!: () => void;
   const gate = new Promise<void>((resolveGate) => { releaseGate = resolveGate; });
-  const timeout = setTimeout(releaseGate, 1_000);
+  const timeout = setTimeout(releaseGate, 5_000);
   const requestBodies: Record<string, unknown>[] = [];
 
   try {
     const batch = await generateCodexImageBatch({
-      prompt: "Four apple icons",
+      prompt: "Red apple icon options",
       count: MAX_CODEX_IMAGE_BATCH_COUNT,
       outputPath: "art/hero.png",
       cwd,
@@ -100,16 +139,14 @@ test("runs count requests concurrently, each requesting one image", async () => 
 
     assert.equal(maxActive, MAX_CODEX_IMAGE_BATCH_COUNT);
     assert.equal(requestBodies.length, MAX_CODEX_IMAGE_BATCH_COUNT);
-    assert.ok(requestBodies.every((body) => body.n === 1 && body.prompt === "Four apple icons"));
+    assert.ok(requestBodies.every((body) => body.n === 1 && body.prompt === "Red apple icon options" && body.quality === "high"));
     assert.equal(batch.requestedCount, MAX_CODEX_IMAGE_BATCH_COUNT);
     assert.equal(batch.images.length, MAX_CODEX_IMAGE_BATCH_COUNT);
     assert.deepEqual(batch.failures, []);
-    assert.deepEqual(batch.images.map((image) => image.relativePath), [
-      "art/hero-01.png",
-      "art/hero-02.png",
-      "art/hero-03.png",
-      "art/hero-04.png",
-    ]);
+    assert.deepEqual(
+      batch.images.map((image) => image.relativePath),
+      Array.from({ length: MAX_CODEX_IMAGE_BATCH_COUNT }, (_, index) => `art/hero-${String(index + 1).padStart(2, "0")}.png`),
+    );
     for (const image of batch.images) {
       assert.deepEqual(await readFile(join(cwd, image.relativePath)), imageBytes);
     }
@@ -132,7 +169,7 @@ test("rejects counts above the batch limit before sending requests", async () =>
         return new Response("{}", { status: 200 });
       },
     }),
-    /integer from 1 to 4/,
+    /integer from 1 to 25/,
   );
   assert.equal(fetchCalled, false);
 });
@@ -318,10 +355,10 @@ test("sends an authenticated request and saves/returns the generated image", asy
     assert.equal(headers.get("originator"), "pi");
     assert.equal(headers.get("x-codex-image-turn-id"), "fixed-test-id");
     assert.deepEqual(JSON.parse(String(requestInit?.body)), {
-      model: "gpt-image-2.5-flare",
+      model: "gpt-image-2.5-sunburst",
       prompt: "A blue bird",
       n: 1,
-      quality: "medium",
+      quality: "high",
       size: "auto",
     });
 
@@ -355,4 +392,107 @@ test("surfaces useful authorization and quota errors", async () => {
     }),
     /unauthorized \(HTTP 401\).*\/login openai-codex/,
   );
+});
+
+test("resolves the Codex Images edits endpoint from provider base URLs", () => {
+  assert.equal(
+    resolveCodexImageEditUrl("https://chatgpt.com/backend-api/codex/responses"),
+    "https://chatgpt.com/backend-api/codex/images/edits",
+  );
+  assert.throws(() => resolveCodexImageEditUrl("https://example.com/backend-api"), /chatgpt.com/);
+});
+
+test("includes reference images in edit requests", () => {
+  const body = buildCodexImageRequest("A blue bird", "sunburst", "high", [
+    "data:image/png;base64,AAAA",
+    "data:image/jpeg;base64,BBBB",
+  ]);
+  assert.deepEqual(body.images, [
+    { image_url: "data:image/png;base64,AAAA" },
+    { image_url: "data:image/jpeg;base64,BBBB" },
+  ]);
+  assert.equal("images" in buildCodexImageRequest("A blue bird"), false);
+});
+
+test("loads reference images as data URLs and rejects unsafe paths", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "codex-imagegen-ref-test-"));
+  const outside = await mkdtemp(join(tmpdir(), "codex-imagegen-ref-outside-"));
+  const refBytes = Buffer.from("reference-png-bytes");
+
+  try {
+    await writeFile(join(cwd, "hero.png"), refBytes);
+    await writeFile(join(cwd, "notes.txt"), refBytes);
+
+    assert.deepEqual(await loadReferenceImages(["hero.png"], cwd), [
+      `data:image/png;base64,${refBytes.toString("base64")}`,
+    ]);
+    assert.deepEqual(await loadReferenceImages([], cwd), []);
+
+    await assert.rejects(loadReferenceImages(["missing.png"], cwd), /not found/);
+    await assert.rejects(loadReferenceImages(["/etc/passwd"], cwd), /must be relative/);
+    await assert.rejects(loadReferenceImages(["../outside.png"], cwd), /parent directory/);
+    await assert.rejects(loadReferenceImages(["notes.txt"], cwd), /must be \.png/);
+    await assert.rejects(
+      loadReferenceImages(Array.from({ length: MAX_REFERENCE_IMAGES + 1 }, () => "hero.png"), cwd),
+      /At most/,
+    );
+
+    await writeFile(join(outside, "secret.png"), refBytes);
+    try {
+      await symlink(join(outside, "secret.png"), join(cwd, "link.png"), "file");
+      await assert.rejects(loadReferenceImages(["link.png"], cwd), /remain inside the current working directory/);
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+      if (code === "EPERM" || code === "EACCES" || code === "ENOTSUP" || code === "UNKNOWN") {
+        // Platform does not permit creating a file symlink; skip the escape check.
+      } else {
+        throw error;
+      }
+    }
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("posts to the edits endpoint when reference images are provided", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "codex-imagegen-edit-test-"));
+  const imageBytes = Buffer.from("edited-png-payload");
+  const refBytes = Buffer.from("reference-png-payload");
+  let requestUrl = "";
+  let requestInit: RequestInit | undefined;
+
+  try {
+    await writeFile(join(cwd, "hero.png"), refBytes);
+
+    const result = await generateCodexImage({
+      prompt: "The hero in a neon city",
+      referenceImagePaths: ["hero.png"],
+      cwd,
+      auth: AUTH,
+      now: () => new Date("2026-09-24T12:34:56.000Z"),
+      createId: () => "edit-test-id",
+      fetchImpl: async (input, init) => {
+        requestUrl = String(input);
+        requestInit = init;
+        return new Response(
+          JSON.stringify({ data: [{ b64_json: imageBytes.toString("base64") }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+
+    assert.equal(requestUrl, "https://chatgpt.com/backend-api/codex/images/edits");
+    assert.deepEqual(JSON.parse(String(requestInit?.body)), {
+      model: "gpt-image-2.5-sunburst",
+      prompt: "The hero in a neon city",
+      n: 1,
+      quality: "high",
+      size: "auto",
+      images: [{ image_url: `data:image/png;base64,${refBytes.toString("base64")}` }],
+    });
+    assert.deepEqual(await readFile(join(cwd, result.relativePath)), imageBytes);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
 });

@@ -6,17 +6,25 @@ Experimental model-callable image generation for Pi sessions using the `openai-c
 
 - Registers `codex_image_gen` for `openai-codex` / `openai-codex-responses` sessions only.
 - Uses Pi's request-time provider authentication; no API key or token is stored by this extension.
-- Sends one prompt to Codex's Images generation endpoint using `gpt-image-2.5-flare` by default, `quality: medium`, and `size: auto`.
-- Accepts `count` from 1 to 4 (default 1). It sends one `n: 1` request per image and starts all requested calls concurrently, then returns all successful images and paths.
+- Sends one prompt to Codex's Images generation endpoint using `gpt-image-2.5-sunburst` by default, `size: auto`, and `quality` defaulting to `high`; decoded output is capped at 20 MiB per image.
+- Accepts `count` from 1 to 25 (default 1). It sends one `n: 1` request per image and starts all requested calls concurrently, then returns all successful images and paths.
+- Accepts `quality` as `low`, `medium`, or `high` (default `high`); the model passes it only when the user asks for a specific fidelity level. Higher quality produces more detail but takes longer and can cost more quota.
+- Accepts `size` as `auto` (default) or a custom `WIDTHxHEIGHT`. Custom dimensions must use multiples of 16, have no edge over 3840 px, an aspect ratio no wider/taller than 3:1, and contain 655,360–8,294,400 pixels. For example, `1536x1024` and `1024x1536` are valid; standard `1920x1080` is rejected because 1080 is not divisible by 16. `auto` or a custom request does not guarantee every returned image will match the requested size exactly; the expanded TUI shows measured PNG dimensions, not the requested size.
+- Accepts `reference_images`, up to 8 workspace-relative `.png` / `.jpg` / `.jpeg` / `.webp` paths (20 MiB each) that condition the generation on the user's own files, such as a character three-view. Reference calls post to Codex's `/codex/images/edits` endpoint with data-URL images; text-only calls use `/codex/images/generations`. Absolute paths, parent traversal, symlink escapes, unsupported extensions, and oversized files are rejected before any request is sent.
 - For partial failures, successful images are kept and the tool reports which calls failed; it does not retry automatically.
-- Switch the model with `/codex-image-model flare|sunburst`; use `/codex-image-model status` (or omit the argument) to see the current choice. The selection lasts for the current Pi process and resets to Flare after restart or reload.
+- The model-callable `model` parameter accepts `flare` or `sunburst`; omitted, it uses Sunburst by default or the current `/codex-image-model` selection. The `/codex-image-model flare|sunburst` command and `/codex-image-model status` remain available; command selection lasts for the current Pi process and resets to Sunburst after restart or reload.
 - Saves each PNG to `generated-images/` under the current working directory by default and returns it as an image tool result.
 - If the user explicitly requests a destination, the model may pass a workspace-relative PNG file path through `output_path`. For batches, numbered suffixes (`-01`, `-02`, etc.) are inserted before `.png`. Absolute paths, parent traversal, and non-PNG extensions are rejected.
-- Only creates new images. Reference-image editing, output options, and streaming previews are not included in this MVP.
+- TUI display is custom-rendered: collapsed, the call shows `codex_image_gen ×N` and the prompt; after completion its title adds elapsed time in muted, non-bold text (for example `· 2.3s`). A successful result adds no status line (a `⚠ n/N images` line appears only when some requests failed). Expanding adds a blank separator, an aligned field block (`refs` when used, `model` with the full model id and quality), and one clickable (when the terminal supports OSC 8 links) `├`/`└  <relative path>  [<W×H>]` line per image, plus failure reasons. Elapsed time covers the whole tool call from entry through batch completion, including auth resolution and output saving. The model still receives the full path list in the tool result text. Generated images are not shown as inline TUI previews yet.
+- Creates new renders, and can condition them on reference images; in-place editing of an existing file, output options, and streaming previews are not included in this MVP.
 
 ## Important
 
-Codex's image endpoint is an implementation-specific backend interface, not a stable public API contract. Availability, model support, and quota are controlled by the signed-in OpenAI/Codex account and may change. Each generated image is a separate request and can consume quota. The tool instructions limit calls to explicit image-generation requests; use `count` only when the user asks for multiple options.
+Codex's image endpoint is an implementation-specific backend interface, not a stable public API contract. Availability, model support, reference-image support, and quota are controlled by the signed-in OpenAI/Codex account and may change. Each generated image is a separate request and can consume quota; large counts may be rate-limited. The tool instructions limit calls to explicit image-generation requests; use `count` only when the user asks for multiple options.
+
+## TODO
+
+- [ ] Add inline previews of generated images to the custom TUI result renderer. Until implemented, results show status and file details only; generated files are still saved normally.
 
 ## Verification
 
@@ -24,4 +32,4 @@ Codex's image endpoint is an implementation-specific backend interface, not a st
 npm run check
 ```
 
-For a live smoke test, load the Codex extension package and explicitly ask the `openai-codex` model to create an image. This sends a real image-generation request and may consume account quota. Check the generated file under `generated-images/` (or the explicitly requested workspace-relative path) and the tool result preview in a terminal that supports inline images.
+For a live smoke test, load the Codex extension package and explicitly ask the `openai-codex` model to create an image. This sends a real image-generation request and may consume account quota. Check the generated file under `generated-images/` (or the explicitly requested workspace-relative path) and the tool result summary; inline TUI previews are a future TODO.

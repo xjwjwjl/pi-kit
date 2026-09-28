@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, realpath, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export const CODEX_IMAGE_MODELS = {
@@ -8,11 +8,25 @@ export const CODEX_IMAGE_MODELS = {
 } as const;
 export type CodexImageModelChoice = keyof typeof CODEX_IMAGE_MODELS;
 export type CodexImageModel = (typeof CODEX_IMAGE_MODELS)[CodexImageModelChoice];
-export const DEFAULT_CODEX_IMAGE_MODEL: CodexImageModelChoice = "flare";
+export const DEFAULT_CODEX_IMAGE_MODEL: CodexImageModelChoice = "sunburst";
+
+export const CODEX_IMAGE_QUALITIES = ["low", "medium", "high"] as const;
+export type CodexImageQuality = (typeof CODEX_IMAGE_QUALITIES)[number];
+export const DEFAULT_CODEX_IMAGE_QUALITY: CodexImageQuality = "high";
+export const DEFAULT_CODEX_IMAGE_SIZE = "auto";
 export const CODEX_IMAGE_GENERATION_TOOL = "codex_image_gen";
-export const MAX_IMAGE_BYTES = 50 * 1024 * 1024;
+export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 export const MAX_PROMPT_LENGTH = 20_000;
-export const MAX_CODEX_IMAGE_BATCH_COUNT = 4;
+export const MAX_CODEX_IMAGE_BATCH_COUNT = 25;
+export const MAX_REFERENCE_IMAGES = 8;
+export const MAX_REFERENCE_IMAGE_BYTES = 20 * 1024 * 1024;
+
+const REFERENCE_IMAGE_MIME_TYPES: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+};
 
 const MAX_BASE64_LENGTH = Math.ceil(MAX_IMAGE_BYTES / 3) * 4;
 const MAX_RESPONSE_BYTES = MAX_BASE64_LENGTH + 1_000_000;
@@ -30,11 +44,18 @@ export interface GeneratedCodexImage {
   mimeType: "image/png";
   relativePath: string;
   model: CodexImageModel;
+  dimensions: { width: number; height: number } | null;
 }
 
 export interface GenerateCodexImageOptions {
   prompt: string;
   model?: CodexImageModelChoice;
+  quality?: CodexImageQuality;
+  size?: string;
+  /** Workspace-relative reference image paths that switch the call to the edits endpoint. */
+  referenceImagePaths?: string[];
+  /** Pre-encoded data URLs, used internally by the batch path to avoid re-reading files. */
+  referenceImages?: string[];
   outputPath?: string;
   cwd: string;
   auth: CodexImageAuth;
@@ -67,6 +88,14 @@ export function isCodexModel(
 }
 
 export function resolveCodexImageGenerationUrl(baseUrl: string): string {
+  return resolveCodexImageUrl(baseUrl, "generations");
+}
+
+export function resolveCodexImageEditUrl(baseUrl: string): string {
+  return resolveCodexImageUrl(baseUrl, "edits");
+}
+
+function resolveCodexImageUrl(baseUrl: string, resource: "generations" | "edits"): string {
   let url: URL;
   try {
     url = new URL(baseUrl);
@@ -91,15 +120,41 @@ export function resolveCodexImageGenerationUrl(baseUrl: string): string {
     path = `${path}/codex`;
   }
 
-  url.pathname = `${path}/images/generations`;
+  url.pathname = `${path}/images/${resource}`;
   url.search = "";
   url.hash = "";
   return url.toString();
 }
 
+export function validateCodexImageSize(size: string): string {
+  if (size === "auto") return size;
+  const match = /^(\d{3,4})x(\d{3,4})$/u.exec(size);
+  if (!match) throw new Error('Image size must be "auto" or WIDTHxHEIGHT, such as 1536x1024');
+
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (width > 3840 || height > 3840) {
+    throw new Error("Image size edges must not exceed 3840 pixels");
+  }
+  if (width % 16 !== 0 || height % 16 !== 0) {
+    throw new Error("Image size width and height must both be multiples of 16");
+  }
+  if (Math.max(width, height) / Math.min(width, height) > 3) {
+    throw new Error("Image size aspect ratio must be between 1:3 and 3:1");
+  }
+  const pixels = width * height;
+  if (pixels < 655_360 || pixels > 8_294_400) {
+    throw new Error("Image size must contain between 655360 and 8294400 pixels");
+  }
+  return size;
+}
+
 export function buildCodexImageRequest(
   prompt: string,
   model: CodexImageModelChoice = DEFAULT_CODEX_IMAGE_MODEL,
+  quality: CodexImageQuality = DEFAULT_CODEX_IMAGE_QUALITY,
+  referenceImages: string[] = [],
+  size: string = DEFAULT_CODEX_IMAGE_SIZE,
 ): Record<string, unknown> {
   const normalizedPrompt = prompt.trim();
   if (!normalizedPrompt) throw new Error("Image prompt must not be empty");
@@ -111,9 +166,69 @@ export function buildCodexImageRequest(
     model: CODEX_IMAGE_MODELS[model],
     prompt: normalizedPrompt,
     n: 1,
-    quality: "medium",
-    size: "auto",
+    quality,
+    size: validateCodexImageSize(size),
+    ...(referenceImages.length > 0
+      ? { images: referenceImages.map((imageUrl) => ({ image_url: imageUrl })) }
+      : {}),
   };
+}
+
+/**
+ * Reads workspace-relative reference images and encodes them as data URLs for the edits endpoint.
+ * Rejects absolute paths, parent traversal, symlink escapes, oversized files, and unsupported types.
+ */
+export async function loadReferenceImages(paths: string[], cwd: string): Promise<string[]> {
+  if (paths.length === 0) return [];
+  if (paths.length > MAX_REFERENCE_IMAGES) {
+    throw new Error(`At most ${MAX_REFERENCE_IMAGES} reference images are supported`);
+  }
+
+  const root = resolve(cwd);
+  const realRoot = await realpath(root);
+  const dataUrls: string[] = [];
+
+  for (const rawPath of paths) {
+    if (typeof rawPath !== "string" || !rawPath.trim()) {
+      throw new Error("Reference image paths must be non-empty strings");
+    }
+    const relativePath = rawPath.replace(/\\/gu, "/");
+    if (relativePath.startsWith("/") || /^[A-Za-z]:/u.test(relativePath) || isAbsolute(rawPath)) {
+      throw new Error("Reference image paths must be relative to the current working directory");
+    }
+    const segments = relativePath.split("/");
+    if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
+      throw new Error("Reference image paths must not contain empty, current, or parent directory segments");
+    }
+
+    const extension = extname(relativePath).toLowerCase();
+    const mimeType = REFERENCE_IMAGE_MIME_TYPES[extension];
+    if (!mimeType) {
+      throw new Error("Reference images must be .png, .jpg, .jpeg, or .webp files");
+    }
+
+    let realFile: string;
+    try {
+      realFile = await realpath(resolve(root, relativePath));
+    } catch {
+      throw new Error(`Reference image not found: ${relativePath}`);
+    }
+    assertPathWithin(realRoot, realFile);
+
+    const info = await stat(realFile);
+    if (!info.isFile()) throw new Error(`Reference image is not a file: ${relativePath}`);
+    if (info.size > MAX_REFERENCE_IMAGE_BYTES) {
+      throw new Error(`Reference image exceeds the ${MAX_REFERENCE_IMAGE_BYTES / (1024 * 1024)} MB limit: ${relativePath}`);
+    }
+
+    const bytes = await readFile(realFile);
+    if (bytes.length > MAX_REFERENCE_IMAGE_BYTES) {
+      throw new Error(`Reference image exceeds the ${MAX_REFERENCE_IMAGE_BYTES / (1024 * 1024)} MB limit: ${relativePath}`);
+    }
+    dataUrls.push(`data:${mimeType};base64,${bytes.toString("base64")}`);
+  }
+
+  return dataUrls;
 }
 
 export function resolveImageOutputRelativePath(
@@ -184,10 +299,18 @@ export async function generateCodexImage(
 ): Promise<GeneratedCodexImage> {
   const prompt = options.prompt.trim();
   const modelChoice = options.model ?? DEFAULT_CODEX_IMAGE_MODEL;
-  const requestBody = buildCodexImageRequest(prompt, modelChoice);
+  const qualityChoice = options.quality ?? DEFAULT_CODEX_IMAGE_QUALITY;
+  const sizeChoice = options.size ?? DEFAULT_CODEX_IMAGE_SIZE;
   if (!options.auth.apiKey.trim()) throw new Error("No OpenAI Codex authentication token is available");
 
-  const url = resolveCodexImageGenerationUrl(options.auth.baseUrl);
+  const cwd = resolve(options.cwd);
+  const referenceImages =
+    options.referenceImages ?? (await loadReferenceImages(options.referenceImagePaths ?? [], cwd));
+  const requestBody = buildCodexImageRequest(prompt, modelChoice, qualityChoice, referenceImages, sizeChoice);
+  const url =
+    referenceImages.length > 0
+      ? resolveCodexImageEditUrl(options.auth.baseUrl)
+      : resolveCodexImageGenerationUrl(options.auth.baseUrl);
   const headers = new Headers();
   for (const [name, value] of Object.entries(options.auth.headers ?? {})) {
     if (value === null) headers.delete(name);
@@ -204,7 +327,6 @@ export async function generateCodexImage(
   if (!safeId) throw new Error("Could not create a safe image filename");
   const timestamp = (options.now ?? (() => new Date()))().toISOString().replace(/[:.]/gu, "-");
   const relativePath = resolveImageOutputRelativePath(options.outputPath, timestamp, safeId);
-  const cwd = resolve(options.cwd);
   const outputPath = resolve(cwd, relativePath);
   const outputDirectory = dirname(outputPath);
   assertPathWithin(cwd, outputPath);
@@ -255,6 +377,7 @@ export async function generateCodexImage(
     mimeType: "image/png",
     relativePath,
     model: CODEX_IMAGE_MODELS[modelChoice],
+    dimensions: readPngDimensions(bytes),
   };
 }
 
@@ -267,6 +390,7 @@ export async function generateCodexImageBatch(
   }
 
   const model = options.model ?? DEFAULT_CODEX_IMAGE_MODEL;
+  const size = validateCodexImageSize(options.size ?? DEFAULT_CODEX_IMAGE_SIZE);
   const timestamp = (options.now ?? (() => new Date()))().toISOString().replace(/[:.]/gu, "-");
   const rawBatchId = (options.createId ?? randomUUID)();
   const batchId = rawBatchId.replace(/[^A-Za-z0-9_-]/gu, "").slice(0, 48);
@@ -277,6 +401,8 @@ export async function generateCodexImageBatch(
     count === 1 ? basePath : addBatchIndex(basePath, index + 1),
   );
   const cwd = resolve(options.cwd);
+  const referenceImages =
+    options.referenceImages ?? (await loadReferenceImages(options.referenceImagePaths ?? [], cwd));
   const destinations = outputPaths.map((path) => {
     const absolutePath = resolve(cwd, path);
     assertPathWithin(cwd, absolutePath);
@@ -294,6 +420,9 @@ export async function generateCodexImageBatch(
       generateCodexImage({
         prompt: options.prompt,
         model,
+        quality: options.quality,
+        size,
+        referenceImages,
         outputPath: path,
         cwd: options.cwd,
         auth: options.auth,
@@ -413,6 +542,12 @@ async function readResponseText(response: Response, maxBytes: number): Promise<s
       // The stream may already have released its reader after cancellation.
     }
   }
+}
+
+function readPngDimensions(bytes: Buffer): { width: number; height: number } | null {
+  if (bytes.length < 24) return null;
+  if (bytes[0] !== 0x89 || bytes[1] !== 0x50 || bytes[2] !== 0x4e || bytes[3] !== 0x47) return null;
+  return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
 }
 
 function formatHttpError(status: number, responseText: string): string {

@@ -8,7 +8,7 @@
 | `reset-credit/` | `reset-credit/index.ts` | `/codex-reset-credit` 查询/消费 reset credit |
 | `fast-mode/` | `fast-mode/index.ts` | `openai-codex` 请求默认 `service_tier: priority` |
 | `websearch/` | `websearch/index.ts` | Codex 模型原生 `web_search` 能力 |
-| `imagegen/` | `imagegen/index.ts` | Codex OAuth 生图（默认 Flare，支持并发生成 1–4 张；`/codex-image-model` 切换模型） |
+| `imagegen/` | `imagegen/index.ts` | Codex OAuth 生图（默认 Sunburst，支持并发生成 1–25 张；`/codex-image-model` 切换模型） |
 
 ## 注册
 

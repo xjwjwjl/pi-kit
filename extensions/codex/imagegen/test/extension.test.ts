@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import test from "node:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -53,6 +53,13 @@ const CODEX_MODEL = {
   baseUrl: "https://chatgpt.com/backend-api",
 };
 
+function assertDetailsWithDuration(actual: Record<string, unknown>, expected: Record<string, unknown>): void {
+  const { durationMs, ...details } = actual;
+  assert.equal(typeof durationMs, "number");
+  assert.ok((durationMs as number) >= 0);
+  assert.deepEqual(details, expected);
+}
+
 test("registers and activates the image tool only for Codex models", () => {
   const harness = createHarness();
   assert.equal(harness.tool.name, "codex_image_gen");
@@ -69,7 +76,7 @@ test("registers and activates the image tool only for Codex models", () => {
   assert.equal(harness.activeTools.includes("codex_image_gen"), false);
 });
 
-test("defaults to Flare and lets the command switch to Sunburst", async () => {
+test("defaults to Sunburst and lets the command switch to Flare", async () => {
   const harness = createHarness();
   const command = harness.commands.get("codex-image-model");
   assert.ok(command);
@@ -86,11 +93,11 @@ test("defaults to Flare and lets the command switch to Sunburst", async () => {
     { value: "status", label: "status" },
   ]);
   await command.handler("status", ctx);
-  assert.match(notifications.at(-1)!, /flare \(gpt-image-2\.5-flare\)/);
-
-  await command.handler("sunburst", ctx);
-  await command.handler("status", ctx);
   assert.match(notifications.at(-1)!, /sunburst \(gpt-image-2\.5-sunburst\)/);
+
+  await command.handler("flare", ctx);
+  await command.handler("status", ctx);
+  assert.match(notifications.at(-1)!, /flare \(gpt-image-2\.5-flare\)/);
 });
 
 test("uses Pi's resolved Codex credentials and returns the generated image", async () => {
@@ -139,13 +146,23 @@ test("uses Pi's resolved Codex credentials and returns the generated image", asy
       data: imageBytes.toString("base64"),
       mimeType: "image/png",
     });
-    assert.deepEqual(result.details, {
+    assertDetailsWithDuration(result.details, {
       requestedCount: 1,
       generatedCount: 1,
       paths: ["generated-images/image-2026-09-24T12-34-56-000Z-extension-test-id.png"],
+      dimensions: [null],
+      referenceImages: [],
+      quality: "high",
+      size: "auto",
       failures: [],
-      model: "gpt-image-2.5-flare",
+      model: "gpt-image-2.5-sunburst",
     });
+    const callLines = harness.tool.renderCall(
+      { prompt: "A small orange fox" },
+      { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+      { toolCallId: "call-1", expanded: false },
+    ).render(120);
+    assert.match(callLines[0]?.trimEnd() ?? "", /^codex_image_gen ×1 · (?:\d+ms|\d+\.\d+s)$/);
     assert.deepEqual(
       await readFile(join(cwd, "generated-images/image-2026-09-24T12-34-56-000Z-extension-test-id.png")),
       imageBytes,
@@ -155,16 +172,21 @@ test("uses Pi's resolved Codex credentials and returns the generated image", asy
   }
 });
 
-test("uses Sunburst for image generation after the command switches models", async () => {
+test("uses the selected Flare model after the command switches away from the default", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "codex-imagegen-sunburst-test-"));
   const imageBytes = Buffer.from("sunburst-test-image");
   const requestedModels: unknown[] = [];
+  const requestedQualities: unknown[] = [];
+  const requestedSizes: unknown[] = [];
 
   try {
     const harness = createHarness({
       createId: () => "sunburst-test-id",
       fetchImpl: async (_input, init) => {
-        requestedModels.push(JSON.parse(String(init?.body)).model);
+        const body = JSON.parse(String(init?.body));
+        requestedModels.push(body.model);
+        requestedQualities.push(body.quality);
+        requestedSizes.push(body.size);
         return new Response(JSON.stringify({ data: [{ b64_json: imageBytes.toString("base64") }] }), {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -173,11 +195,11 @@ test("uses Sunburst for image generation after the command switches models", asy
     });
     const command = harness.commands.get("codex-image-model");
     const ctx = { hasUI: true, ui: { notify() {} } };
-    await command.handler("sunburst", ctx);
+    await command.handler("flare", ctx);
 
     const result = await harness.tool.execute(
-      "call-sunburst",
-      { prompt: "A detailed image", count: 2, output_path: "designs/sunburst-poster" },
+      "call-flare",
+      { prompt: "A detailed image", count: 2, quality: "high", size: "1536x1024", output_path: "designs/flare-poster" },
       undefined,
       undefined,
       {
@@ -191,21 +213,27 @@ test("uses Sunburst for image generation after the command switches models", asy
       },
     );
 
-    assert.deepEqual(requestedModels, ["gpt-image-2.5-sunburst", "gpt-image-2.5-sunburst"]);
-    assert.deepEqual(result.details, {
+    assert.deepEqual(requestedModels, ["gpt-image-2.5-flare", "gpt-image-2.5-flare"]);
+    assert.deepEqual(requestedQualities, ["high", "high"]);
+    assert.deepEqual(requestedSizes, ["1536x1024", "1536x1024"]);
+    assertDetailsWithDuration(result.details, {
       requestedCount: 2,
       generatedCount: 2,
-      paths: ["designs/sunburst-poster-01.png", "designs/sunburst-poster-02.png"],
+      paths: ["designs/flare-poster-01.png", "designs/flare-poster-02.png"],
+      dimensions: [null, null],
+      referenceImages: [],
+      quality: "high",
+      size: "1536x1024",
       failures: [],
-      model: "gpt-image-2.5-sunburst",
+      model: "gpt-image-2.5-flare",
     });
     assert.equal(result.content.filter((item: { type: string }) => item.type === "image").length, 2);
     assert.deepEqual(
-      await readFile(join(cwd, "designs/sunburst-poster-01.png")),
+      await readFile(join(cwd, "designs/flare-poster-01.png")),
       imageBytes,
     );
     assert.deepEqual(
-      await readFile(join(cwd, "designs/sunburst-poster-02.png")),
+      await readFile(join(cwd, "designs/flare-poster-02.png")),
       imageBytes,
     );
   } finally {
@@ -236,4 +264,55 @@ test("refuses to call the Images API for non-Codex models", async () => {
     /only with the openai-codex Responses model/,
   );
   assert.equal(resolvedAuth, false);
+});
+
+test("passes workspace-relative reference images to the edits endpoint", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "codex-imagegen-ref-ext-test-"));
+  const imageBytes = Buffer.from("ref-extension-image");
+  const refBytes = Buffer.from("reference-bytes");
+  let requestUrl = "";
+  let requestBody: Record<string, unknown> | undefined;
+
+  try {
+    await writeFile(join(cwd, "three-view.png"), refBytes);
+    const harness = createHarness({
+      fetchImpl: async (input, init) => {
+        requestUrl = String(input);
+        requestBody = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify({ data: [{ b64_json: imageBytes.toString("base64") }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const result = await harness.tool.execute(
+      "call-ref",
+      { prompt: "The hero standing in a neon city", model: "flare", reference_images: ["three-view.png"], size: "1024x1536" },
+      undefined,
+      undefined,
+      {
+        model: CODEX_MODEL,
+        cwd,
+        modelRegistry: {
+          async getApiKeyAndHeaders() {
+            return { ok: true, apiKey: "test-token", baseUrl: "https://chatgpt.com/backend-api" };
+          },
+        },
+      },
+    );
+
+    assert.equal(requestUrl, "https://chatgpt.com/backend-api/codex/images/edits");
+    assert.equal(requestBody?.model, "gpt-image-2.5-flare");
+    assert.deepEqual(requestBody?.images, [
+      { image_url: `data:image/png;base64,${refBytes.toString("base64")}` },
+    ]);
+    assert.equal(requestBody?.size, "1024x1536");
+    assert.equal(result.details.generatedCount, 1);
+    assert.deepEqual(result.details.referenceImages, ["three-view.png"]);
+    assert.equal(result.details.model, "gpt-image-2.5-flare");
+    assert.equal(result.details.size, "1024x1536");
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
 });
