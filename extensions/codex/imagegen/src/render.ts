@@ -124,7 +124,11 @@ export function renderCodexImageCall(
   const elapsed = typeof durationMs === "number" && Number.isFinite(durationMs)
     ? theme.fg("muted", ` · ${formatDuration(durationMs)}`)
     : "";
-  container.addChild(new Text(`${title}${elapsed}`, 0, 0));
+  const referenceCount = args?.reference_images?.length ?? 0;
+  const references = referenceCount > 0
+    ? theme.fg("muted", ` · ${referenceCount} ref${referenceCount === 1 ? "" : "s"}`)
+    : "";
+  container.addChild(new Text(`${title}${references}${elapsed}`, 0, 0));
 
   const prompt = typeof args?.prompt === "string" ? args.prompt.trim() : "";
   if (prompt) {
@@ -164,23 +168,40 @@ export function renderCodexImageResult(
   }
 
   if (options.expanded) {
-    const fields: Array<[string, string]> = [];
     const references = details.referenceImages ?? [];
-    if (references.length > 0) fields.push(["refs", references.join(", ")]);
     const model = [details.model, details.quality]
       .filter((part): part is string => Boolean(part))
       .join(" · ");
-    if (model) fields.push(["model", model]);
+    const labels = [
+      ...(references.length > 0 ? ["refs"] : []),
+      ...(model ? ["model"] : []),
+    ];
+    const labelWidth = Math.max(0, ...labels.map((label) => visibleWidth(label)));
+    // Keep reference and generated-image tree branches indented by one space.
+    const treeIndent = 1;
 
-    const labelWidth = Math.max(0, ...fields.map(([label]) => visibleWidth(label)));
-    for (const [label, value] of fields) {
+    if (references.length > 1) {
+      container.addChild(new Text(theme.fg("muted", "refs"), 0, 0));
+      references.forEach((path, index) => {
+        const branch = index === references.length - 1 ? "└ " : "├ ";
+        const linkedPath = linkPath(theme.fg("accent", path), path, context.cwd);
+        container.addChild(
+          new Text(theme.fg("muted", branch) + linkedPath, treeIndent, 0),
+        );
+      });
+    } else if (references.length === 1) {
+      const linkedPath = linkPath(theme.fg("accent", references[0]), references[0], context.cwd);
       container.addChild(
-        new Text(`${theme.fg("muted", label.padEnd(labelWidth))}   ${theme.fg("text", value)}`, 0, 0),
+        new Text(`${theme.fg("muted", "refs".padEnd(labelWidth))}   ${linkedPath}`, 0, 0),
       );
     }
 
-    // Center the tree branch under the field labels.
-    const treeIndent = Math.max(0, Math.floor((labelWidth - 1) / 2));
+    if (model) {
+      container.addChild(
+        new Text(`${theme.fg("muted", "model".padEnd(labelWidth))}   ${theme.fg("text", model)}`, 0, 0),
+      );
+    }
+
     const dimensions = details.dimensions ?? [];
     paths.forEach((path, index) => {
       const branch = index === paths.length - 1 ? "└ " : "├ ";

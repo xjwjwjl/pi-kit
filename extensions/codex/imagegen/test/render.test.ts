@@ -50,7 +50,7 @@ function expectedTree(details: CodexImageGenDetails): string[] {
   return details.paths.map((path, index) => {
     const branch = index === details.paths.length - 1 ? "└ " : "├ ";
     const actualSize = details.dimensions?.[index];
-    return `  ${branch}${path}${actualSize ? `  [${actualSize}]` : ""}`;
+    return ` ${branch}${path}${actualSize ? `  [${actualSize}]` : ""}`;
   });
 }
 
@@ -71,7 +71,7 @@ test("renders the title and the prompt identically in both states", () => {
     quality: "high",
     reference_images: ["refs/hero.png"],
   } as CodexImageGenArgs;
-  const expected = ["codex_image_gen ×6", "a cyberpunk cat"];
+  const expected = ["codex_image_gen ×6 · 1 ref", "a cyberpunk cat"];
   assert.deepEqual(renderCodexImageCall(args, theme, { expanded: false }).render(120).map((line) => line.trimEnd()), expected);
   assert.deepEqual(renderCodexImageCall(args, theme, { expanded: true }).render(120).map((line) => line.trimEnd()), expected);
 });
@@ -79,6 +79,24 @@ test("renders the title and the prompt identically in both states", () => {
 test("shows elapsed time in the call title after generation completes", () => {
   const call = renderCodexImageCall({ prompt: "a cat", count: 1 }, theme, context, 2_345);
   assert.equal(call.render(120)[0]?.trimEnd(), "codex_image_gen ×1 · 2.3s");
+});
+
+test("shows reference count beside elapsed time in the call title", () => {
+  const oneReference = renderCodexImageCall(
+    { count: 3, reference_images: ["refs/hero.png"] },
+    theme,
+    context,
+    61_000,
+  );
+  assert.equal(oneReference.render(120)[0]?.trimEnd(), "codex_image_gen ×3 · 1 ref · 1m 01s");
+
+  const multipleReferences = renderCodexImageCall(
+    { count: 3, reference_images: ["refs/hero.png", "refs/side.png"] },
+    theme,
+    context,
+    61_000,
+  );
+  assert.equal(multipleReferences.render(120)[0]?.trimEnd(), "codex_image_gen ×3 · 2 refs · 1m 01s");
 });
 
 test("renders elapsed time in muted color without bold styling", () => {
@@ -123,7 +141,9 @@ test("expanded result shows refs, model, and actual image sizes without a time f
   const lines = renderResult(details, true);
   assert.deepEqual(lines, [
     "",
-    "refs    refs/hero.png, refs/side.png",
+    "refs",
+    " ├ refs/hero.png",
+    " └ refs/side.png",
     "model   gpt-image-2.5-flare · high",
     ...expectedTree(details),
   ]);
@@ -143,7 +163,7 @@ test("does not show requested size, but keeps actual dimensions", () => {
   const lines = renderResult(details, true);
   assert.equal(lines.some((line) => line.startsWith("size")), false);
   assert.equal(lines.some((line) => line.startsWith("time")), false);
-  assert.ok(lines.includes("  └ generated-images/landscape.png  [1536x1008]"));
+  assert.ok(lines.includes(" └ generated-images/landscape.png  [1536x1008]"));
 });
 
 test("expanded result omits the refs field when there are no references", () => {
