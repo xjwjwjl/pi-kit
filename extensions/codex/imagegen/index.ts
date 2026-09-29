@@ -65,7 +65,7 @@ const IMAGE_TOOL_PARAMETERS = Type.Object(
       Type.Array(Type.String({ maxLength: 1_000 }), {
         maxItems: MAX_REFERENCE_IMAGES,
         description:
-          "Optional paths to existing PNG/JPG/JPEG/WebP files inside the current workspace (relative paths, including ./, or absolute paths). Paths resolving outside the workspace are rejected. Use these to condition generation on the user's own references, such as a character sheet or three-view (1-8 images). Omit for text-only generation.",
+          "Optional paths to existing local PNG/JPG/JPEG/WebP files (relative to the current working directory, including ./, or absolute). Use only references the user provided or explicitly identified, such as a character sheet or three-view (1-8 images). Omit for text-only generation.",
       }),
     ),
     output_path: Type.Optional(
@@ -152,15 +152,15 @@ export function createCodexImageGenExtension(
       name: CODEX_IMAGE_GENERATION_TOOL,
       label: "Codex Image Gen",
       description:
-        "Generate one or more images with a selectable GPT Image model through the signed-in OpenAI Codex account. The optional model parameter accepts flare or sunburst; it defaults to Sunburst unless changed with /codex-image-model. Count defaults to 1 and is limited to 25; requests run concurrently. Each generated image is limited to 20 MiB. Quality defaults to high and accepts low, medium, or high. Size defaults to auto; optionally pass a valid WIDTHxHEIGHT to request exact dimensions. Pass reference_images (relative or absolute PNG/JPG/WebP paths that resolve inside the current workspace) to condition generation on the user's own reference files, such as a character three-view; otherwise generation is text-only. Saves to generated-images/ by default, or to an explicitly requested workspace-relative PNG path.",
+        "Generate one or more images with a selectable GPT Image model through the signed-in OpenAI Codex account. The optional model parameter accepts flare or sunburst; it defaults to Sunburst unless changed with /codex-image-model. Count defaults to 1 and is limited to 25; requests run concurrently. Each generated image is limited to 20 MiB. Quality defaults to high and accepts low, medium, or high. Size defaults to auto; optionally pass a valid WIDTHxHEIGHT to request exact dimensions. Pass reference_images (relative or absolute paths to existing PNG/JPG/WebP files on the local filesystem) to condition generation on references the user provided or explicitly identified; otherwise generation is text-only. Saves to generated-images/ by default, or to an explicitly requested workspace-relative PNG path.",
       promptSnippet: "Create a new image only when the user explicitly asks for image generation.",
       promptGuidelines: [
         "Only call codex_image_gen when the user explicitly requests creating a new image; each generated image consumes Codex image-generation quota.",
         "Use count when the user requests multiple options: use their exact count, up to 25; if they ask for multiple without a number, use 4. Otherwise omit count (default 1).",
         "Use model only when the user explicitly requests Flare or Sunburst; otherwise omit it (default Sunburst, or the choice made with /codex-image-model).",
         "Write a clear, structured prompt that preserves the user's request: specify the subject/action, scene, composition, visual style, lighting/palette, and requested aspect ratio when relevant. Do not invent unrequested text, logos, props, or story details.",
-        "When the user provides or refers to a workspace reference image (such as a character three-view), pass its path through reference_images. Preserve identity-defining features by default; only change clothing, hairstyle, colors, pose, or other design details when explicitly requested. Describe the requested scene, background, and changes in the prompt.",
-        "Use reference_images only with files that already exist in the workspace; do not invent paths.",
+        "When the user provides or refers to a local reference image (such as a character three-view), pass its path through reference_images. Preserve identity-defining features by default; only change clothing, hairstyle, colors, pose, or other design details when explicitly requested. Describe the requested scene, background, and changes in the prompt.",
+        "Use reference_images only with existing files the user provided or explicitly identified; do not invent paths.",
         "Use quality only when the user explicitly requests a fidelity level: 'low', 'medium', or 'high'. Otherwise omit it (default high).",
         "Use size only when the user requests a specific resolution or orientation; otherwise omit it (default auto). For explicit dimensions, use a valid WIDTHxHEIGHT with both sides multiples of 16, each side at most 3840, total pixels 655360-8294400, and aspect ratio at most 3:1. Align the prompt's composition with the requested orientation. The standard 1920x1080 is invalid under these constraints; do not claim exact 1080p.",
         "After generating, inspect the returned image(s) against the user's requirements. If there is a clear mismatch, make at most one automatic retry with a targeted prompt correction. If it still misses or the requested change is ambiguous, show the result and ask the user before further retries; do not retry for merely subjective minor differences.",

@@ -52,7 +52,7 @@ export interface GenerateCodexImageOptions {
   model?: CodexImageModelChoice;
   quality?: CodexImageQuality;
   size?: string;
-  /** Workspace-relative reference image paths that switch the call to the edits endpoint. */
+  /** Local reference image paths, resolved relative to cwd unless absolute. */
   referenceImagePaths?: string[];
   /** Pre-encoded data URLs, used internally by the batch path to avoid re-reading files. */
   referenceImages?: string[];
@@ -175,8 +175,8 @@ export function buildCodexImageRequest(
 }
 
 /**
- * Reads reference images within the workspace and encodes them as data URLs for the edits endpoint.
- * Accepts absolute and relative paths, while rejecting workspace escapes, oversized files, and unsupported types.
+ * Reads local reference images and encodes them as data URLs for the edits endpoint.
+ * Accepts paths anywhere on the local filesystem, while enforcing type and size limits.
  */
 export async function loadReferenceImages(paths: string[], cwd: string): Promise<string[]> {
   if (paths.length === 0) return [];
@@ -185,7 +185,6 @@ export async function loadReferenceImages(paths: string[], cwd: string): Promise
   }
 
   const root = resolve(cwd);
-  const realRoot = await realpath(root);
   const dataUrls: string[] = [];
 
   for (const rawPath of paths) {
@@ -216,12 +215,6 @@ export async function loadReferenceImages(paths: string[], cwd: string): Promise
     } catch {
       throw new Error(`Reference image not found: ${normalizedPath}`);
     }
-    assertPathWithin(
-      realRoot,
-      realFile,
-      "Reference image must remain inside the current working directory",
-    );
-
     const info = await stat(realFile);
     if (!info.isFile()) throw new Error(`Reference image is not a file: ${normalizedPath}`);
     if (info.size > MAX_REFERENCE_IMAGE_BYTES) {
@@ -508,14 +501,10 @@ async function assertOutputFileAvailable(outputPath: string): Promise<void> {
   }
 }
 
-function assertPathWithin(
-  root: string,
-  candidate: string,
-  errorMessage = "Image output path must remain inside the current working directory",
-): void {
+function assertPathWithin(root: string, candidate: string): void {
   const relativePath = relative(root, candidate);
   if (relativePath === ".." || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {
-    throw new Error(errorMessage);
+    throw new Error("Image output path must remain inside the current working directory");
   }
 }
 

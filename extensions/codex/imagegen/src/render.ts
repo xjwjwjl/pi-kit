@@ -38,11 +38,11 @@ export interface CodexImageGenArgs {
 /** Subset of pi's tool render context used by these renderers. */
 export interface CodexImageGenRenderContext {
   expanded?: boolean;
+  executionStarted?: boolean;
   isError?: boolean;
   cwd?: string;
 }
 
-const COLLAPSED_PROMPT_LINES = 1;
 const EXPANDED_PROMPT_LINES = 12;
 const RESULT_INDENT = 2;
 /** `truncateToWidth` appends a full SGR reset, which would cancel the tool row's background. */
@@ -123,7 +123,9 @@ export function renderCodexImageCall(
   const title = theme.fg("toolTitle", theme.bold(`codex_image_gen ×${count}`));
   const elapsed = typeof durationMs === "number" && Number.isFinite(durationMs)
     ? theme.fg("muted", ` · ${formatDuration(durationMs)}`)
-    : "";
+    : context?.executionStarted && !context.isError
+      ? theme.fg("muted", " · Generating…")
+      : "";
   const referenceCount = args?.reference_images?.length ?? 0;
   const references = referenceCount > 0
     ? theme.fg("muted", ` · ${referenceCount} ref${referenceCount === 1 ? "" : "s"}`)
@@ -131,10 +133,9 @@ export function renderCodexImageCall(
   container.addChild(new Text(`${title}${references}${elapsed}`, 0, 0));
 
   const prompt = typeof args?.prompt === "string" ? args.prompt.trim() : "";
-  if (prompt) {
-    const maxLines = context?.expanded ? EXPANDED_PROMPT_LINES : COLLAPSED_PROMPT_LINES;
+  if (prompt && context?.expanded) {
     container.addChild(
-      new WrappedText(prompt, (value) => theme.fg("text", value), 0, maxLines),
+      new WrappedText(prompt, (value) => theme.fg("text", value), 0, EXPANDED_PROMPT_LINES),
     );
   }
 

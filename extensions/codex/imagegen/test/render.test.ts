@@ -64,21 +64,47 @@ function renderResult(details: CodexImageGenDetails, expanded: boolean, isError 
     .map((line) => line.trimEnd());
 }
 
-test("renders the title and the prompt identically in both states", () => {
+test("collapsed call shows only its title while expanded call also shows the prompt", () => {
   const args = {
     prompt: "a cyberpunk cat",
     count: 6,
     quality: "high",
     reference_images: ["refs/hero.png"],
   } as CodexImageGenArgs;
-  const expected = ["codex_image_gen ×6 · 1 ref", "a cyberpunk cat"];
-  assert.deepEqual(renderCodexImageCall(args, theme, { expanded: false }).render(120).map((line) => line.trimEnd()), expected);
-  assert.deepEqual(renderCodexImageCall(args, theme, { expanded: true }).render(120).map((line) => line.trimEnd()), expected);
+  const title = ["codex_image_gen ×6 · 1 ref"];
+  assert.deepEqual(renderCodexImageCall(args, theme, { expanded: false }).render(120).map((line) => line.trimEnd()), title);
+  assert.deepEqual(
+    renderCodexImageCall(args, theme, { expanded: true }).render(120).map((line) => line.trimEnd()),
+    [...title, "a cyberpunk cat"],
+  );
 });
 
 test("shows elapsed time in the call title after generation completes", () => {
-  const call = renderCodexImageCall({ prompt: "a cat", count: 1 }, theme, context, 2_345);
+  const call = renderCodexImageCall(
+    { prompt: "a cat", count: 1 },
+    theme,
+    { ...context, executionStarted: true },
+    2_345,
+  );
   assert.equal(call.render(120)[0]?.trimEnd(), "codex_image_gen ×1 · 2.3s");
+});
+
+test("shows a Generating placeholder while the tool is running", () => {
+  const call = renderCodexImageCall(
+    { count: 1, reference_images: ["refs/hero.png"] },
+    theme,
+    { ...context, executionStarted: true },
+  );
+  assert.equal(call.render(120)[0]?.trimEnd(), "codex_image_gen ×1 · 1 ref · Generating…");
+});
+
+test("does not show the Generating placeholder for failed calls", () => {
+  const call = renderCodexImageCall(
+    { count: 1 },
+    theme,
+    { ...context, executionStarted: true, isError: true },
+  );
+  assert.equal(call.render(120)[0]?.trimEnd(), "codex_image_gen ×1");
 });
 
 test("shows reference count beside elapsed time in the call title", () => {
@@ -118,13 +144,12 @@ test("renders elapsed time in muted color without bold styling", () => {
   assert.deepEqual(boldCalls, ["codex_image_gen ×1"]);
 });
 
-test("limits the collapsed prompt to one line without resetting the tool row background", () => {
-  const prompt =
-    "Create ONE standalone Chinese chat sticker / meme image featuring a cute Shiba Inu. Transparent background, die-cut white sticker outline, bold clean cartoon illustration, expressive face and pose, centered composition.";
-  const call = renderCodexImageCall({ prompt, count: 8 }, theme, context);
+test("caps expanded prompts at twelve lines without resetting the tool row background", () => {
+  const prompt = Array.from({ length: 20 }, (_, index) => `Prompt line ${index + 1}`).join("\n");
+  const call = renderCodexImageCall({ prompt, count: 8 }, theme, { ...context, expanded: true });
   const lines = call.render(72);
-  assert.equal(lines.length, 2);
-  assert.ok(lines.some((line) => line.includes("…")));
+  assert.equal(lines.length, 13);
+  assert.ok(lines.at(-1)?.includes("…"));
   assert.equal(lines.join("\n").includes("\x1b[0m"), false);
 });
 
