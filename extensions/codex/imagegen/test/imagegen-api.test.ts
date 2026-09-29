@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import test from "node:test";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 
 import {
   buildCodexImageRequest,
@@ -414,7 +414,7 @@ test("includes reference images in edit requests", () => {
   assert.equal("images" in buildCodexImageRequest("A blue bird"), false);
 });
 
-test("loads reference images as data URLs and rejects unsafe paths", async () => {
+test("loads in-workspace reference paths and rejects workspace escapes", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "codex-imagegen-ref-test-"));
   const outside = await mkdtemp(join(tmpdir(), "codex-imagegen-ref-outside-"));
   const refBytes = Buffer.from("reference-png-bytes");
@@ -422,25 +422,29 @@ test("loads reference images as data URLs and rejects unsafe paths", async () =>
   try {
     await writeFile(join(cwd, "hero.png"), refBytes);
     await writeFile(join(cwd, "notes.txt"), refBytes);
+    await writeFile(join(outside, "secret.png"), refBytes);
 
-    assert.deepEqual(await loadReferenceImages(["hero.png"], cwd), [
-      `data:image/png;base64,${refBytes.toString("base64")}`,
-    ]);
+    const expectedDataUrl = `data:image/png;base64,${refBytes.toString("base64")}`;
+    assert.deepEqual(await loadReferenceImages(["hero.png"], cwd), [expectedDataUrl]);
+    assert.deepEqual(await loadReferenceImages(["./hero.png"], cwd), [expectedDataUrl]);
+    assert.deepEqual(await loadReferenceImages([join(cwd, "hero.png")], cwd), [expectedDataUrl]);
     assert.deepEqual(await loadReferenceImages([], cwd), []);
 
     await assert.rejects(loadReferenceImages(["missing.png"], cwd), /not found/);
-    await assert.rejects(loadReferenceImages(["/etc/passwd"], cwd), /must be relative/);
-    await assert.rejects(loadReferenceImages(["../outside.png"], cwd), /parent directory/);
+    await assert.rejects(loadReferenceImages([join(outside, "secret.png")], cwd), /must remain inside/);
+    await assert.rejects(
+      loadReferenceImages([relative(cwd, join(outside, "secret.png"))], cwd),
+      /must remain inside/,
+    );
     await assert.rejects(loadReferenceImages(["notes.txt"], cwd), /must be \.png/);
     await assert.rejects(
       loadReferenceImages(Array.from({ length: MAX_REFERENCE_IMAGES + 1 }, () => "hero.png"), cwd),
       /At most/,
     );
 
-    await writeFile(join(outside, "secret.png"), refBytes);
     try {
       await symlink(join(outside, "secret.png"), join(cwd, "link.png"), "file");
-      await assert.rejects(loadReferenceImages(["link.png"], cwd), /remain inside the current working directory/);
+      await assert.rejects(loadReferenceImages(["link.png"], cwd), /Reference image must remain inside the current working directory/);
     } catch (error) {
       const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
       if (code === "EPERM" || code === "EACCES" || code === "ENOTSUP" || code === "UNKNOWN") {

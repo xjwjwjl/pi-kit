@@ -175,8 +175,8 @@ export function buildCodexImageRequest(
 }
 
 /**
- * Reads workspace-relative reference images and encodes them as data URLs for the edits endpoint.
- * Rejects absolute paths, parent traversal, symlink escapes, oversized files, and unsupported types.
+ * Reads reference images within the workspace and encodes them as data URLs for the edits endpoint.
+ * Accepts absolute and relative paths, while rejecting workspace escapes, oversized files, and unsupported types.
  */
 export async function loadReferenceImages(paths: string[], cwd: string): Promise<string[]> {
   if (paths.length === 0) return [];
@@ -192,16 +192,19 @@ export async function loadReferenceImages(paths: string[], cwd: string): Promise
     if (typeof rawPath !== "string" || !rawPath.trim()) {
       throw new Error("Reference image paths must be non-empty strings");
     }
-    const relativePath = rawPath.replace(/\\/gu, "/");
-    if (relativePath.startsWith("/") || /^[A-Za-z]:/u.test(relativePath) || isAbsolute(rawPath)) {
-      throw new Error("Reference image paths must be relative to the current working directory");
+    const normalizedPath = rawPath.replace(/\\/gu, "/");
+    const hasWindowsDrivePrefix = /^[A-Za-z]:/u.test(normalizedPath);
+    if (hasWindowsDrivePrefix && process.platform !== "win32") {
+      throw new Error("Windows reference paths are not supported on this platform");
     }
-    const segments = relativePath.split("/");
-    if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
-      throw new Error("Reference image paths must not contain empty, current, or parent directory segments");
+    if (hasWindowsDrivePrefix && !isAbsolute(normalizedPath)) {
+      throw new Error("Drive-relative reference paths are not supported");
     }
 
-    const extension = extname(relativePath).toLowerCase();
+    const candidatePath = isAbsolute(normalizedPath)
+      ? resolve(normalizedPath)
+      : resolve(root, normalizedPath);
+    const extension = extname(normalizedPath).toLowerCase();
     const mimeType = REFERENCE_IMAGE_MIME_TYPES[extension];
     if (!mimeType) {
       throw new Error("Reference images must be .png, .jpg, .jpeg, or .webp files");
@@ -209,21 +212,25 @@ export async function loadReferenceImages(paths: string[], cwd: string): Promise
 
     let realFile: string;
     try {
-      realFile = await realpath(resolve(root, relativePath));
+      realFile = await realpath(candidatePath);
     } catch {
-      throw new Error(`Reference image not found: ${relativePath}`);
+      throw new Error(`Reference image not found: ${normalizedPath}`);
     }
-    assertPathWithin(realRoot, realFile);
+    assertPathWithin(
+      realRoot,
+      realFile,
+      "Reference image must remain inside the current working directory",
+    );
 
     const info = await stat(realFile);
-    if (!info.isFile()) throw new Error(`Reference image is not a file: ${relativePath}`);
+    if (!info.isFile()) throw new Error(`Reference image is not a file: ${normalizedPath}`);
     if (info.size > MAX_REFERENCE_IMAGE_BYTES) {
-      throw new Error(`Reference image exceeds the ${MAX_REFERENCE_IMAGE_BYTES / (1024 * 1024)} MB limit: ${relativePath}`);
+      throw new Error(`Reference image exceeds the ${MAX_REFERENCE_IMAGE_BYTES / (1024 * 1024)} MB limit: ${normalizedPath}`);
     }
 
     const bytes = await readFile(realFile);
     if (bytes.length > MAX_REFERENCE_IMAGE_BYTES) {
-      throw new Error(`Reference image exceeds the ${MAX_REFERENCE_IMAGE_BYTES / (1024 * 1024)} MB limit: ${relativePath}`);
+      throw new Error(`Reference image exceeds the ${MAX_REFERENCE_IMAGE_BYTES / (1024 * 1024)} MB limit: ${normalizedPath}`);
     }
     dataUrls.push(`data:${mimeType};base64,${bytes.toString("base64")}`);
   }
@@ -501,10 +508,14 @@ async function assertOutputFileAvailable(outputPath: string): Promise<void> {
   }
 }
 
-function assertPathWithin(root: string, candidate: string): void {
+function assertPathWithin(
+  root: string,
+  candidate: string,
+  errorMessage = "Image output path must remain inside the current working directory",
+): void {
   const relativePath = relative(root, candidate);
   if (relativePath === ".." || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {
-    throw new Error("Image output path must remain inside the current working directory");
+    throw new Error(errorMessage);
   }
 }
 

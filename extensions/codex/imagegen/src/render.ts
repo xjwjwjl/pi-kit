@@ -42,7 +42,7 @@ export interface CodexImageGenRenderContext {
   cwd?: string;
 }
 
-const COLLAPSED_PROMPT_LINES = 2;
+const COLLAPSED_PROMPT_LINES = 1;
 const EXPANDED_PROMPT_LINES = 12;
 const RESULT_INDENT = 2;
 /** `truncateToWidth` appends a full SGR reset, which would cancel the tool row's background. */
@@ -192,13 +192,13 @@ export function renderCodexImageResult(
     } else if (references.length === 1) {
       const linkedPath = linkPath(theme.fg("accent", references[0]), references[0], context.cwd);
       container.addChild(
-        new Text(`${theme.fg("muted", "refs".padEnd(labelWidth))}   ${linkedPath}`, 0, 0),
+        new Text(`${theme.fg("muted", "refs".padEnd(labelWidth))}  ${linkedPath}`, 0, 0),
       );
     }
 
     if (model) {
       container.addChild(
-        new Text(`${theme.fg("muted", "model".padEnd(labelWidth))}   ${theme.fg("text", model)}`, 0, 0),
+        new Text(`${theme.fg("muted", "model".padEnd(labelWidth))}  ${theme.fg("text", model)}`, 0, 0),
       );
     }
 

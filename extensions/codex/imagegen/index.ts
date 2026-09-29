@@ -65,7 +65,7 @@ const IMAGE_TOOL_PARAMETERS = Type.Object(
       Type.Array(Type.String({ maxLength: 1_000 }), {
         maxItems: MAX_REFERENCE_IMAGES,
         description:
-          "Optional workspace-relative paths (PNG/JPG/JPEG/WebP) to reference images that condition the generation, such as a character sheet or three-view. Pass the user's own reference files when they provide them (1-8 images). Omit for text-only generation.",
+          "Optional paths to existing PNG/JPG/JPEG/WebP files inside the current workspace (relative paths, including ./, or absolute paths). Paths resolving outside the workspace are rejected. Use these to condition generation on the user's own references, such as a character sheet or three-view (1-8 images). Omit for text-only generation.",
       }),
     ),
     output_path: Type.Optional(
@@ -152,7 +152,7 @@ export function createCodexImageGenExtension(
       name: CODEX_IMAGE_GENERATION_TOOL,
       label: "Codex Image Gen",
       description:
-        "Generate one or more images with a selectable GPT Image model through the signed-in OpenAI Codex account. The optional model parameter accepts flare or sunburst; it defaults to Sunburst unless changed with /codex-image-model. Count defaults to 1 and is limited to 25; requests run concurrently. Each generated image is limited to 20 MiB. Quality defaults to high and accepts low, medium, or high. Size defaults to auto; optionally pass a valid WIDTHxHEIGHT to request exact dimensions. Pass reference_images (workspace-relative PNG/JPG/WebP paths) to condition generation on the user's own reference files, such as a character three-view; otherwise generation is text-only. Saves to generated-images/ by default, or to an explicitly requested workspace-relative PNG path.",
+        "Generate one or more images with a selectable GPT Image model through the signed-in OpenAI Codex account. The optional model parameter accepts flare or sunburst; it defaults to Sunburst unless changed with /codex-image-model. Count defaults to 1 and is limited to 25; requests run concurrently. Each generated image is limited to 20 MiB. Quality defaults to high and accepts low, medium, or high. Size defaults to auto; optionally pass a valid WIDTHxHEIGHT to request exact dimensions. Pass reference_images (relative or absolute PNG/JPG/WebP paths that resolve inside the current workspace) to condition generation on the user's own reference files, such as a character three-view; otherwise generation is text-only. Saves to generated-images/ by default, or to an explicitly requested workspace-relative PNG path.",
       promptSnippet: "Create a new image only when the user explicitly asks for image generation.",
       promptGuidelines: [
         "Only call codex_image_gen when the user explicitly requests creating a new image; each generated image consumes Codex image-generation quota.",

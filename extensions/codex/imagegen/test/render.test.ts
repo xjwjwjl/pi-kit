@@ -118,11 +118,12 @@ test("renders elapsed time in muted color without bold styling", () => {
   assert.deepEqual(boldCalls, ["codex_image_gen ×1"]);
 });
 
-test("truncated prompt lines carry no full SGR reset that would cancel the tool row background", () => {
+test("limits the collapsed prompt to one line without resetting the tool row background", () => {
   const prompt =
     "Create ONE standalone Chinese chat sticker / meme image featuring a cute Shiba Inu. Transparent background, die-cut white sticker outline, bold clean cartoon illustration, expressive face and pose, centered composition.";
   const call = renderCodexImageCall({ prompt, count: 8 }, theme, context);
   const lines = call.render(72);
+  assert.equal(lines.length, 2);
   assert.ok(lines.some((line) => line.includes("…")));
   assert.equal(lines.join("\n").includes("\x1b[0m"), false);
 });
@@ -144,7 +145,7 @@ test("expanded result shows refs, model, and actual image sizes without a time f
     "refs",
     " ├ refs/hero.png",
     " └ refs/side.png",
-    "model   gpt-image-2.5-flare · high",
+    "model  gpt-image-2.5-flare · high",
     ...expectedTree(details),
   ]);
   assert.equal(lines.some((line) => line.startsWith("size")), false);
@@ -170,7 +171,7 @@ test("expanded result omits the refs field when there are no references", () => 
   const details = batchDetails();
   assert.deepEqual(renderResult(details, true), [
     "",
-    "model   gpt-image-2.5-flare · high",
+    "model  gpt-image-2.5-flare · high",
     ...expectedTree(details),
   ]);
 });
@@ -185,7 +186,7 @@ test("reports partial failures and lists the failed request when expanded", () =
   assert.deepEqual(renderResult(details, true), [
     "",
     "⚠ 5/6 images",
-    "model   gpt-image-2.5-flare · high",
+    "model  gpt-image-2.5-flare · high",
     ...expectedTree(details),
     "  failed  #3  429 rate limited",
   ]);
@@ -240,7 +241,7 @@ test("renders a single image as one full-path tree line", () => {
   });
   assert.deepEqual(renderResult(details, true), [
     "",
-    "model   gpt-image-2.5-flare · high",
+    "model  gpt-image-2.5-flare · high",
     ...expectedTree(details),
   ]);
 });
@@ -254,7 +255,7 @@ test("renders full paths for images in different directories", () => {
   });
   assert.deepEqual(renderResult(details, true), [
     "",
-    "model   gpt-image-2.5-flare · high",
+    "model  gpt-image-2.5-flare · high",
     ...expectedTree(details),
   ]);
 });
