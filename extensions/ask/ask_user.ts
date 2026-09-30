@@ -140,10 +140,11 @@ function makeResult(
 	answers: AskUserAnswer[] = [],
 	cancelled = true,
 	error?: string,
-): { content: { type: "text"; text: string }[]; details: AskUserResult } {
+): { content: { type: "text"; text: string }[]; details: AskUserResult; isError?: boolean } {
 	return {
 		content: [{ type: "text", text: message }],
 		details: { title, description, questions, answers, cancelled, error },
+		...(error !== undefined ? { isError: true } : {}),
 	};
 }
 
