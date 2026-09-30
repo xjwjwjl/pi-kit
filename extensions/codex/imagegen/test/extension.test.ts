@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import test from "node:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import {
   createCodexImageGenExtension,
@@ -76,6 +77,63 @@ test("registers and activates the image tool only for Codex models", () => {
   assert.equal(harness.activeTools.includes("codex_image_gen"), false);
 });
 
+test("prompt policy allows explicit edits and defines reference roles and preservation constraints", () => {
+  const { tool } = createHarness();
+  const guidelines = tool.promptGuidelines.join("\n");
+
+  assert.match(tool.promptSnippet, /Generate or edit images into new files only when explicitly requested by the user/);
+  assert.match(guidelines, /explicitly requests image generation or editing/);
+  assert.match(tool.parameters.properties.prompt.description, /cannot modify the source in place/);
+  assert.match(guidelines, /1-based order and purpose/);
+  assert.match(guidelines, /requested changes and details that must remain unchanged/);
+  assert.match(guidelines, /For a local edit, change only requested elements and preserve all unrelated details, including pose and expression/);
+  assert.match(guidelines, /outputs generated for the current request when making a permitted correction/);
+  assert.match(tool.parameters.properties.reference_images.description, /outputs generated for the current request when making a permitted correction/);
+  assert.match(guidelines, /do not invent paths or select unrelated local images/);
+});
+
+test("prompt policy distinguishes same-prompt candidates from distinct design directions", () => {
+  const { tool } = createHarness();
+  const guidelines = tool.promptGuidelines.join("\n");
+  const count = tool.parameters.properties.count;
+
+  assert.equal(count.minimum, 1);
+  assert.equal(count.maximum, 25);
+  assert.match(count.description, /from the same prompt/);
+  assert.match(guidelines, /Use count only for multiple candidates from the same prompt/);
+  assert.match(guidelines, /or 4 if they request multiple without a number/);
+  assert.match(guidelines, /Otherwise omit count \(default 1\)/);
+  assert.match(guidelines, /For different styles, compositions, or design directions, use separate calls with distinct prompts/);
+  assert.match(guidelines, /keep the combined image count at the requested total/);
+});
+
+test("prompt policy bounds visual corrections and requires fresh output paths", () => {
+  const { tool } = createHarness();
+  const guidelines = tool.promptGuidelines.join("\n");
+
+  assert.match(guidelines, /at most one automatic correction round per user request/);
+  assert.match(guidelines, /correct only nonconforming images and keep acceptable results/);
+  assert.match(guidelines, /Use each affected output as a reference for local corrections and repeat the change\/preserve constraints/);
+  assert.match(guidelines, /Do not automatically retry authentication, access, rate-limit, or quota errors/);
+  assert.match(guidelines, /ask before further calls/);
+  assert.match(guidelines, /do not retry for subjective minor differences/);
+  assert.match(guidelines, /For corrections, choose a fresh PNG filename in the same directory as the requested destination/);
+  assert.match(guidelines, /never reuse an existing output path/);
+  assert.match(guidelines, /Otherwise omit output_path to use generated-images\//);
+  assert.match(tool.parameters.properties.output_path.description, /Existing files are never overwritten/);
+});
+
+test("prompt policy treats size as a target rather than measured output dimensions", () => {
+  const { tool } = createHarness();
+  const guidelines = tool.promptGuidelines.join("\n");
+
+  assert.match(tool.description, /request target dimensions, which the actual output may not match/);
+  assert.doesNotMatch(tool.description, /request exact dimensions/);
+  assert.match(tool.parameters.properties.size.description, /Actual output dimensions may differ/);
+  assert.match(guidelines, /target dimensions, not guaranteed output dimensions/);
+  assert.match(guidelines, /do not report the requested size as the actual size without verifying the saved file/);
+});
+
 test("defaults to Sunburst and lets the command switch to Flare", async () => {
   const harness = createHarness();
   const command = harness.commands.get("codex-image-model");
@@ -140,7 +198,13 @@ test("uses Pi's resolved Codex credentials and returns the generated image", asy
 
     assert.equal(authModel, CODEX_MODEL);
     assert.equal(result.content[0]?.type, "text");
-    assert.match((result.content[0] as { text: string }).text, /generated-images\//);
+    const summary = (result.content[0] as { text: string }).text;
+    assert.match(summary, /Saved: \.\/generated-images\//);
+    assert.ok(
+      summary.includes(
+        `Open: ${pathToFileURL(join(cwd, "generated-images/image-2026-09-24T12-34-56-000Z-extension-test-id.png")).href}`,
+      ),
+    );
     assert.deepEqual(result.content[1], {
       type: "image",
       data: imageBytes.toString("base64"),
@@ -149,7 +213,7 @@ test("uses Pi's resolved Codex credentials and returns the generated image", asy
     assertDetailsWithDuration(result.details, {
       requestedCount: 1,
       generatedCount: 1,
-      paths: ["generated-images/image-2026-09-24T12-34-56-000Z-extension-test-id.png"],
+      paths: ["./generated-images/image-2026-09-24T12-34-56-000Z-extension-test-id.png"],
       dimensions: [null],
       referenceImages: [],
       quality: "high",
@@ -216,10 +280,13 @@ test("uses the selected Flare model after the command switches away from the def
     assert.deepEqual(requestedModels, ["gpt-image-2.5-flare", "gpt-image-2.5-flare"]);
     assert.deepEqual(requestedQualities, ["high", "high"]);
     assert.deepEqual(requestedSizes, ["1536x1024", "1536x1024"]);
+    const summary = (result.content[0] as { text: string }).text;
+    assert.ok(summary.includes(`Open: ${pathToFileURL(join(cwd, "designs/flare-poster-01.png")).href}`));
+    assert.ok(summary.includes(`Open: ${pathToFileURL(join(cwd, "designs/flare-poster-02.png")).href}`));
     assertDetailsWithDuration(result.details, {
       requestedCount: 2,
       generatedCount: 2,
-      paths: ["designs/flare-poster-01.png", "designs/flare-poster-02.png"],
+      paths: ["./designs/flare-poster-01.png", "./designs/flare-poster-02.png"],
       dimensions: [null, null],
       referenceImages: [],
       quality: "high",
