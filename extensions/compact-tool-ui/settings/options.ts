@@ -1,25 +1,3 @@
-/**
- * When to keep showing a bash output tail preview under the collapsed row.
- *
- * `off`     - never preview output; the row keeps the one-line semantic summary.
- * `running` - preview while the command is still streaming.
- * `failed`  - preview only for failures (quiet on success, verbose when something breaks).
- * `all`     - preview in every outcome.
- */
-export type BashTailPreview = "off" | "running" | "failed" | "all";
-
-export const BASH_TAIL_PREVIEW_VALUES: readonly BashTailPreview[] = ["off", "running", "failed", "all"];
-
-export type BashDisplayOptions = {
-	tailPreview?: BashTailPreview;
-	previewLines?: number;
-};
-
-export const DEFAULT_BASH_DISPLAY_OPTIONS: Required<BashDisplayOptions> = {
-	tailPreview: "off",
-	previewLines: 2,
-};
-
 export type EditDisplayOptions = {
 	inlineDiffMaxLines?: number;
 };
@@ -50,7 +28,6 @@ export const DEFAULT_TOOL_RENDER_SHELL: ToolRenderShell = "self";
 
 /** Fully resolved options: every field defaults are applied, renderers read these directly. */
 export type EffectiveCompactToolUiOptions = {
-	bash: Required<BashDisplayOptions>;
 	edit: Required<EditDisplayOptions>;
 	renderShell: ToolRenderShell;
 };

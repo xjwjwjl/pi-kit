@@ -8,11 +8,17 @@
     "pi-extension"
   ],
   "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test",
+    "benchmark": "node test/benchmark.mjs"
+  },
   "license": "MIT",
   "author": "",
   "pi": {
     "extensions": [
-      "./ask_user.ts"
+      "./index.ts"
     ]
   },
   "peerDependencies": {
@@ -20,5 +26,13 @@
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "@earendil-works/pi-tui": "1.4.0",
+    "@types/node": "24.12.4",
+    "typebox": "1.3.27",
+    "typescript": "5.9.3"
   }
 }

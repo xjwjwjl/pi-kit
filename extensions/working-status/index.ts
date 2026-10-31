@@ -109,6 +109,10 @@ type TurnTokenDisplay = {
 const SLOW_FIRST_OUTPUT_WAIT_MS = 10_000;
 const DEFAULT_WORKING_MESSAGE = "Working";
 const REFRESH_MS = 250;
+// Stream deltas can arrive far faster than the status line can be read. Leading
+// renders stay immediate so the first output appears at once; the rest of a
+// burst is coalesced into one trailing render that still shows the final count.
+const STREAM_RENDER_THROTTLE_MS = 50;
 // Keep the final metrics visible briefly after the run settles before clearing.
 const FINAL_DISPLAY_MS = 3_000;
 // Below this the stream span is too short to derive a meaningful rate.
@@ -220,31 +224,21 @@ function estimateTokensFromTextRaw(text: string, kind: EstimateKind = "auto"): n
 
 // ── 3. Metric calculations ───────────────────────────────────────────
 
-function requestStartedAt(state: PulseState): number | null {
+/**
+ * Full request-to-first-output wait, using one origin for HTTP and WebSocket.
+ * Connection setup, pre-response queueing, and retries inside the provider call
+ * all count. message_start supplies the assistant timestamp when the provider
+ * does not expose before_provider_request; later headers must never rebase it.
+ */
+function outputMeasurementStartedAt(state: PulseState): number | null {
 	return state.requestStartedAt ?? state.messageStartedAt;
 }
 
-/**
- * Wall-clock basis for output latency and stream throughput.
- *
- * Both bases exclude transport setup so the two provider transports stay
- * comparable: `after_provider_response` marks the successful response headers
- * (SSE), and `message_start` marks the stream being established (WebSocket,
- * which never emits an HTTP response). The request hook is the last resort; it
- * runs before connect attempts and retry backoff, so it would inflate `first`.
- */
-function outputMeasurementStartedAt(state: PulseState): number | null {
-	return state.providerResponseAt ?? state.messageStartedAt ?? requestStartedAt(state);
-}
-
 function firstOutputWaitMs(state: PulseState): number | null {
+	if (state.streamFirstOutputAt != null) return state.waitFrozenMs;
 	const startedAt = outputMeasurementStartedAt(state);
-	if (startedAt == null) return null;
-	if (state.streamFirstOutputAt == null) {
-		if (state.messageEndedAt != null) return null;
-		return Math.max(0, nowMs() - startedAt);
-	}
-	return state.waitFrozenMs;
+	if (startedAt == null || state.messageEndedAt != null) return null;
+	return Math.max(0, nowMs() - startedAt);
 }
 
 function requestTotalDurationMs(state: PulseState): number | null {
@@ -255,14 +249,21 @@ function requestTotalDurationMs(state: PulseState): number | null {
 
 // ── 4. Formatting and width helpers ──────────────────────────────────
 
-function formatDuration(ms: number): string {
+export function formatDuration(ms: number): string {
 	if (ms < 1000) return `${Math.round(ms)}ms`;
 	if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
 	const totalSeconds = Math.round(ms / 1000);
 	const minutes = Math.floor(totalSeconds / 60);
 	const seconds = totalSeconds % 60;
-	if (seconds === 0) return `${minutes}m`;
-	return `${minutes}m${seconds}s`;
+	if (minutes < 60) {
+		if (seconds === 0) return `${minutes}m`;
+		return `${minutes}m${seconds}s`;
+	}
+	// Hour-scale runs drop seconds: `1h15m` stays readable in the status line.
+	const hours = Math.floor(minutes / 60);
+	const restMinutes = minutes % 60;
+	if (restMinutes === 0) return `${hours}h`;
+	return `${hours}h${restMinutes}m`;
 }
 
 function formatTps(value: number | null): string {
@@ -564,9 +565,8 @@ function estimateAssistantMessageTokens(message: AssistantMessage): number {
 	return total;
 }
 /**
- * Pi calls the response hook for every provider attempt, including the retryable
- * failures it then backs off and retries. Only a successful response may start
- * the output latency clock.
+ * Pi emits response notifications for failed transport attempts too. Keep their
+ * bookkeeping separate from the request-to-first-output clock.
  */
 function isSuccessfulProviderResponse(status: number | undefined): boolean {
 	return status != null && status >= 200 && status < 300;
@@ -591,15 +591,16 @@ export default function workingStatusExtension(pi: ExtensionAPI) {
 	// Mutable runtime state for the current session/request.
 	const state = createState();
 	let timer: ReturnType<typeof setInterval> | undefined;
+	let lastRenderAt = 0;
+	let streamRenderTimer: ReturnType<typeof setTimeout> | undefined;
 	let lastCtx: ExtensionContext | undefined;
 	let pendingTurnIndex: number | null = null;
 	// Pi emits agent_start/agent_end for each retry attempt, while agent_settled
 	// marks the end of the complete run. Keep totals alive across those attempts.
 	let agentRunActive = false;
 
-	// Live rate is estimated locally from text/thinking deltas only. Provider usage
-	// feeds the end-of-run totals and the final average stream rate, but it never
-	// drives the live TPS display.
+	// Both live and summary rates use locally estimated text/thinking deltas.
+	// Provider usage feeds aggregate usage totals only, never either TPS value.
 	const outputRateTracker = new OutputRateTracker();
 	// Agent-level usage totals — input/output from provider usage, output estimated during streaming until finalized
 	let inputTokens = 0;
@@ -696,11 +697,34 @@ export default function workingStatusExtension(pi: ExtensionAPI) {
 
 	// Working status lifecycle — unified metrics in Pi's built-in working area.
 	const requestRender = (ctx = lastCtx) => {
+		// An immediate render already shows the current state, so a pending
+		// trailing render would only duplicate it.
+		stopStreamRenderTimer();
 		if (!ctx?.hasUI) return;
 		lastCtx = ctx;
+		lastRenderAt = nowMs();
 		const snapshot = getSnapshot();
 		const message = renderWorkingMessage(snapshot, ctx.ui.theme, getTurnTokenDisplay());
 		ctx.ui.setWorkingMessage(message || undefined);
+	};
+
+	/**
+	 * Render a stream delta at a readable rate: the leading edge renders at once,
+	 * and the rest of a burst collapses into one trailing render. The trailing
+	 * render keeps the last token count visible instead of dropping it.
+	 */
+	const requestStreamRender = (ctx: ExtensionContext) => {
+		const waitMs = STREAM_RENDER_THROTTLE_MS - (nowMs() - lastRenderAt);
+		if (waitMs <= 0) {
+			requestRender(ctx);
+			return;
+		}
+		if (streamRenderTimer) return;
+		streamRenderTimer = setTimeout(() => {
+			streamRenderTimer = undefined;
+			requestRender();
+		}, waitMs);
+		streamRenderTimer.unref?.();
 	};
 
 	const clearUI = (ctx = lastCtx) => {
@@ -713,7 +737,15 @@ export default function workingStatusExtension(pi: ExtensionAPI) {
 			clearInterval(timer);
 			timer = undefined;
 		}
+		stopStreamRenderTimer();
 	};
+
+	function stopStreamRenderTimer() {
+		if (streamRenderTimer) {
+			clearTimeout(streamRenderTimer);
+			streamRenderTimer = undefined;
+		}
+	}
 
 	let clearTimer: ReturnType<typeof setTimeout> | undefined;
 	const stopClearTimer = () => {
@@ -777,18 +809,13 @@ export default function workingStatusExtension(pi: ExtensionAPI) {
 	const recordStreamOutput = (delta: string, kind: "auto" | "prose"): number => {
 		markStreamOutputStarted();
 		const estimatedTokens = estimateTokensFromTextRaw(delta, kind);
-		if (estimatedTokens > 0) {
-			outputRateTracker.record(estimatedTokens);
-			return estimatedTokens;
-		}
-		outputRateTracker.recordActivity();
-		return 0;
+		// Zero-token whitespace must not take the tool-activity path: that path
+		// ends the output segment. record() safely ignores zero estimates.
+		outputRateTracker.record(estimatedTokens);
+		return estimatedTokens;
 	};
 
-	/**
-	 * Tool-call JSON stays out of the live rate because it commonly arrives in one
-	 * buffered burst, but its time still counts toward the flow window.
-	 */
+	/** Tool-call JSON breaks both text-only rate windows without adding tokens. */
 	const recordToolCallActivity = () => {
 		markStreamOutputStarted();
 		outputRateTracker.recordActivity();
@@ -881,8 +908,8 @@ export default function workingStatusExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("after_provider_response", (event, ctx) => {
-		// Only a successful response for an in-flight request counts. A late or
-		// failed attempt must not re-base or pre-date the measurement.
+		// Track successful responses for the in-flight request without rebasing
+		// first, which always keeps its request-time origin.
 		if (state.requestStartedAt == null) return;
 		if (!isSuccessfulProviderResponse(event.status)) return;
 		state.providerResponseAt = nowMs();
@@ -913,7 +940,7 @@ export default function workingStatusExtension(pi: ExtensionAPI) {
 			markStreaming();
 			state.visibleTokens += recordStreamOutput(textDelta, "auto");
 			startTimer(ctx);
-			requestRender(ctx);
+			requestStreamRender(ctx);
 			return;
 		}
 
@@ -922,7 +949,7 @@ export default function workingStatusExtension(pi: ExtensionAPI) {
 			markStreaming();
 			state.thinkingTokens += recordStreamOutput(thinkingDelta, "prose");
 			startTimer(ctx);
-			requestRender(ctx);
+			requestStreamRender(ctx);
 			return;
 		}
 
@@ -936,7 +963,7 @@ export default function workingStatusExtension(pi: ExtensionAPI) {
 			// belongs to the flow window even though they add no visible text.
 			recordToolCallActivity();
 			startTimer(ctx);
-			requestRender(ctx);
+			requestStreamRender(ctx);
 			return;
 		}
 

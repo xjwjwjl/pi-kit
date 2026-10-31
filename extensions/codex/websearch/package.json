@@ -4,8 +4,15 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "node --experimental-strip-types --check index.ts && node --experimental-strip-types --check src/native-search.ts",
+    "check": "node --experimental-strip-types --check index.ts && node --experimental-strip-types --check src/native-search.ts && node --experimental-strip-types --check src/openai-web-search.ts && node --experimental-strip-types --check src/render.ts",
     "test": "node --experimental-strip-types --import ./tests/register-ts-loader.mjs --test tests/*.test.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-tui": "0.84.3"
   },
   "pi": {
     "extensions": ["./index.ts"]

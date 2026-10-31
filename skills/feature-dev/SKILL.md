@@ -5,7 +5,7 @@ description: "Structured feature development workflow covering requirements, cod
 
 # Feature Dev
 
-Adaptation of Anthropic's feature-dev plugin: the multi-agent workflow is converted into a **single-agent, sequential, multi-pass workflow**.
+Adaptation of Anthropic's feature-dev plugin: a **sequential, multi-pass workflow** that can use the host's available tools without depending on subagents.
 
 ## Boundary
 
@@ -13,11 +13,11 @@ This skill guides feature development. It does not edit code until Phase 5 (Impl
 
 ## Runtime behavior
 
-- No subagents are available. Run exploration/design/review as sequential passes with different lenses.
+- Run exploration/design/review as sequential passes by default. If the host exposes an `agent` tool, bounded independent investigation or review may be delegated with explicit scope and edit permissions; verify its findings before using them. Do not assume delegation is available.
 - Use `codegraph` (via the codegraph skill) for codebase exploration when available.
 - Use `code-review` skill for Phase 6 quality review when available.
 - Use project-specific skills (e.g., `autosync-api`, `autosync-menu`) when their conventions apply.
-- Track progress with TodoWrite. One task per phase.
+- Track nontrivial multi-step work with the host's planning tool (`todo` in Pi) when available, using phase-level tasks. Otherwise keep a concise textual plan; do not call an unavailable tool.
 
 ## Workflow
 
@@ -63,7 +63,7 @@ Ask concise, specific questions. Group related questions together. Wait for user
 
 Goal: design the approach before coding.
 
-Since no subagents are available, run three sequential design passes:
+Run three design passes sequentially by default. Optional delegated investigation or review does not replace these lenses or the approval gate before implementation:
 
 1. **Minimal Changes Lens**: Smallest diff. Maximum reuse of existing patterns. Fewest new files. What's the simplest thing that works?
 2. **Clean Architecture Lens**: Best maintainability. Clear separation of concerns. Testable design. What would a principled approach look like?
@@ -83,7 +83,7 @@ Goal: build the feature.
 2. Follow the chosen architecture from Phase 4.
 3. Follow all project conventions identified in Phase 2.
 4. Implement incrementally: data models → service logic → API/UI → wiring.
-5. Use TodoWrite to track sub-steps.
+5. Update the phase-level plan with `todo` when available; do not create a separate task for each routine read or command.
 6. After implementation, verify: does it compile/run? Are new files registered correctly?
 
 Rules:

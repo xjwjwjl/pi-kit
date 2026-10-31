@@ -20,18 +20,31 @@ function hasWebSearchTool(tools: unknown[]): boolean {
   );
 }
 
+export interface NativeWebSearchToolOptions {
+  /**
+   * Provider-side search depth. Only set for providers that accept it (the public
+   * OpenAI Responses API); the Codex backend keeps the bare tool shape.
+   */
+  searchContextSize?: string;
+}
+
 /**
- * Adds Codex's server-side web search tool to a Responses payload.
+ * Adds the provider-side web search tool to a Responses payload.
  * Returns undefined when the payload cannot be safely rewritten.
  */
-export function addNativeWebSearchTool(payload: unknown): JsonObject | undefined {
+export function addNativeWebSearchTool(
+  payload: unknown,
+  options: NativeWebSearchToolOptions = {},
+): JsonObject | undefined {
   if (!isObject(payload)) return undefined;
   if (payload.tools !== undefined && !Array.isArray(payload.tools)) return undefined;
 
   const existingTools = Array.isArray(payload.tools) ? payload.tools : [];
-  const tools = hasWebSearchTool(existingTools)
-    ? existingTools
-    : [...existingTools, { type: NATIVE_WEB_SEARCH_TOOL_TYPE }];
+  const searchTool = {
+    type: NATIVE_WEB_SEARCH_TOOL_TYPE,
+    ...(options.searchContextSize ? { search_context_size: options.searchContextSize } : {}),
+  };
+  const tools = hasWebSearchTool(existingTools) ? existingTools : [...existingTools, searchTool];
 
   return { ...payload, tools };
 }

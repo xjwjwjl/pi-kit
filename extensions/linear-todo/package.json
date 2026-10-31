@@ -1,0 +1,44 @@
+{
+  "name": "linear-todo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A branch-aware linear Todo extension for Pi.",
+  "main": "./index.ts",
+  "scripts": {
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test",
+    "test:e2e": "node --experimental-strip-types e2e/run-rpc-e2e.ts",
+    "test:e2e:controls": "node --experimental-strip-types e2e/run-rpc-controls.ts",
+    "test:e2e:modes": "node --experimental-strip-types e2e/run-mode-e2e.ts",
+    "test:acceptance": "node --experimental-strip-types e2e/verify-acceptance.ts",
+    "test:eval:controls": "node --experimental-strip-types e2e/run-eval-controls.ts",
+    "check:eval": "npm run test:acceptance && npm run test:eval:controls",
+    "eval:smoke": "node --experimental-strip-types e2e/run-model-eval.ts --preset smoke",
+    "eval:full": "node --experimental-strip-types e2e/run-model-eval.ts --preset full",
+    "eval:report": "node --experimental-strip-types e2e/report.ts --output .e2e/current-report.md",
+    "eval:report:stdout": "node --experimental-strip-types e2e/report.ts"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": ">=1.3.0",
+    "@earendil-works/pi-agent-core": ">=1.3.0",
+    "@earendil-works/pi-coding-agent": ">=1.3.0",
+    "@earendil-works/pi-tui": ">=1.3.0",
+    "typebox": ">=1.3.7"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "1.3.0",
+    "@earendil-works/pi-ai": "1.3.0",
+    "@earendil-works/pi-coding-agent": "1.3.0",
+    "@earendil-works/pi-tui": "1.3.0",
+    "@types/node": "22.19.19",
+    "typebox": "1.3.7",
+    "typescript": "5.9.3"
+  }
+}

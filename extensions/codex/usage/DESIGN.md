@@ -2,13 +2,13 @@
 
 ## 决策
 
-将状态栏/用量查询与 reset-credit 消费拆成两个独立 Pi 包：
+`codex-usage` 同时负责状态栏/用量查询与 reset-credit 消费：
 
-- `extensions/codex/usage/`：状态栏额度与 `/codex-usage` 用量报告；
-- `extensions/codex/reset-credit/`：`/codex-reset-credit` reset-credit 查询与消费。
-- 两个包都保持自包含，不引入仓库级 `shared/` 依赖。
-- `codex-reset-credit` 消费成功后发出 `openai-codex:reset-credit-consumed` 事件，`codex-usage` 监听该事件并强制刷新状态栏。
-- 不修改 `~/.pi/agent/settings.json`：该文件不属于仓库，由部署者分别注册需要的包。
+- `extensions/codex/usage/`：状态栏额度、`/codex-usage` 用量报告，以及 `/codex-reset-credit` reset-credit 查询与消费；
+- 两个命令共用 `src/codex-credential.ts` 与 `src/codex-http.ts`，不重复实现凭据读取和 curl 传输；
+- 包内保持自包含，不引入仓库级 `shared/` 依赖；
+- reset 消费成功后直接调用 `QuotaController.handleCredentialChanged()` 刷新状态栏，不再使用跨包事件；
+- 不修改 `~/.pi/agent/settings.json`：该文件不属于仓库，由部署者注册聚合包。
 
 ## 必须保留的用户能力
 
@@ -17,7 +17,7 @@
 3. 多个 Pi 进程共享缓存和目录锁，后台额度刷新在一个刷新窗口内最多请求一次。
 4. `/codex-usage` 显示账号、套餐、可用状态、真实额度窗口、重置时间和对应窗口内的 Pi session token/cost 统计。
 5. `cpa-manager` 发出 `openai-codex:credential-changed` 后，状态栏切换到新账号的缓存并更新。
-6. 监听独立 `codex-reset-credit` 包发出的 `openai-codex:reset-credit-consumed` 事件，消费成功后强制刷新状态栏额度。
+6. `/codex-reset-credit` 消费成功后直接刷新状态栏额度。
 
 ## 关键行为：命令实时请求，随后显式更新状态栏
 
@@ -73,6 +73,8 @@ extensions/codex/usage/
   tsconfig.json
   src/
     types.ts
+    codex-credential.ts
+    codex-http.ts
     usage-api.ts
     quota-controller.ts
     quota-cache.ts
@@ -81,6 +83,11 @@ extensions/codex/usage/
     quota-status.ts
     session-scanner.ts
     format.ts
+    reset-types.ts
+    reset-api.ts
+    reset-format.ts
+    reset-command.ts
+    reset-picker.ts
   test/
     ...
 ```
@@ -94,7 +101,7 @@ extensions/codex/usage/
 3. 注册 `model_select`：模型切换时刷新状态栏，仅当前供应商为 `openai-codex` 时展示额度。
 4. 注册 `session_shutdown`：停止控制器、取消请求、清理定时器和状态栏。
 5. 监听 `pi.events.on("openai-codex:credential-changed", ...)`：通知控制器展示新凭据缓存并进行按需刷新。
-6. 监听 `pi.events.on("openai-codex:reset-credit-consumed", ...)`：消费成功后通知控制器强制刷新状态栏。
+6. 注册 `/codex-reset-credit`：复用 `createCodexQuotaCommand`，`onReset` 直接通知控制器刷新状态栏。
 7. 注册 `/codex-usage`：执行实时请求、session 扫描、报告渲染，并调用 `controller.applyCommandResult(...)`。
 
 `index.ts` 不应再包含 curl、缓存序列化、锁、重试或 session JSONL 解析细节。
@@ -103,20 +110,32 @@ extensions/codex/usage/
 
 统一定义两边现有的领域类型：
 
-- `CodexCredential`：`access` 与可选 `expires`。
+- `CodexCredential`：`access`、可选 `expires` 与可选 `accountId`。
 - `UsageWindow`：包含 `used_percent`、`limit_window_seconds`、`reset_at`、`reset_after_seconds`。
 - `UsageResponse`：同时包含报告所需的 `email`、`plan_type`、`allowed`、`limit_reached` 和额度窗口。
 - `UsageResult`：成功、token 过期、请求失败、取消等状态。
 - `CacheEntry` / `PersistentCache`：观测时间、最后成功时间、最后尝试时间、过期/失败标记和重试状态。
 - 现有报告及 session 扫描类型。
 
-### `src/usage-api.ts`
+### `src/codex-credential.ts`
 
-唯一负责凭据和 API 请求：
+唯一负责凭据读取：
 
 - 使用 `readStoredCredential("openai-codex")`，不要直接读取 `auth.json`；这必须与 Pi 运行时凭据及 `cpa-manager` 的切换方式一致。
+- 返回 `access`、可选 `expires` 和可选 `accountId`；reset 端点需要时附带 `ChatGPT-Account-Id`。
+- 提供 `isCredentialExpired()` 与 `extractEmailFromJWT()`，供 usage 报告和 reset 流程共用。
+
+### `src/codex-http.ts`
+
+唯一负责 curl 传输：
+
 - 请求仍通过 `curl` 配置 stdin 传递 Bearer token，避免 token 出现在进程参数中，并保留代理环境兼容性。
 - 保留 `--http1.1`、连接/总超时、`AbortSignal` 取消和子进程清理能力。
+- 支持 GET/POST、额外 header 与 body，供 `wham/usage` 和 `wham/rate-limit-reset-credits` 共用。
+
+### `src/usage-api.ts`
+
+- 调用 `codex-http.ts` 请求 `wham/usage`。
 - 先检查 OAuth `expires`；过期时返回 `expired`，不发送网络请求。
 
 ### `src/quota-cache.ts` 与 `src/file-lock.ts`
@@ -191,11 +210,11 @@ interface QuotaController {
 
 ## 包边界与配置
 
-1. `extensions/codex/usage/` 只负责状态栏额度和 `/codex-usage` 报告。
-2. `extensions/codex/reset-credit/` 独立负责 `/codex-reset-credit` reset-credit 查询与消费。
-3. 两个包分别声明自己的 `package.json`、`tsconfig.json`、依赖和测试；不得通过相对路径导入对方源码。
-4. `codex-reset-credit` 通过 `pi.events.emit("openai-codex:reset-credit-consumed")` 通知 `codex-usage` 刷新状态栏。
-5. 不编辑 `~/.pi/agent/settings.json`；部署者按需分别注册两个包。
+1. `extensions/codex/usage/` 负责状态栏额度、`/codex-usage` 报告和 `/codex-reset-credit` reset-credit 查询与消费。
+2. 包内共享 `codex-credential.ts`、`codex-http.ts`、`types.ts`；不得为 reset 另建独立包或重复实现 curl。
+3. 包声明自己的 `package.json`、`tsconfig.json`、依赖和测试。
+4. reset 消费成功后由同一扩展直接通知 `QuotaController` 刷新状态栏，不通过 `pi.events` 跨包通信。
+5. 不编辑 `~/.pi/agent/settings.json`；部署者注册聚合包 `extensions/codex`。
 
 ## 测试与验收
 
@@ -218,11 +237,11 @@ npm run check
 9. **取消与退出**：session shutdown 会取消进行中的后台 curl，清理刷新和退避定时器。
 10. **旧缓存不参与**：存在 `codex-quota-cache.json` 时，新控制器不读取它，也不写入它。
 11. **报告正确性**：命令报告中的窗口范围以本次请求 `observedAt` 推算；扫描只发生在命令路径。
-12. **跨包刷新**：收到 `openai-codex:reset-credit-consumed` 后，状态栏发起一次强制额度刷新。
+12. **reset 刷新**：`/codex-reset-credit` 成功消费后，状态栏发起一次强制额度刷新。
 
 ## 实施顺序
 
-1. 在 `codex-usage` 保持状态栏与用量报告能力，并监听 `openai-codex:reset-credit-consumed`。
-2. 在独立 `codex-reset-credit` 包中实现 reset-credit API、确认流程和命令测试。
-3. 分别运行两个包的 `npm run check`。
-4. 按需将两个包分别注册到 Pi 的全局或项目设置中。
+1. 在 `codex-usage` 中实现状态栏、用量报告与 reset-credit API/确认流程。
+2. 抽取并复用 `codex-credential.ts`、`codex-http.ts`，两个命令共用同一凭据与传输层。
+3. 运行 `npm run check`。
+4. 将聚合包 `extensions/codex` 注册到 Pi 的全局或项目设置中。

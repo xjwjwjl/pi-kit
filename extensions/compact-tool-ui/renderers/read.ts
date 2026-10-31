@@ -1,16 +1,17 @@
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
-import { createReadToolDefinition, getLanguageFromPath, highlightCode, keyHint } from "@earendil-works/pi-coding-agent";
+import { getLanguageFromPath, highlightCode, keyHint } from "@earendil-works/pi-coding-agent";
 import { ExpandedDetailRail, type ExpandedDetailSection } from "../components/expanded-detail-rail.js";
 import { ExpandedToolHeader } from "../components/expanded-tool-header.js";
 import { LineNumberedCodeBlock } from "../components/line-numbered-code-block.js";
 import { ToolDetailFooter } from "../components/tool-detail-footer.js";
+import { summarizePath } from "../format/path-summary.js";
 import { invalidText, metadataText, paramText, readMetadataText, readPathText, toolNameText } from "../style.js";
-import { countLines, emptyComponent, formatLineCount, imageBlocks, linkPath, shortPath, textBlocks } from "../tui-utils.js";
+import { countLines, emptyComponent, formatLineCount, imageBlocks, linkPath, textBlocks } from "../tui-utils.js";
 import { compactFileToolError } from "./compact-error.js";
 import { type CompactSummaryRowState, ensureCompactToolRow, getCompactCallText, setCompactRow, settleCompactSummaryRow, settleCompactRow } from "./compact-text.js";
 import { readContinuationInfo, stripReadContinuationNotice, stripReadTruncationNotice, summarizeRead } from "./read-helpers.js";
 import { type BuiltInRendererSlots } from "./render-expanded-result.js";
-import { resolveToolRenderShell, type ToolRenderShellSource } from "./render-shell.js";
+import { registerCompactToolRenderer, type ToolRenderShellSource } from "./render-shell.js";
 import { resolveReadRange, resolveToolPath, type ReadArgs } from "./tool-args.js";
 
 function readRangeText(start: number, end: number | undefined, theme: Theme): string {
@@ -31,6 +32,7 @@ type ReadHighlightCache = {
 	body: string;
 	language: string;
 	theme: Theme;
+	colors: Theme["colors"];
 	lines: string[];
 };
 
@@ -41,7 +43,7 @@ type CompactReadState = CompactSummaryRowState & BuiltInRendererSlots & {
 
 function readTargetText(args: ReadArgs, cwd: string, theme: Theme): string {
 	const rawPath = resolveToolPath(args);
-	const styled = readPathText(shortPath(rawPath), theme);
+	const styled = readPathText(summarizePath(rawPath), theme);
 	const linked = rawPath ? linkPath(styled, rawPath, cwd) : styled;
 	return `${linked}${lineRangeText(args, theme)}`;
 }
@@ -65,9 +67,9 @@ function expandedReadLines(state: CompactReadState, rawPath: string | undefined,
 	const normalized = replaceTabs(body);
 	if (!language || !rawPath) return normalized.split("\n");
 	const cached = state.expandedHighlightCache;
-	if (cached?.rawPath === rawPath && cached.body === body && cached.language === language && cached.theme === theme) return cached.lines;
+	if (cached?.rawPath === rawPath && cached.body === body && cached.language === language && cached.theme === theme && cached.colors === theme.colors) return cached.lines;
 	const lines = highlightCode(normalized, language);
-	state.expandedHighlightCache = { rawPath, body, language, theme, lines };
+	state.expandedHighlightCache = { rawPath, body, language, theme, colors: theme.colors, lines };
 	return lines;
 }
 
@@ -109,19 +111,10 @@ function expandedReadResult(state: CompactReadState, result: any, args: ReadArgs
 }
 
 export function registerCompactRead(pi: ExtensionAPI, cwd: string, renderShellSource?: ToolRenderShellSource) {
-	const original = createReadToolDefinition(cwd);
-
-	pi.registerTool({
-		...original,
-		get renderShell() {
-			return resolveToolRenderShell(renderShellSource);
-		},
-		execute(toolCallId, params, signal, onUpdate, ctx) {
-			return original.execute(toolCallId, params, signal, onUpdate, ctx);
-		},
+	registerCompactToolRenderer(pi, "read", () => ({
 		renderCall(args, theme, context) {
 			const state = context.state as CompactReadState;
-			const target = readTargetText(args as ReadArgs, cwd, theme);
+			const target = readTargetText(args as ReadArgs, context.cwd ?? cwd, theme);
 			if (context.expanded) {
 				const suffix = state.compactSummary ? state.compactSummary : "";
 				return expandedReadHeader(state, target, suffix, theme);
@@ -135,7 +128,7 @@ export function registerCompactRead(pi: ExtensionAPI, cwd: string, renderShellSo
 			const state = context.state as CompactReadState;
 			const callText = getCompactCallText(state);
 			const args = context.args as ReadArgs;
-			const target = readTargetText(args, cwd, theme);
+			const target = readTargetText(args, context.cwd ?? cwd, theme);
 
 			if (context.isError) {
 				const rawError = textBlocks(result);
@@ -162,5 +155,5 @@ export function registerCompactRead(pi: ExtensionAPI, cwd: string, renderShellSo
 			}
 			return emptyComponent();
 		},
-	});
+	}), renderShellSource);
 }

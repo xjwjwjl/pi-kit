@@ -366,7 +366,7 @@ export function summarizeBashCommand(command: string): BashCommandDisplay {
 	}
 
 	const semantic = summarizeSemanticSingleLineCommand(normalized);
-	const text = semantic ?? normalized;
+	const text = (semantic ?? normalized).replace(/\t/g, "   ");
 	if (text.length > MAX_INLINE_COMMAND_CHARS) {
 		return {
 			text: truncateSingleLine(text),

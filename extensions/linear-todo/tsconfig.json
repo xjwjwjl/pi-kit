@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "target": "ES2024",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["index.ts", "schema.ts", "reducer.ts", "state.ts", "reminder.ts", "render.ts", "src/**/*.ts", "e2e/**/*.ts", "tests/**/*.ts"],
+  "exclude": ["e2e/fixtures/acceptance/**"]
+}

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import workingStatusExtension from "../index.ts";
+import test, { type TestContext } from "node:test";
+import workingStatusExtension, { formatDuration } from "../index.ts";
 
 type Handler = (event: any, ctx: any) => void | Promise<void>;
 
@@ -51,6 +51,181 @@ function createHarness() {
 		},
 	};
 }
+
+function createTimedHarness(t: TestContext) {
+	t.mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"], now: 10_000 });
+	t.mock.method(performance, "now", () => Date.now());
+	const harness = createHarness();
+	t.after(() => harness.emit("session_shutdown"));
+	return { ...harness, tick: (ms: number) => t.mock.timers.tick(ms) };
+}
+
+async function beginRequest(harness: ReturnType<typeof createHarness>): Promise<void> {
+	await harness.emit("session_start");
+	await harness.emit("agent_start");
+	await harness.emit("turn_start", { turnIndex: 0 });
+	await harness.emit("before_provider_request");
+}
+
+async function emitStreamDelta(
+	harness: ReturnType<typeof createHarness>,
+	delta: string,
+	type: "text_delta" | "thinking_delta" = "text_delta",
+): Promise<void> {
+	await harness.emit("message_update", {
+		message: { role: "assistant" },
+		assistantMessageEvent: { type, delta },
+	});
+}
+
+async function finishRequest(harness: ReturnType<typeof createHarness>): Promise<string> {
+	await harness.emit("message_end", {
+		message: { role: "assistant", stopReason: "stop", usage: usage(10, 100) },
+	});
+	await harness.emit("turn_end");
+	await harness.emit("agent_end");
+	await harness.emit("agent_settled");
+	return harness.notifications.at(-1) ?? "";
+}
+
+for (const type of ["text_delta", "thinking_delta"] as const) {
+	test(`keeps summary TPS when whitespace arrives separately in ${type}`, async (t) => {
+		const harness = createTimedHarness(t);
+		const whitespace = [" ", "\n", "\r\n", "\t"];
+
+		for (const separateWhitespace of [false, true]) {
+			await beginRequest(harness);
+			await harness.emit("after_provider_response", { status: 200, headers: {} });
+			for (let index = 0; index < whitespace.length; index += 1) {
+				if (index > 0) harness.tick(250);
+				await emitStreamDelta(harness, `abcdefghij${separateWhitespace ? "" : whitespace[index]}`, type);
+				harness.tick(250);
+				if (separateWhitespace) await emitStreamDelta(harness, whitespace[index]!, type);
+			}
+
+			assert.match(harness.workingMessages.at(-1) ?? "", /~4\.88 tok\/s/);
+			assert.match(await finishRequest(harness), /~4\.88 tok\/s/);
+		}
+	});
+}
+
+test("does not invent TPS for whitespace-only output", async (t) => {
+	const harness = createTimedHarness(t);
+	await beginRequest(harness);
+	await harness.emit("after_provider_response", { status: 200, headers: {} });
+	for (const delta of [" ", "\n", "\t", "\r\n"]) {
+		await emitStreamDelta(harness, delta);
+		harness.tick(250);
+	}
+
+	assert.doesNotMatch(harness.workingMessages.at(-1) ?? "", /tok\/s/);
+	assert.doesNotMatch(await finishRequest(harness), /tok\/s/);
+});
+
+test("keeps live and summary TPS aligned across a tool boundary", async (t) => {
+	const harness = createTimedHarness(t);
+	await beginRequest(harness);
+	await harness.emit("after_provider_response", { status: 200, headers: {} });
+	const delta = "x".repeat(41); // Approximately 10 tokens per delta.
+	await emitStreamDelta(harness, delta);
+	for (let index = 0; index < 2; index += 1) {
+		harness.tick(250);
+		await emitStreamDelta(harness, delta);
+	}
+	harness.tick(100);
+	assert.match(harness.workingMessages.at(-1) ?? "", /~40 tok\/s/);
+
+	for (const type of ["toolcall_start", "toolcall_delta", "toolcall_end"]) {
+		harness.tick(250);
+		await harness.emit("message_update", {
+			message: { role: "assistant" },
+			assistantMessageEvent: { type, delta: type === "toolcall_delta" ? "{}" : undefined },
+		});
+		harness.tick(100);
+		assert.match(harness.workingMessages.at(-1) ?? "", /~40 tok\/s/);
+	}
+
+	harness.tick(250);
+	await emitStreamDelta(harness, delta);
+	for (let index = 0; index < 2; index += 1) {
+		harness.tick(250);
+		await emitStreamDelta(harness, delta);
+	}
+
+	harness.tick(100);
+	assert.match(harness.workingMessages.at(-1) ?? "", /~40 tok\/s/);
+	assert.match(await finishRequest(harness), /~40 tok\/s/);
+});
+
+test("keeps valid summary TPS before and after a buffered burst", async (t) => {
+	const harness = createTimedHarness(t);
+	await beginRequest(harness);
+	const delta = "x".repeat(41);
+	await emitStreamDelta(harness, delta);
+	for (let index = 0; index < 2; index += 1) {
+		harness.tick(250);
+		await emitStreamDelta(harness, delta);
+	}
+	harness.tick(250);
+	await emitStreamDelta(harness, "x".repeat(4_100));
+	for (let index = 0; index < 6; index += 1) {
+		harness.tick(250);
+		await emitStreamDelta(harness, delta);
+	}
+
+	harness.tick(100);
+	assert.match(harness.workingMessages.at(-1) ?? "", /~40 tok\/s/);
+	const summary = await finishRequest(harness);
+	assert.match(summary, /~40 tok\/s/);
+	assert.match(summary, /↓100/); // Provider usage remains independent of the rate filter.
+});
+
+test("coalesces burst renders while still showing the final count", async (t) => {
+	const harness = createTimedHarness(t);
+	await beginRequest(harness);
+	await harness.emit("after_provider_response", { status: 200, headers: {} });
+
+	// A fast burst must not render once per delta. The leading render is immediate
+	// and the remainder collapse into a single trailing render.
+	const rendersBeforeBurst = harness.workingMessages.length;
+	for (let index = 0; index < 40; index += 1) await emitStreamDelta(harness, "chunk ");
+	const leadingRenders = harness.workingMessages.length - rendersBeforeBurst;
+	assert.ok(leadingRenders <= 1, `expected at most one leading render, got ${leadingRenders}`);
+
+	harness.tick(100);
+	const burstRenders = harness.workingMessages.length - rendersBeforeBurst;
+	assert.ok(burstRenders <= 2, `expected a leading and at most one trailing render, got ${burstRenders}`);
+	// The trailing render must carry the complete burst, not a stale count.
+	// 40 trimmed "chunk" deltas estimate to 40 * 5/4.1 = 49 tokens.
+	assert.match(harness.workingMessages.at(-1) ?? "", /↓~49/);
+
+	// A lifecycle render supersedes a pending trailing render instead of duplicating it.
+	await emitStreamDelta(harness, "chunk ");
+	const beforeSettle = harness.workingMessages.length;
+	await harness.emit("message_end", {
+		message: { role: "assistant", stopReason: "stop", usage: usage(10, 100) },
+	});
+	// The lifecycle render shows the finalized values...
+	assert.match(harness.workingMessages.at(-1) ?? "", /↓100 ↑10/);
+	// ...and cancels the pending trailing render: at most the lifecycle render and
+	// one interval render may land, never a third duplicate from the old timer.
+	harness.tick(100);
+	const added = harness.workingMessages.length - beforeSettle;
+	assert.ok(added >= 1 && added <= 2, `expected 1-2 renders after settle, got ${added}`);
+});
+
+test("formats run durations from milliseconds through hours", () => {
+	assert.equal(formatDuration(0), "0ms");
+	assert.equal(formatDuration(999), "999ms");
+	assert.equal(formatDuration(1_200), "1.2s");
+	assert.equal(formatDuration(59_400), "59.4s");
+	assert.equal(formatDuration(60_000), "1m");
+	assert.equal(formatDuration(200_000), "3m20s");
+	assert.equal(formatDuration(3_599_000), "59m59s");
+	assert.equal(formatDuration(3_600_000), "1h");
+	assert.equal(formatDuration(4_500_000), "1h15m");
+	assert.equal(formatDuration(90_030_000), "25h");
+});
 
 test("renders live metrics through Pi's working status instead of an editor widget", async () => {
 	const harness = createHarness();
@@ -336,6 +511,8 @@ test("keeps the TPS detail when the terminal cannot fit every metric", async () 
 			message: { role: "assistant" },
 			assistantMessageEvent: { type: "text_delta", delta: " more text" },
 		});
+		// Delta renders are coalesced; wait for the trailing render.
+		await new Promise((resolve) => setTimeout(resolve, 120));
 
 		const message = harness.workingMessages.at(-1) ?? "";
 		assert.match(message, /tok\/s/);
@@ -355,31 +532,76 @@ function parseFirstOutputWaitMs(message: string): number | null {
 	return (minutes * 60 + seconds) * 1000;
 }
 
-test("times the first-output wait from the provider response, not the request hook", async () => {
-	const harness = createHarness();
+test("counts first from the request through response setup and freezes on output", async (t) => {
+	const harness = createTimedHarness(t);
+	await beginRequest(harness);
+	harness.tick(10_000);
+	await harness.emit("after_provider_response", { status: 429, headers: {} });
+	harness.tick(5_000);
+	assert.match(harness.workingMessages.at(-1) ?? "", /first 15\.0s/);
 
+	await harness.emit("after_provider_response", { status: 200, headers: {} });
+	assert.match(harness.workingMessages.at(-1) ?? "", /first 15\.0s/);
+	harness.tick(250);
+	await harness.emit("message_start", { message: { role: "assistant", timestamp: Date.now() } });
+	assert.match(harness.workingMessages.at(-1) ?? "", /first 15\.3s/);
+	harness.tick(750);
+	await emitStreamDelta(harness, "hello");
+	harness.tick(2_000);
+	assert.match(harness.workingMessages.at(-1) ?? "", /first 16\.0s/);
+	assert.equal(parseFirstOutputWaitMs(await finishRequest(harness)), 16_000);
+});
+
+test("includes WebSocket connection and pre-event waiting in first", async (t) => {
+	const harness = createTimedHarness(t);
+	await beginRequest(harness);
+	harness.tick(15_000);
+	assert.match(harness.workingMessages.at(-1) ?? "", /first 15\.0s/);
+
+	await harness.emit("message_start", { message: { role: "assistant", timestamp: Date.now() } });
+	assert.match(harness.workingMessages.at(-1) ?? "", /first 15\.0s/);
+	harness.tick(1_000);
+	await emitStreamDelta(harness, "hello");
+	assert.match(harness.workingMessages.at(-1) ?? "", /first 16\.0s/);
+	assert.equal(parseFirstOutputWaitMs(await finishRequest(harness)), 16_000);
+});
+
+test("measures first from the request even without response or message-start hooks", async (t) => {
+	const harness = createTimedHarness(t);
+	await beginRequest(harness);
+	assert.match(harness.workingMessages.at(-1) ?? "", /first 0ms/);
+	harness.tick(15_000);
+	assert.match(harness.workingMessages.at(-1) ?? "", /first 15\.0s/);
+
+	await emitStreamDelta(harness, "hello");
+	assert.match(harness.workingMessages.at(-1) ?? "", /first 15\.0s/);
+	harness.tick(1_000);
+	assert.equal(parseFirstOutputWaitMs(await finishRequest(harness)), 15_000);
+});
+
+test("omits first from completed requests with no streamed output", async (t) => {
+	const harness = createTimedHarness(t);
+	await beginRequest(harness);
+	await harness.emit("after_provider_response", { status: 200, headers: {} });
+	harness.tick(1_000);
+	assert.match(harness.workingMessages.at(-1) ?? "", /first 1\.0s/);
+
+	assert.doesNotMatch(await finishRequest(harness), /first/);
+	assert.doesNotMatch(harness.workingMessages.at(-1) ?? "", /first/);
+});
+
+test("falls back to the assistant timestamp when the request hook is unavailable", async (t) => {
+	const harness = createTimedHarness(t);
 	await harness.emit("session_start");
 	await harness.emit("agent_start");
 	await harness.emit("turn_start", { turnIndex: 0 });
-	await harness.emit("before_provider_request");
-	// A slow WebSocket attempt or retry backoff happens before the provider answers.
-	await new Promise((resolve) => setTimeout(resolve, 400));
-	await harness.emit("after_provider_response", { status: 200, headers: {} });
-	await harness.emit("message_update", {
-		message: { role: "assistant" },
-		assistantMessageEvent: { type: "text_delta", delta: "hello" },
-	});
-	await harness.emit("message_end", {
-		message: { role: "assistant", stopReason: "stop", usage: usage(10, 7) },
-	});
-	await harness.emit("turn_end");
-	await harness.emit("agent_end");
-	await harness.emit("agent_settled");
-
-	const line = harness.notifications[0] ?? "";
-	const wait = parseFirstOutputWaitMs(line);
-	assert.ok(wait != null, `expected an average first-output wait in: ${line}`);
-	assert.ok(wait < 300, `wait must exclude the pre-response delay: ${line}`);
+	const timestamp = Date.now();
+	harness.tick(500);
+	await harness.emit("message_start", { message: { role: "assistant", timestamp } });
+	assert.match(harness.workingMessages.at(-1) ?? "", /first 500ms/);
+	harness.tick(500);
+	await emitStreamDelta(harness, "hello");
+	assert.equal(parseFirstOutputWaitMs(await finishRequest(harness)), 1_000);
 });
 
 test("reports locally streamed output over the measured flow time", async () => {
@@ -417,32 +639,36 @@ test("reports locally streamed output over the measured flow time", async () => 
 	assert.ok(rate > 0 && rate < 100, `provider-only output must not inflate TPS: ${line}`);
 });
 
-test("ignores failed provider attempts when timing the first output", async () => {
-	const harness = createHarness();
-
-	await harness.emit("session_start");
-	await harness.emit("agent_start");
-	await harness.emit("turn_start", { turnIndex: 0 });
-	await harness.emit("before_provider_request");
-	// A retryable failure arrives fast, then the provider backs off and retries.
+test("includes failed transport attempts and retry backoff within one request in first", async (t) => {
+	const harness = createTimedHarness(t);
+	await beginRequest(harness);
+	harness.tick(100);
 	await harness.emit("after_provider_response", { status: 429, headers: {} });
-	await new Promise((resolve) => setTimeout(resolve, 400));
+	harness.tick(400);
+	await harness.emit("after_provider_response", { status: 503, headers: {} });
+	harness.tick(500);
 	await harness.emit("after_provider_response", { status: 200, headers: {} });
+	harness.tick(100);
+	await emitStreamDelta(harness, "hello");
+
+	assert.equal(parseFirstOutputWaitMs(await finishRequest(harness)), 1_100);
+});
+
+test("freezes first on tool-only output and not on later argument deltas", async (t) => {
+	const harness = createTimedHarness(t);
+	await beginRequest(harness);
+	harness.tick(3_500);
 	await harness.emit("message_update", {
 		message: { role: "assistant" },
-		assistantMessageEvent: { type: "text_delta", delta: "hello" },
+		assistantMessageEvent: { type: "toolcall_start" },
 	});
-	await harness.emit("message_end", {
-		message: { role: "assistant", stopReason: "stop", usage: usage(10, 7) },
+	harness.tick(1_000);
+	await harness.emit("message_update", {
+		message: { role: "assistant" },
+		assistantMessageEvent: { type: "toolcall_delta", delta: "{}" },
 	});
-	await harness.emit("turn_end");
-	await harness.emit("agent_end");
-	await harness.emit("agent_settled");
-
-	const line = harness.notifications[0] ?? "";
-	const wait = parseFirstOutputWaitMs(line);
-	assert.ok(wait != null, `expected an average first-output wait in: ${line}`);
-	assert.ok(wait < 300, `wait must start at the successful response, not the 429: ${line}`);
+	assert.match(harness.workingMessages.at(-1) ?? "", /first 3\.5s/);
+	assert.equal(parseFirstOutputWaitMs(await finishRequest(harness)), 3_500);
 });
 
 test("skips the average stream rate when nothing streamed", async () => {

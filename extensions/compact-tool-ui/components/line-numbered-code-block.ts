@@ -18,6 +18,7 @@ export class LineNumberedCodeBlock implements Component {
 	private readonly startLine: number;
 	private readonly showLineNumbers: boolean;
 	private readonly maxVisualLines?: number;
+	private layout?: { width: number; colors: Theme["colors"]; lines: string[] };
 
 	constructor(lines: string[] | string, theme: Theme, options: LineNumberedCodeBlockOptions = {}) {
 		this.lines = (Array.isArray(lines) ? lines : lines.split("\n")).map((line) => line.replace(/\t/g, "   "));
@@ -27,10 +28,15 @@ export class LineNumberedCodeBlock implements Component {
 		this.maxVisualLines = options.maxVisualLines;
 	}
 
-	invalidate() {}
+	invalidate() {
+		this.layout = undefined;
+	}
 
 	render(width: number): string[] {
 		if (width <= 0) return [];
+
+		const colors = this.theme.colors;
+		if (this.layout?.width === width && this.layout.colors === colors) return this.layout.lines;
 
 		const lastLine = this.startLine + Math.max(0, this.lines.length - 1);
 		const numberWidth = String(lastLine).length;
@@ -54,9 +60,10 @@ export class LineNumberedCodeBlock implements Component {
 		}
 
 		const rendered = output.map((line) => (visibleWidth(line) > width ? sliceByColumn(line, 0, width, true) : line));
-		if (this.maxVisualLines !== undefined && this.maxVisualLines > 0 && rendered.length > this.maxVisualLines) {
-			return rendered.slice(-this.maxVisualLines);
-		}
-		return rendered;
+		const lines = this.maxVisualLines !== undefined && this.maxVisualLines > 0 && rendered.length > this.maxVisualLines
+			? rendered.slice(-this.maxVisualLines)
+			: rendered;
+		this.layout = { width, colors, lines };
+		return lines;
 	}
 }

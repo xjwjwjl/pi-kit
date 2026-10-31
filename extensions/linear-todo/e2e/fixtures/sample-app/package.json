@@ -1,0 +1,8 @@
+{
+  "name": "linear-todo-e2e-sample-app",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --experimental-strip-types --test tests/*.test.ts"
+  }
+}

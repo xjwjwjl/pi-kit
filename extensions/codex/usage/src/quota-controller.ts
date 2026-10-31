@@ -17,7 +17,8 @@ import {
 } from "./quota-cache.ts";
 import { REFRESH_INTERVAL_MS, windowBoundary } from "./quota.ts";
 import { formatQuotaStatus, isCodexModel, safePaint, safeSetStatus, unavailableStatus } from "./quota-status.ts";
-import { fetchUsage, readCodexCredential } from "./usage-api.ts";
+import { readCodexCredential } from "./codex-credential.ts";
+import { fetchUsage } from "./usage-api.ts";
 import type { CacheEntry, CodexCredential, UsageResult } from "./types.ts";
 
 export interface QuotaControllerOptions {

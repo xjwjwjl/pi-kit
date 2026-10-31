@@ -1,0 +1,844 @@
+{
+  "schemaVersion": 1,
+  "scenarios": {
+    "simple-text": {
+      "description": "A simple request should not create a Todo plan.",
+      "prompt": "Explain the purpose of the sample application's cache module.",
+      "steps": [
+        {
+          "type": "text",
+          "text": "The cache module stores values with a bounded lifetime."
+        }
+      ],
+      "expect": {
+        "todoToolCalls": 0,
+        "autoContinueMessages": 0,
+        "finalTodoPhase": "none"
+      }
+    },
+    "plan-complete": {
+      "description": "A plan advances through all tasks and completes.",
+      "prompt": "Implement the requested multi-step change and verify it.",
+      "steps": [
+        {
+          "type": "toolCall",
+          "name": "todo",
+          "arguments": {
+            "action": "plan",
+            "title": "Implement and verify the sample change",
+            "goal": "Deliver the sample change",
+            "tasks": [
+              {
+                "title": "Inspect the existing implementation",
+                "description": "Read the relevant modules and trace their current behavior",
+                "doneWhen": "Relevant code paths are identified"
+              },
+              {
+                "title": "Implement the change",
+                "description": "Update the identified code paths within the requested scope",
+                "doneWhen": "The requested behavior is implemented"
+              }
+            ]
+          }
+        },
+        {
+          "type": "toolCall",
+          "name": "todo",
+          "arguments": {
+            "action": "advance",
+            "completions": [{ "result": "The existing implementation was inspected." }]
+          }
+        },
+        {
+          "type": "toolCall",
+          "name": "todo",
+          "arguments": {
+            "action": "advance",
+            "completions": [{ "result": "The change was implemented and verified." }]
+          }
+        },
+        {
+          "type": "text",
+          "text": "The plan is complete and verification succeeded."
+        }
+      ],
+      "expect": {
+        "todoActions": [
+          "plan",
+          "advance",
+          "advance"
+        ],
+        "todoToolCalls": 3,
+        "autoContinueMessages": 0,
+        "finalTodoPhase": "completed",
+        "finalTodoCursor": 2,
+        "finalTodoItemCount": 2
+      }
+    },
+    "batch-complete": {
+      "description": "Consecutive tasks complete in one call; undo restores the whole batch before a final batch.",
+      "prompt": "Report the completed stages together and verify whole-batch undo.",
+      "steps": [
+        {
+          "type": "toolCall", "name": "todo",
+          "arguments": {
+            "action": "plan", "title": "验证批量完成与撤销", "goal": "Verify atomic batch completion",
+            "tasks": [{ "title": "检查", "description": "Inspect the relevant source modules" }, { "title": "实现", "description": "Implement the requested behavior" }, { "title": "验证", "description": "Run the regression suite" }]
+          }
+        },
+        {
+          "type": "toolCall", "name": "todo",
+          "arguments": { "action": "advance", "completions": [{ "result": "Inspection done" }, { "result": "Implementation done" }] }
+        },
+        { "type": "toolCall", "name": "todo", "arguments": { "action": "undo" } },
+        {
+          "type": "toolCall", "name": "todo",
+          "arguments": { "action": "advance", "completions": [{ "result": "Inspection confirmed" }, {}, { "result": "Verification done" }] }
+        },
+        { "type": "text", "text": "Batch completion and undo succeeded." }
+      ],
+      "expect": {
+        "todoActions": ["plan", "advance", "undo", "advance"],
+        "todoToolCalls": 4, "autoContinueMessages": 0,
+        "finalTodoPhase": "completed", "finalTodoCursor": 3, "finalTodoItemCount": 3
+      }
+    },
+    "plan-and-stop": {
+      "description": "An active plan receives one automatic continuation and then stops without looping.",
+      "prompt": "Start a long-running task and continue until it is done.",
+      "steps": [
+        {
+          "type": "toolCall",
+          "name": "todo",
+          "arguments": {
+            "action": "plan",
+            "title": "Complete the staged work",
+            "goal": "Continue the staged work",
+            "tasks": [
+              {
+                "title": "Perform the current stage",
+                "doneWhen": "The stage has a recorded result"
+              }
+            ]
+          }
+        },
+        {
+          "type": "text",
+          "text": "I stopped before completing the current stage."
+        },
+        {
+          "type": "text",
+          "text": "I still cannot complete the current stage."
+        }
+      ],
+      "expect": {
+        "todoActions": [
+          "plan"
+        ],
+        "todoToolCalls": 1,
+        "autoContinueMessages": 1,
+        "finalTodoPhase": "active",
+        "finalTodoCursor": 0,
+        "finalTodoItemCount": 1
+      }
+    },
+    "resume-after-block": {
+      "description": "Blocking and resuming re-opens one automatic continuation for the resumed stage.",
+      "prompt": "Start the task, report the blocker, then continue after it is cleared.",
+      "steps": [
+        {
+          "type": "toolCall",
+          "name": "todo",
+          "arguments": {
+            "action": "plan",
+            "title": "Complete the blocked work",
+            "goal": "Resume work after a cleared blocker",
+            "tasks": [
+              {
+                "title": "Perform the resumed stage",
+                "doneWhen": "The stage has a recorded result"
+              }
+            ]
+          }
+        },
+        {
+          "type": "text",
+          "text": "I stopped before completing the current stage."
+        },
+        {
+          "type": "toolCall",
+          "name": "todo",
+          "arguments": {
+            "action": "block",
+            "reason": "The required credentials are missing."
+          }
+        },
+        {
+          "type": "toolCall",
+          "name": "todo",
+          "arguments": {
+            "action": "resume"
+          }
+        },
+        {
+          "type": "text",
+          "text": "I stopped again after resuming the stage."
+        },
+        {
+          "type": "text",
+          "text": "I still cannot complete the resumed stage."
+        }
+      ],
+      "expect": {
+        "todoActions": [
+          "plan",
+          "block",
+          "resume"
+        ],
+        "todoToolCalls": 3,
+        "autoContinueMessages": 2,
+        "finalTodoPhase": "active",
+        "finalTodoCursor": 0,
+        "finalTodoItemCount": 1
+      }
+    },
+    "insert-and-undo": {
+      "description": "Inserting a task mid-plan and undoing a transition keep the cursor stable.",
+      "prompt": "Plan the change, add an urgent task, revert it, then finish the first stage.",
+      "steps": [
+        {
+          "type": "toolCall",
+          "name": "todo",
+          "arguments": {
+            "action": "plan",
+            "title": "Implement the changing scope",
+            "goal": "Keep the plan stable while the scope moves",
+            "tasks": [
+              {
+                "title": "Perform the first stage",
+                "doneWhen": "The stage has a recorded result"
+              },
+              {
+                "title": "Perform the second stage",
+                "doneWhen": "The stage has a recorded result"
+              }
+            ]
+          }
+        },
+        {
+          "type": "toolCall",
+          "name": "todo",
+          "arguments": {
+            "action": "insert",
+            "tasks": [
+              {
+                "title": "Handle the urgent request",
+                "doneWhen": "The request is resolved"
+              }
+            ]
+          }
+        },
+        {
+          "type": "toolCall",
+          "name": "todo",
+          "arguments": {
+            "action": "undo"
+          }
+        },
+        {
+          "type": "toolCall",
+          "name": "todo",
+          "arguments": {
+            "action": "advance",
+            "completions": [{ "result": "The first stage is done." }]
+          }
+        },
+        {
+          "type": "text",
+          "text": "I completed the first stage."
+        },
+        {
+          "type": "text",
+          "text": "I stopped before completing the second stage."
+        }
+      ],
+      "expect": {
+        "todoActions": [
+          "plan",
+          "insert",
+          "undo",
+          "advance"
+        ],
+        "todoToolCalls": 4,
+        "autoContinueMessages": 1,
+        "finalTodoPhase": "active",
+        "finalTodoCursor": 1,
+        "finalTodoItemCount": 2
+      }
+    },
+    "host-error-recovery": {
+      "description": "A host-generated error result (isError, empty details) must not lock Todo recovery after a restart.",
+      "prompt": "Plan the work, then send an invalid Todo call and stop.",
+      "steps": [
+        {
+          "type": "toolCall",
+          "name": "todo",
+          "arguments": {
+            "action": "plan",
+            "title": "Complete work despite host errors",
+            "goal": "Keep the plan readable after a host error",
+            "tasks": [
+              {
+                "title": "Perform the stage",
+                "doneWhen": "The stage has a recorded result"
+              }
+            ]
+          }
+        },
+        {
+          "type": "toolCall",
+          "name": "todo",
+          "arguments": {
+            "action": "bogus"
+          }
+        },
+        {
+          "type": "text",
+          "text": "I stopped before completing the current stage."
+        },
+        {
+          "type": "text",
+          "text": "I still cannot complete the current stage."
+        },
+        {
+          "type": "text",
+          "text": "The restored process received the persisted reminder."
+        }
+      ],
+      "expect": {
+        "todoActions": [
+          "plan"
+        ],
+        "todoToolCalls": 1,
+        "autoContinueMessages": 1,
+        "finalTodoPhase": "active",
+        "finalTodoCursor": 0,
+        "finalTodoItemCount": 1
+      }
+    },
+    "blocked": {
+      "description": "Blocking a plan prevents automatic continuation.",
+      "prompt": "Proceed with the task, but stop safely if the environment is unavailable.",
+      "steps": [
+        {
+          "type": "toolCall",
+          "name": "todo",
+          "arguments": {
+            "action": "plan",
+            "title": "Verify environment-dependent behavior",
+            "goal": "Complete work requiring an unavailable environment",
+            "tasks": [
+              {
+                "title": "Run the environment-dependent verification",
+                "doneWhen": "The verification command passes"
+              }
+            ]
+          }
+        },
+        {
+          "type": "toolCall",
+          "name": "todo",
+          "arguments": {
+            "action": "block",
+            "reason": "The required environment variable is unavailable."
+          }
+        },
+        {
+          "type": "text",
+          "text": "The task is blocked pending environment setup."
+        }
+      ],
+      "expect": {
+        "todoActions": [
+          "plan",
+          "block"
+        ],
+        "todoToolCalls": 2,
+        "autoContinueMessages": 0,
+        "finalTodoPhase": "blocked",
+        "finalTodoCursor": 0,
+        "finalTodoItemCount": 1
+      }
+    },
+    "replan": {
+      "description": "Replanning preserves completed history and creates a new revision.",
+      "prompt": "Explore the old approach, then revise the remaining implementation path.",
+      "steps": [
+        {
+          "type": "toolCall",
+          "name": "todo",
+          "arguments": {
+            "action": "plan",
+            "title": "Implement and verify the original approach",
+            "goal": "Deliver the original approach",
+            "tasks": [
+              {
+                "title": "Explore the approach",
+                "doneWhen": "The approach is understood"
+              },
+              {
+                "title": "Implement the approach",
+                "doneWhen": "The approach is implemented"
+              },
+              {
+                "title": "Verify the result",
+                "doneWhen": "Verification passes"
+              }
+            ]
+          }
+        },
+        {
+          "type": "toolCall",
+          "name": "todo",
+          "arguments": {
+            "action": "advance",
+            "completions": [{ "result": "The original approach was explored." }]
+          }
+        },
+        {
+          "type": "toolCall",
+          "name": "todo",
+          "arguments": {
+            "action": "replan",
+            "reason": "The API constraint changed.",
+            "title": "Implement and verify the revised approach",
+            "goal": "Deliver the revised approach",
+            "tasks": [
+              {
+                "title": "Implement the revised approach",
+                "doneWhen": "The revised behavior is implemented"
+              },
+              {
+                "title": "Verify the revised result",
+                "doneWhen": "All revised checks pass"
+              }
+            ]
+          }
+        },
+        {
+          "type": "toolCall",
+          "name": "todo",
+          "arguments": {
+            "action": "advance",
+            "completions": [{ "result": "The revised approach was implemented." }]
+          }
+        },
+        {
+          "type": "text",
+          "text": "The revised implementation is ready for the remaining verification stage."
+        },
+        {
+          "type": "text",
+          "text": "The remaining verification stage is still pending."
+        }
+      ],
+      "expect": {
+        "todoActions": [
+          "plan",
+          "advance",
+          "replan",
+          "advance"
+        ],
+        "todoToolCalls": 4,
+        "autoContinueMessages": 1,
+        "finalTodoPhase": "active",
+        "finalTodoCursor": 2,
+        "finalTodoItemCount": 3
+      }
+    },
+    "invalid-todo": {
+      "description": "A validly shaped but semantically invalid Todo call returns a structured error without state.",
+      "prompt": "Try to advance before a plan exists, then report the result.",
+      "steps": [
+        {
+          "type": "toolCall",
+          "name": "todo",
+          "arguments": {
+            "action": "advance", "completions": [{}]
+          }
+        },
+        {
+          "type": "text",
+          "text": "The advance was rejected because no plan exists."
+        }
+      ],
+      "expect": {
+        "todoToolCalls": 1,
+        "autoContinueMessages": 0,
+        "finalTodoPhase": "none"
+      }
+    },
+    "error": {
+      "description": "A provider error after planning releases the run without automatic continuation.",
+      "prompt": "Start the task and report a provider failure without pretending it is complete.",
+      "steps": [
+        {
+          "type": "toolCall",
+          "name": "todo",
+          "arguments": {
+            "action": "plan",
+            "title": "Complete work despite provider errors",
+            "goal": "Keep state after a provider error",
+            "tasks": [
+              {
+                "title": "Recover from the provider error",
+                "doneWhen": "The error is resolved"
+              }
+            ]
+          }
+        },
+        {
+          "type": "error",
+          "message": "scripted provider failure"
+        }
+      ],
+      "expect": {
+        "todoActions": [
+          "plan"
+        ],
+        "todoToolCalls": 1,
+        "autoContinueMessages": 0,
+        "finalTodoPhase": "active",
+        "finalTodoCursor": 0,
+        "finalTodoItemCount": 1
+      }
+    },
+    "abort": {
+      "description": "An in-flight provider request can be aborted without starting Todo continuation.",
+      "prompt": "Wait for the long-running response.",
+      "steps": [
+        {
+          "type": "text",
+          "text": "This response is intentionally delayed.",
+          "delayMs": 1000
+        }
+      ],
+      "expect": {
+        "todoToolCalls": 0,
+        "autoContinueMessages": 0,
+        "finalTodoPhase": "none"
+      }
+    },
+    "abort-during-model": {
+      "description": "Abort an in-flight model response with an active plan, then explicitly resume without losing state or spending a correction. Plain RPC playback keeps the same plan active after one correction.",
+      "prompt": "Record the plan and begin a delayed response before finishing any stage.",
+      "steps": [
+        {
+          "type": "toolCall",
+          "name": "todo",
+          "arguments": {
+            "action": "plan",
+            "title": "Implement and verify the model-abort scenario",
+            "goal": "Preserve the plan across an aborted model response",
+            "tasks": [
+              { "title": "Implement the current stage", "doneWhen": "The current stage is verified" },
+              { "title": "Verify the remaining work", "doneWhen": "All required checks pass" }
+            ]
+          }
+        },
+        { "type": "text", "text": "The delayed model response completed normally.", "delayMs": 2000 },
+        { "type": "text", "text": "The user-requested response resumed with the original plan." },
+        { "type": "text", "text": "The resumed stage is still pending after its one correction." }
+      ],
+      "expect": {
+        "todoActions": ["plan"],
+        "todoToolCalls": 1,
+        "autoContinueMessages": 1,
+        "finalTodoPhase": "active",
+        "finalTodoCursor": 0,
+        "finalTodoItemCount": 2
+      }
+    },
+    "abort-during-tool": {
+      "description": "Abort a signal-aware tool with an active plan, then explicitly resume without losing state or spending a correction. Plain RPC playback lets the bounded probe finish normally.",
+      "prompt": "Record the plan, then run the abort probe before finishing any stage.",
+      "steps": [
+        {
+          "type": "toolCall",
+          "name": "todo",
+          "arguments": {
+            "action": "plan",
+            "title": "Implement and verify the tool-abort scenario",
+            "goal": "Preserve the plan across an aborted tool call",
+            "tasks": [
+              { "title": "Implement the current stage", "doneWhen": "The current stage is verified" },
+              { "title": "Verify the remaining work", "doneWhen": "All required checks pass" }
+            ]
+          }
+        },
+        { "type": "toolCall", "name": "linear_todo_abort_probe", "arguments": {} },
+        { "type": "text", "text": "The user-requested response resumed with the original plan." },
+        { "type": "text", "text": "The resumed stage is still pending after its one correction." }
+      ],
+      "expect": {
+        "todoActions": ["plan"],
+        "todoToolCalls": 1,
+        "autoContinueMessages": 1,
+        "finalTodoPhase": "active",
+        "finalTodoCursor": 0,
+        "finalTodoItemCount": 2
+      }
+    },
+    "pending-follow-up": {
+      "description": "A queued follow-up is processed without losing the active plan.",
+      "prompt": "Start the staged task and keep the plan active.",
+      "steps": [
+        {
+          "type": "toolCall",
+          "name": "todo",
+          "arguments": {
+            "action": "plan",
+            "title": "Complete the staged task",
+            "goal": "Keep the staged task coherent",
+            "tasks": [
+              {
+                "title": "Finish the pending stage",
+                "doneWhen": "The stage is complete"
+              }
+            ]
+          }
+        },
+        {
+          "type": "text",
+          "text": "The initial response is delayed.",
+          "delayMs": 350
+        },
+        {
+          "type": "text",
+          "text": "The queued follow-up was handled."
+        },
+        {
+          "type": "text",
+          "text": "The stage remains pending."
+        }
+      ],
+      "expect": {
+        "todoActions": [
+          "plan"
+        ],
+        "todoToolCalls": 1,
+        "autoContinueMessages": 1,
+        "finalTodoPhase": "active",
+        "finalTodoCursor": 0,
+        "finalTodoItemCount": 1
+      }
+    },
+    "compact": {
+      "description": "Manual compaction preserves the active Todo and forces a reminder on the next request.",
+      "prompt": "Start the task and stop after recording the current stage.",
+      "steps": [
+        {
+          "type": "toolCall",
+          "name": "todo",
+          "arguments": {
+            "action": "plan",
+            "title": "Verify recovery after compaction",
+            "goal": "Verify compaction recovery",
+            "tasks": [
+              {
+                "title": "Keep the active stage",
+                "description": "Retain the current execution scope through context compaction",
+                "doneWhen": "The stage remains identifiable after compaction"
+              },
+              {
+                "title": "Run the post-compaction request",
+                "doneWhen": "The reminder is present"
+              }
+            ]
+          }
+        },
+        {
+          "type": "text",
+          "text": "The active stage is recorded."
+        },
+        {
+          "type": "text",
+          "text": "The automatic continuation completed its reminder turn."
+        },
+        {
+          "type": "text",
+          "text": "Compaction summary generated."
+        },
+        {
+          "type": "text",
+          "text": "Split-turn prefix summary generated."
+        },
+        {
+          "type": "text",
+          "text": "The post-compaction request completed."
+        }
+      ],
+      "expect": {
+        "todoActions": [
+          "plan"
+        ],
+        "todoToolCalls": 1,
+        "autoContinueMessages": 1,
+        "finalTodoPhase": "active",
+        "finalTodoCursor": 0,
+        "finalTodoItemCount": 2
+      }
+    },
+    "pause-during-model": {
+      "description": "Pause during the model response to an already-delivered nudge without aborting it or showing an early-stop warning. Plain RPC playback stops after the same single nudge.",
+      "prompt": "Keep this task active while preparing a delayed response.",
+      "steps": [
+        {
+          "type": "toolCall",
+          "name": "todo",
+          "arguments": {
+            "action": "plan",
+            "title": "Verify safe model-response pausing",
+            "goal": "Pause safely during a model response",
+            "tasks": [
+              {
+                "title": "Keep the delayed stage active",
+                "doneWhen": "The user explicitly resumes the remaining work"
+              }
+            ]
+          }
+        },
+        {
+          "type": "text",
+          "text": "The current stage is still pending."
+        },
+        {
+          "type": "text",
+          "text": "The delayed model response completed without being aborted.",
+          "delayMs": 2000
+        }
+      ],
+      "expect": {
+        "todoActions": ["plan"],
+        "todoToolCalls": 1,
+        "autoContinueMessages": 1,
+        "finalTodoPhase": "active",
+        "finalTodoCursor": 0,
+        "finalTodoItemCount": 1
+      }
+    },
+    "fork-switch-recovery": {
+      "description": "Native RPC fork and switch_session restore divergent Todo snapshots. Plain RPC playback leaves the initial checkpoint active; only the controls runner advances and forks it.",
+      "prompt": "Record the initial branch checkpoint and leave both stages pending.",
+      "steps": [
+        {
+          "type": "toolCall",
+          "name": "todo",
+          "arguments": {
+            "action": "plan",
+            "title": "Verify isolated branch histories",
+            "goal": "Keep forked Todo histories isolated",
+            "tasks": [
+              {
+                "title": "Perform the first branch stage",
+                "doneWhen": "The first stage has branch-specific evidence"
+              },
+              {
+                "title": "Perform the second branch stage",
+                "doneWhen": "The second stage is verified on its own branch"
+              }
+            ]
+          }
+        },
+        {
+          "type": "text",
+          "text": "The original branch checkpoint is recorded."
+        },
+        {
+          "type": "text",
+          "text": "The checkpoint received its one continuation."
+        },
+        {
+          "type": "toolCall",
+          "name": "todo",
+          "arguments": {
+            "action": "advance",
+            "completions": [{ "result": "The first stage was completed only on the original branch." }]
+          }
+        },
+        {
+          "type": "text",
+          "text": "The original branch has reached its second stage."
+        },
+        {
+          "type": "text",
+          "text": "The second stage received its one continuation."
+        }
+      ],
+      "expect": {
+        "todoActions": ["plan"],
+        "todoToolCalls": 1,
+        "autoContinueMessages": 1,
+        "finalTodoPhase": "active",
+        "finalTodoCursor": 0,
+        "finalTodoItemCount": 2
+      }
+    },
+    "recover": {
+      "description": "A second Pi process restores title, full goal, descriptions and undo, then undoes the prior insertion without resetting the continuation allowance.",
+      "prompt": "Start the task and leave the current stage active.",
+      "steps": [
+        {
+          "type": "toolCall",
+          "name": "todo",
+          "arguments": {
+            "action": "plan",
+            "title": "恢复并验证会话计划",
+            "goal": "Restore the active session plan",
+            "tasks": [
+              {
+                "title": "恢复当前阶段",
+                "description": "Continue the same execution scope after restarting the process",
+                "doneWhen": "The restored session still knows the current stage"
+              },
+              {
+                "title": "Verify restored work",
+                "description": "Inspect the recovered plan and its undo pre-image before continuing",
+                "doneWhen": "All restored fields match the persisted session"
+              }
+            ]
+          }
+        },
+        {
+          "type": "toolCall",
+          "name": "todo",
+          "arguments": {
+            "action": "insert",
+            "tasks": [{ "title": "Inspect temporary stage", "description": "Exercise persisted undo across a process restart" }]
+          }
+        },
+        {
+          "type": "text",
+          "text": "The first process stopped at the active stage."
+        },
+        {
+          "type": "text",
+          "text": "The first process received its one continuation."
+        },
+        { "type": "toolCall", "name": "todo", "arguments": { "action": "undo" } },
+        {
+          "type": "text",
+          "text": "The restored process received the persisted reminder."
+        }
+      ],
+      "expect": {
+        "todoActions": ["plan", "insert", "undo"],
+        "todoToolCalls": 3,
+        "autoContinueMessages": 1,
+        "finalTodoPhase": "active",
+        "finalTodoCursor": 0,
+        "finalTodoItemCount": 2
+      }
+    }
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "name": "websearch-deepseek",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "files": [
+    "index.ts",
+    "config.ts",
+    "client.ts",
+    "search.ts",
+    "webfetch.ts",
+    "text.ts",
+    "temporal.ts",
+    "README.md"
+  ],
+  "scripts": {
+    "check": "node --experimental-strip-types --check index.ts && node --experimental-strip-types --check config.ts && node --experimental-strip-types --check client.ts && node --experimental-strip-types --check search.ts && node --experimental-strip-types --check webfetch.ts && node --experimental-strip-types --check text.ts && node --experimental-strip-types --check temporal.ts",
+    "test": "node --experimental-strip-types --import ./test/register-ts-loader.mjs --test test/**/*.test.ts",
+    "smoke": "node --experimental-strip-types --import ./test/register-ts-loader.mjs ./scripts/smoke.ts"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-tui": "0.84.3",
+    "typebox": "1.3.27"
+  }
+}

@@ -9,8 +9,8 @@ outputs/*
 !work/.gitkeep
 !outputs/.gitkeep
 
-# Ignore nested .git repos inside databases
-extensions/databases/**/.git
+# Generated images written by scripts and skills
+generated-images/
 
 # Local pi runtime config
 .pi/

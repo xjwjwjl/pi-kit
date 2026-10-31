@@ -3,7 +3,6 @@ import test from "node:test";
 import {
 	hasMeaningfulOutput,
 	outputLineCount,
-	previewTail,
 	splitBashStatus,
 	summarizeBashStream,
 	summarizeFailedBashOutput,
@@ -27,6 +26,55 @@ test("splitBashStatus extracts timeout and abort statuses", () => {
 		status: "aborted",
 		output: "partial output",
 	});
+});
+
+test("splitBashStatus preserves status-like stdout unless the result is a final error", () => {
+	for (const trailer of ["Command exited with code 7", "Command was aborted", "Command timed out after 3 seconds"]) {
+		for (const output of [trailer, `ordinary output\n${trailer}\n`]) {
+			assert.deepEqual(splitBashStatus(output, false), { status: "ok", output: output.trimEnd() });
+		}
+	}
+	assert.deepEqual(splitBashStatus("partial output\nCommand aborted", true), { status: "aborted", output: "partial output" });
+});
+
+test("splitBashStatus removes only the final status trailer from failed output", () => {
+	assert.deepEqual(splitBashStatus("Command exited with code 7\nordinary output\nCommand exited with code 2\n", true), {
+		status: "exit 2", output: "Command exited with code 7\nordinary output",
+	});
+	assert.deepEqual(splitBashStatus("Command aborted\nordinary output", true), {
+		status: "failed", output: "Command aborted\nordinary output",
+	});
+});
+
+test("splitBashStatus classifies non-native error lines without removing their text", () => {
+	for (const [line, status] of [
+		["command aborted", "aborted"],
+		["COMMAND ABORTED", "aborted"],
+		[" Command aborted", "aborted"],
+		["Command aborted ", "aborted"],
+		["  Command exited with code 7  ", "exit 7"],
+		["Command timed out after 1 second", "timeout 1s"],
+	]) {
+		const output = `diagnostic before\n${line}\n`;
+		assert.deepEqual(splitBashStatus(output, true), { status, output: output.trimEnd() });
+	}
+	assert.deepEqual(splitBashStatus("diagnostic before\n\u001b[31mCommand aborted\u001b[0m", true), {
+		status: "aborted", output: "diagnostic before\nCommand aborted",
+	});
+});
+
+test("splitBashStatus classifies final content independently of CRLF and whitespace-only trailing lines", () => {
+	for (const [line, status] of [
+		["command aborted", "aborted"],
+		["  Command exited with code 7", "exit 7"],
+		["Command timed out after 1 second", "timeout 1s"],
+	]) {
+		for (const ending of ["\n\n", "\n \t\n", "\r\n\r\n", "\r\n \t\r\n"]) {
+			assert.deepEqual(splitBashStatus(`diagnostic before\r\n${line}${ending}`, true), {
+				status, output: `diagnostic before\n${line}`,
+			});
+		}
+	}
 });
 
 test("splitBashStatus normalizes no-output success and generic errors", () => {
@@ -135,11 +183,6 @@ test("outputLineCount ignores trailing empty lines like tail", () => {
 	assert.equal(outputLineCount("a\nb\n"), 2);
 	assert.equal(outputLineCount("a\nb\n\n"), 2);
 	assert.equal(outputLineCount(""), 0);
-});
-
-test("previewTail keeps only the requested trailing lines when output is meaningful", () => {
-	assert.equal(previewTail("a\nb\nc\n", 2), "b\nc");
-	assert.equal(previewTail("\n  \n", 2), "");
 });
 
 test("summarizeBashStream reports running output line counts", () => {

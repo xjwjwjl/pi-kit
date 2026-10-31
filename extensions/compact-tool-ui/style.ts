@@ -151,7 +151,3 @@ export function shellContinuationText(value: string, theme: Theme): string {
 export function shellRedirectionText(value: string, theme: Theme): string {
 	return paramText("redirection", value, theme);
 }
-
-export function outputPreviewText(value: string, theme: Theme): string {
-	return paramText("context", value, theme);
-}

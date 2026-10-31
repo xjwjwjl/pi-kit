@@ -61,20 +61,14 @@ function assertDetailsWithDuration(actual: Record<string, unknown>, expected: Re
   assert.deepEqual(details, expected);
 }
 
-test("registers and activates the image tool only for Codex models", () => {
+test("registers the image tool as active for every model", () => {
   const harness = createHarness();
   assert.equal(harness.tool.name, "codex_image_gen");
-
-  const sessionStart = harness.handlers.get("session_start")!;
-  sessionStart({}, { model: { provider: "anthropic", api: "anthropic-messages" } });
-  assert.equal(harness.activeTools.includes("codex_image_gen"), false);
-
-  sessionStart({}, { model: CODEX_MODEL });
+  // Direct-exposure registration activates the tool; no model_select/session_start
+  // handler should deactivate it for non-Codex models.
   assert.equal(harness.activeTools.includes("codex_image_gen"), true);
-
-  const modelSelect = harness.handlers.get("model_select")!;
-  modelSelect({ model: { provider: "openai", api: "openai-responses" } }, {});
-  assert.equal(harness.activeTools.includes("codex_image_gen"), false);
+  assert.equal(harness.handlers.has("session_start"), false);
+  assert.equal(harness.handlers.has("model_select"), false);
 });
 
 test("prompt policy allows explicit edits and defines reference roles and preservation constraints", () => {
@@ -127,8 +121,7 @@ test("prompt policy treats size as a target rather than measured output dimensio
   const { tool } = createHarness();
   const guidelines = tool.promptGuidelines.join("\n");
 
-  assert.match(tool.description, /request target dimensions, which the actual output may not match/);
-  assert.doesNotMatch(tool.description, /request exact dimensions/);
+  assert.doesNotMatch(tool.description, /WIDTHxHEIGHT/);
   assert.match(tool.parameters.properties.size.description, /Actual output dimensions may differ/);
   assert.match(guidelines, /target dimensions, not guaranteed output dimensions/);
   assert.match(guidelines, /do not report the requested size as the actual size without verifying the saved file/);
@@ -308,7 +301,7 @@ test("uses the selected Flare model after the command switches away from the def
   }
 });
 
-test("refuses to call the Images API for non-Codex models", async () => {
+test("refuses to call the Images API without a saved Codex login", async () => {
   const harness = createHarness();
   let resolvedAuth = false;
   await assert.rejects(
@@ -321,6 +314,7 @@ test("refuses to call the Images API for non-Codex models", async () => {
         model: { provider: "openai", api: "openai-responses" },
         cwd: tmpdir(),
         modelRegistry: {
+          getProviderAuthStatus: () => ({ configured: false }),
           async getApiKeyAndHeaders() {
             resolvedAuth = true;
             return { ok: true, apiKey: "should-not-be-used" };
@@ -328,9 +322,62 @@ test("refuses to call the Images API for non-Codex models", async () => {
         },
       },
     ),
-    /only with the openai-codex Responses model/,
+    /requires a saved OpenAI Codex login; run \/login openai-codex/,
   );
   assert.equal(resolvedAuth, false);
+});
+
+test("generates images on any model when an openai-codex login is stored", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "codex-imagegen-provider-auth-test-"));
+  const imageBytes = Buffer.from("provider-auth-image");
+  let requestedProvider: string | undefined;
+  let requestedUrl = "";
+
+  try {
+    const harness = createHarness({
+      now: () => new Date("2026-10-10T00:00:00.000Z"),
+      createId: () => "provider-auth-id",
+      fetchImpl: async (input) => {
+        requestedUrl = String(input);
+        return new Response(JSON.stringify({ data: [{ b64_json: imageBytes.toString("base64") }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const result = await harness.tool.execute(
+      "call-provider",
+      { prompt: "A blue whale" },
+      undefined,
+      undefined,
+      {
+        model: { provider: "openai", api: "openai-responses" },
+        cwd,
+        modelRegistry: {
+          getProviderAuthStatus: () => ({ configured: true }),
+          getAll: () => [{ provider: "openai-codex", baseUrl: "https://chatgpt.com/backend-api" }],
+          async getProviderAuth(provider: string) {
+            requestedProvider = provider;
+            return { auth: { apiKey: "codex-token" } };
+          },
+          async getApiKeyAndHeaders() {
+            throw new Error("the active model auth must not be used");
+          },
+        },
+      },
+    );
+
+    assert.equal(requestedProvider, "openai-codex");
+    assert.equal(requestedUrl, "https://chatgpt.com/backend-api/codex/images/generations");
+    assert.equal(result.details.generatedCount, 1);
+    assert.equal(
+      (result.content[1] as { data: string }).data,
+      imageBytes.toString("base64"),
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
 });
 
 test("passes workspace-relative reference images to the edits endpoint", async () => {

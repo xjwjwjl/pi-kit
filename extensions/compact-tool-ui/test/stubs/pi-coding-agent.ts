@@ -21,7 +21,11 @@ export function getLanguageFromPath(filePath: string): string | undefined {
 		: undefined;
 }
 
+/** Additive instrumentation for renderer cache tests; highlighting output is unchanged. */
+export const highlightCodeCalls: Array<{ code: string; language?: string }> = [];
+
 export function highlightCode(code: string, _language?: string): string[] {
+	highlightCodeCalls.push({ code, language: _language });
 	return code.split("\n");
 }
 

@@ -1,6 +1,7 @@
 export interface CodexCredential {
 	access: string;
 	expires?: number;
+	accountId?: string;
 }
 
 export interface UsageWindow {

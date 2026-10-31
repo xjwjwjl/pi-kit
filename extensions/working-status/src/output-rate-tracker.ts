@@ -20,15 +20,21 @@ export type StreamedOutputFlow = {
 };
 
 type RateSample = {
+	id: number;
 	at: number;
 	cumulativeTokens: number;
 	deltaTokens: number;
 };
 
-type StreamedOutputSegment = {
-	tokens: number;
-	durationMs: number;
-	burstDetected: boolean;
+type StreamedOutputCheckpoint = StreamedOutputFlow & { sampleId: number };
+
+type StreamedOutputSegment = StreamedOutputFlow & {
+	checkpoints: StreamedOutputCheckpoint[];
+};
+
+type BurstRange = {
+	firstSampleId: number;
+	lastSampleId: number;
 };
 
 export type OutputRateTrackerOptions = {
@@ -84,6 +90,7 @@ export class OutputRateTracker {
 	private readonly provisionalMinimumTokens: number;
 
 	private samples: RateSample[] = [];
+	private sampleSequence = 0;
 	private lastSampleAt: number | null = null;
 	// Flow accounting, independent of the bounded rate window: it survives
 	// pruning and rebasing so the end-of-run measurement covers the whole
@@ -93,9 +100,11 @@ export class OutputRateTracker {
 	private streamFlowMs = 0;
 	// Separate from generic provider-stream activity: this is the numerator and
 	// denominator used by the end summary, so tool-call JSON cannot dilute it.
-	// Segments that trigger the live burst guard are discarded from the summary too.
+	// A burst rolls the candidate back to a stable prefix, which stays reversible
+	// until all known bad samples have left the measured window.
 	private lastStreamedOutputAt: number | null = null;
 	private currentStreamedOutputSegment: StreamedOutputSegment | null = null;
+	private quarantinedThroughSampleId: number | null = null;
 	private streamedOutputFlowMs = 0;
 	private streamedOutputFlowTokens = 0;
 	private currentRate: number | null = null;
@@ -118,11 +127,13 @@ export class OutputRateTracker {
 
 	reset(): void {
 		this.samples = [];
+		this.sampleSequence = 0;
 		this.lastSampleAt = null;
 		this.lastActivityAt = null;
 		this.streamFlowMs = 0;
 		this.lastStreamedOutputAt = null;
 		this.currentStreamedOutputSegment = null;
+		this.quarantinedThroughSampleId = null;
 		this.streamedOutputFlowMs = 0;
 		this.streamedOutputFlowTokens = 0;
 		this.currentRate = null;
@@ -133,9 +144,9 @@ export class OutputRateTracker {
 	}
 
 	/**
-	 * Record output activity that carries no locally estimated tokens, such as a
-	 * streamed tool-call argument. It has no locally estimated token count, but
-	 * still marks that the provider stream is active.
+	 * Record non-text output activity, such as streamed tool-call arguments.
+	 * It breaks both text-only measurement windows, but keeps the last stable
+	 * rate available for a muted display. Zero-token text is not tool activity.
 	 */
 	recordActivity(at = this.now()): void {
 		if (!Number.isFinite(at)) return;
@@ -144,6 +155,12 @@ export class OutputRateTracker {
 		// It must also end the corresponding output-only measurement segment.
 		this.finishStreamedOutputSegment();
 		this.lastStreamedOutputAt = null;
+		this.samples = [];
+		this.currentRate = null;
+		this.provisionalRate = null;
+		this.currentStatus = null;
+		// Keep lastSampleAt so output after a long tool pause still triggers
+		// the normal gap rebase, including clearing the retained rate.
 	}
 
 	/** Record one locally estimated output delta. */
@@ -152,19 +169,20 @@ export class OutputRateTracker {
 
 		this.noteActivity(at);
 		this.noteStreamedOutput(deltaTokens, at);
+		this.totalOutputTokens += deltaTokens;
+		const sample: RateSample = { id: ++this.sampleSequence, at, cumulativeTokens: this.totalOutputTokens, deltaTokens };
 		if (this.lastSampleAt != null) {
 			const gapMs = at - this.lastSampleAt;
 			if (gapMs < 0 || gapMs > this.gapMs) {
 				// A long pause or a clock jump starts a new segment. The delta that
 				// opens it becomes the new baseline.
-				this.rebase(at, deltaTokens);
+				this.rebase(sample);
 				return;
 			}
 		}
 
-		this.totalOutputTokens += deltaTokens;
 		if (this.samples.length === 0) {
-			this.samples.push({ at, cumulativeTokens: this.totalOutputTokens, deltaTokens });
+			this.samples.push(sample);
 			this.lastSampleAt = at;
 			this.currentRate = null;
 			this.provisionalRate = null;
@@ -172,13 +190,11 @@ export class OutputRateTracker {
 			return;
 		}
 
-		this.samples.push({ at, cumulativeTokens: this.totalOutputTokens, deltaTokens });
+		this.samples.push(sample);
 		this.lastSampleAt = at;
 		this.prune(at);
-		this.recompute();
-		if (this.currentStatus === "burst" && this.currentStreamedOutputSegment) {
-			this.currentStreamedOutputSegment.burstDetected = true;
-		}
+		const burst = this.recompute();
+		this.updateSummaryFlow(sample, burst);
 	}
 
 	/**
@@ -227,7 +243,7 @@ export class OutputRateTracker {
 		let tokens = this.streamedOutputFlowTokens;
 		let durationMs = this.streamedOutputFlowMs;
 		const current = this.currentStreamedOutputSegment;
-		if (current && !current.burstDetected) {
+		if (current) {
 			tokens += current.tokens;
 			durationMs += current.durationMs;
 		}
@@ -251,7 +267,7 @@ export class OutputRateTracker {
 			const gapMs = at - this.lastStreamedOutputAt;
 			if (gapMs < 0 || gapMs > this.gapMs) {
 				this.startStreamedOutputSegment();
-			} else if (this.currentStreamedOutputSegment) {
+			} else if (this.currentStreamedOutputSegment && this.quarantinedThroughSampleId == null) {
 				this.currentStreamedOutputSegment.durationMs += gapMs;
 				this.currentStreamedOutputSegment.tokens += deltaTokens;
 			}
@@ -259,29 +275,59 @@ export class OutputRateTracker {
 		this.lastStreamedOutputAt = at;
 	}
 
+	private updateSummaryFlow(sample: RateSample, burst: BurstRange | null): void {
+		const segment = this.currentStreamedOutputSegment;
+		if (!segment) return;
+		if (burst) {
+			// A chunk can become dominant only after older samples are pruned.
+			// Roll back before the actual offender, not just the latest checkpoint.
+			while (segment.checkpoints.length > 0 && segment.checkpoints.at(-1)!.sampleId >= burst.firstSampleId) {
+				segment.checkpoints.pop();
+			}
+			const checkpoint = segment.checkpoints.at(-1);
+			segment.tokens = checkpoint?.tokens ?? 0;
+			segment.durationMs = checkpoint?.durationMs ?? 0;
+			// Keep this prefix reversible: a lower custom threshold can identify
+			// an even earlier offender on a later window.
+			this.quarantinedThroughSampleId = Math.max(this.quarantinedThroughSampleId ?? 0, burst.lastSampleId);
+			return;
+		}
+		if (this.currentRate == null) return;
+
+		const baseline = this.samples[0]!;
+		if (this.quarantinedThroughSampleId != null) {
+			// Dilution alone is not recovery. The known bad chunks must be out of
+			// the measured increments, and this event is only the new baseline.
+			if (baseline.id < this.quarantinedThroughSampleId) return;
+			this.startStreamedOutputSegment();
+		}
+		const current = this.currentStreamedOutputSegment!;
+		current.checkpoints.push({ sampleId: sample.id, tokens: current.tokens, durationMs: current.durationMs });
+		// Retain the last checkpoint at/before the live baseline, plus newer ones.
+		// Anything that can still become a burst lies strictly after that anchor.
+		while (current.checkpoints.length > 1 && current.checkpoints[1]!.sampleId <= baseline.id) {
+			current.checkpoints.shift();
+		}
+	}
+
 	private startStreamedOutputSegment(): void {
 		this.finishStreamedOutputSegment();
-		this.currentStreamedOutputSegment = {
-			tokens: 0,
-			durationMs: 0,
-			burstDetected: false,
-		};
+		this.currentStreamedOutputSegment = { tokens: 0, durationMs: 0, checkpoints: [] };
 	}
 
 	private finishStreamedOutputSegment(): void {
 		const segment = this.currentStreamedOutputSegment;
-		if (!segment) return;
-		if (!segment.burstDetected) {
+		if (segment) {
 			this.streamedOutputFlowMs += segment.durationMs;
 			this.streamedOutputFlowTokens += segment.tokens;
 		}
 		this.currentStreamedOutputSegment = null;
+		this.quarantinedThroughSampleId = null;
 	}
 
-	private rebase(at: number, deltaTokens: number): void {
-		this.totalOutputTokens += deltaTokens;
-		this.samples = [{ at, cumulativeTokens: this.totalOutputTokens, deltaTokens }];
-		this.lastSampleAt = at;
+	private rebase(sample: RateSample): void {
+		this.samples = [sample];
+		this.lastSampleAt = sample.at;
 		this.currentRate = null;
 		this.provisionalRate = null;
 		this.currentStatus = "measuring";
@@ -295,27 +341,19 @@ export class OutputRateTracker {
 		}
 	}
 
-	private recompute(): void {
+	private recompute(): BurstRange | null {
 		const start = this.samples[0];
 		const end = this.samples[this.samples.length - 1];
 		if (!start || !end || end === start) {
 			this.currentRate = null;
 			this.provisionalRate = null;
 			this.currentStatus = "measuring";
-			return;
+			return null;
 		}
 
 		const elapsedMs = end.at - start.at;
 		const measuredTokens = end.cumulativeTokens - start.cumulativeTokens;
-		// The window is bounded by elapsed time, not by sample count, so a fast
-		// stream can leave many samples here. Scan in place: slicing plus spreading
-		// into Math.max allocated two arrays on every delta.
 		const measuredSampleCount = this.samples.length - 1;
-		let maximumDeltaTokens = 0;
-		for (let index = 1; index < this.samples.length; index += 1) {
-			const deltaTokens = this.samples[index]!.deltaTokens;
-			if (deltaTokens > maximumDeltaTokens) maximumDeltaTokens = deltaTokens;
-		}
 
 		// A second delta is enough for a directional number, so short streams still
 		// show something; the marker and styling keep it clearly low-confidence.
@@ -327,20 +365,32 @@ export class OutputRateTracker {
 		if (elapsedMs < this.minimumWindowMs || measuredSampleCount < this.minimumDeltas || measuredTokens < this.minimumTokens) {
 			this.currentRate = null;
 			this.currentStatus = "measuring";
-			return;
+			return null;
 		}
 
-		if (maximumDeltaTokens / measuredTokens >= this.burstShare) {
+		// Scan in place without allocating arrays. A lower custom threshold can
+		// identify several offenders: rollback needs the first, recovery the last.
+		let firstSampleId: number | null = null;
+		let lastSampleId = 0;
+		for (let index = 1; index < this.samples.length; index += 1) {
+			const sample = this.samples[index]!;
+			if (sample.deltaTokens / measuredTokens >= this.burstShare) {
+				firstSampleId ??= sample.id;
+				lastSampleId = sample.id;
+			}
+		}
+		if (firstSampleId != null) {
 			this.currentRate = null;
 			// The provisional number is derived from the same dominant chunk, so it
 			// would surface exactly the buffered burst this check suppresses.
 			this.provisionalRate = null;
 			this.currentStatus = "burst";
-			return;
+			return { firstSampleId, lastSampleId };
 		}
 
 		this.currentRate = (measuredTokens * 1000) / elapsedMs;
 		this.currentStatus = null;
 		this.lastStableRate = this.currentRate;
+		return null;
 	}
 }

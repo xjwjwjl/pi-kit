@@ -29,7 +29,7 @@
 
 ## API 层
 
-API 包负责路由注册和 handler 方法。路由注册推荐使用 `autosync.AutoApiGroup`（详见 [autosync-api](../../../autosync-api/SKILL.md)），消除 Gin 路由注册和 Casbin `sys_apis` 写入之间的 Method/Path 重复。
+API 包负责路由注册和 handler 方法。路由注册推荐使用 `autosync.AutoApiGroup`（详见 [autosync-api](../../autosync-api/SKILL.md)），消除 Gin 路由注册和 Casbin `sys_apis` 写入之间的 Method/Path 重复。
 
 ### 推荐用法
 

@@ -4,11 +4,10 @@
 
 | 子包 | 入口 | 功能 |
 |---|---|---|
-| `usage/` | `usage/index.ts` | 状态栏额度 + `/codex-usage` 用量报告 |
-| `reset-credit/` | `reset-credit/index.ts` | `/codex-reset-credit` 查询/消费 reset credit |
+| `usage/` | `usage/index.ts` | 状态栏额度 + `/codex-usage` 用量报告 + `/codex-reset-credit` reset credit 查询/消费 |
 | `fast-mode/` | `fast-mode/index.ts` | `openai-codex` 请求默认 `service_tier: priority` |
 | `websearch/` | `websearch/index.ts` | Codex 模型原生 `web_search` 能力 |
-| `imagegen/` | `imagegen/index.ts` | Codex OAuth 生图（默认 Sunburst，支持并发生成 1–25 张；`/codex-image-model` 切换模型） |
+| `imagegen/` | `imagegen/index.ts` | Codex 订阅额度生图（`openai-codex` 登录，默认 Sunburst，支持并发生成 1–25 张；`/codex-image-model` 切换模型） |
 
 ## 注册
 
@@ -28,13 +27,9 @@ cd extensions/codex/usage && npm run check
 cd extensions/codex && npm run check
 ```
 
-## 事件联动
-
-- `reset-credit` 消费成功后发出 `openai-codex:reset-credit-consumed`；
-- `usage` 监听该事件并强制刷新状态栏额度。
-
 ## 注意
 
-- 聚合包仅声明入口与脚本，不共享子包源码；子包之间通过 `pi.events` 事件通信。
+- 聚合包仅声明入口与脚本，不共享子包源码。
+- `usage` 内部共享 Codex 凭据读取与 curl 传输层，reset credit 消费成功后直接刷新状态栏额度。
 - 底层 reset-credit / usage 接口是 Codex 内部接口，非公开稳定 API。
 - `imagegen` 调用 Codex Images 内部接口，可能随服务端调整；详见子包 README。

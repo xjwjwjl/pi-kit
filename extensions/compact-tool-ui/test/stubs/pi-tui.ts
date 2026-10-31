@@ -22,6 +22,37 @@ export class Container {
 	}
 }
 
+/** Native-like Box layout: one padded/background-filled surface around all children. */
+export class Box extends Container {
+	private paddingX: number;
+	private paddingY: number;
+	private bgFn?: (line: string) => string;
+	constructor(paddingX = 1, paddingY = 1, bgFn?: (line: string) => string) {
+		super();
+		this.paddingX = paddingX;
+		this.paddingY = paddingY;
+		this.bgFn = bgFn;
+	}
+	invalidate() {
+		for (const child of this.children) (child as { invalidate?(): void }).invalidate?.();
+	}
+	render(width: number): string[] {
+		if (this.children.length === 0) return [];
+		const contentWidth = Math.max(1, width - this.paddingX * 2);
+		const lines = super.render(contentWidth);
+		if (lines.length === 0) return [];
+		const fill = (line: string) => {
+			const padded = line + " ".repeat(Math.max(0, width - visibleWidth(line)));
+			return this.bgFn ? this.bgFn(padded) : padded;
+		};
+		return [
+			...Array.from({ length: this.paddingY }, () => fill("")),
+			...lines.map((line) => fill(" ".repeat(this.paddingX) + line)),
+			...Array.from({ length: this.paddingY }, () => fill("")),
+		];
+	}
+}
+
 export type SettingItem = {
 	id: string;
 	label: string;

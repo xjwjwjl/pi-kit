@@ -82,6 +82,59 @@ export function shortPath(value: unknown): string {
 	return sanitized;
 }
 
+/** Elision marker shared by every middle-truncated label. */
+export const MIDDLE_ELLIPSIS = "…";
+
+/**
+ * Middle-truncate plain text so both ends stay readable. Head and tail split the
+ * space left after the ellipsis; no boundary awareness is applied, which keeps it
+ * safe for short identifiers and non-path strings.
+ */
+export function truncateMiddle(value: string, maxChars: number, ellipsis = MIDDLE_ELLIPSIS): string {
+	if (value.length <= maxChars) return value;
+	if (maxChars <= ellipsis.length) return ellipsis;
+	const budget = maxChars - ellipsis.length;
+	const headLength = Math.ceil(budget / 2);
+	const head = value.slice(0, headLength);
+	const tail = budget - headLength > 0 ? value.slice(-(budget - headLength)) : "";
+	return `${head}${ellipsis}${tail}`;
+}
+
+/** Only snap to a boundary when it is close enough that it does not cost real content. */
+function snapWindow(budget: number): number {
+	return Math.max(4, Math.floor(budget / 4));
+}
+
+/**
+ * Path-aware middle truncation: the cut snaps to `/` or `\` boundaries so the
+ * leading directories and the trailing segment (usually the file name) stay
+ * whole. Falls back to a plain balanced cut when no separator is in reach.
+ */
+export function truncatePathMiddle(value: string, maxChars: number, ellipsis = MIDDLE_ELLIPSIS): string {
+	if (value.length <= maxChars) return value;
+	if (maxChars <= ellipsis.length + 2) return ellipsis;
+
+	const budget = maxChars - ellipsis.length;
+	const headBudget = Math.ceil(budget / 2);
+	const tailBudget = budget - headBudget;
+	const tailStart = value.length - tailBudget;
+	if (tailStart <= headBudget) return truncateMiddle(value, maxChars, ellipsis);
+
+	// Head ends before a separator so the ellipsis can replace the join.
+	const headSeparator = Math.max(value.lastIndexOf("/", headBudget - 1), value.lastIndexOf("\\", headBudget - 1));
+	const headEnd = headSeparator > 0 && headBudget - headSeparator <= snapWindow(headBudget) ? headSeparator : headBudget;
+
+	// Tail begins at a separator so the trailing segments (and file name) stay intact.
+	const tailWindow = snapWindow(tailBudget);
+	const tailCandidates = [value.indexOf("/", tailStart), value.indexOf("\\", tailStart)]
+		.filter((index) => index >= 0 && index - tailStart <= tailWindow)
+		.sort((a, b) => a - b);
+	const tailBegin = tailCandidates[0] ?? tailStart;
+
+	if (tailBegin <= headEnd) return truncateMiddle(value, maxChars, ellipsis);
+	return `${value.slice(0, headEnd)}${ellipsis}${value.slice(tailBegin)}`;
+}
+
 export function firstNonEmptyLine(text: string): string {
 	return stripAnsi(text)
 		.split("\n")

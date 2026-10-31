@@ -1,0 +1,28 @@
+{
+  "name": "subagent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "One-shot foreground Pi subagents with bounded execution and readable results.",
+  "scripts": {
+    "test": "node --experimental-strip-types --test --test-timeout=30000 test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test",
+    "eval:guidance": "node --use-env-proxy --experimental-strip-types scripts/eval-guidance.ts"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=1.2.0 <2.0.0",
+    "@earendil-works/pi-tui": ">=1.2.0 <2.0.0",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.2.0",
+    "@earendil-works/pi-tui": "1.2.0",
+    "@types/node": "24.12.4",
+    "typebox": "1.0.51",
+    "typescript": "5.9.3"
+  }
+}

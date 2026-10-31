@@ -95,19 +95,16 @@ function notify(
   if (ctx.hasUI) ctx.ui.notify(message, level);
 }
 
-function syncImageToolAvailability(
-  pi: Pick<ExtensionAPI, "getActiveTools" | "setActiveTools">,
-  model: ExtensionContext["model"],
-): void {
-  const activeTools = pi.getActiveTools();
-  const isActive = activeTools.includes(CODEX_IMAGE_GENERATION_TOOL);
-  const shouldBeActive = isCodexModel(model);
+const CODEX_PROVIDER = "openai-codex";
+const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 
-  if (shouldBeActive && !isActive) {
-    pi.setActiveTools([...activeTools, CODEX_IMAGE_GENERATION_TOOL]);
-  } else if (!shouldBeActive && isActive) {
-    pi.setActiveTools(activeTools.filter((name) => name !== CODEX_IMAGE_GENERATION_TOOL));
-  }
+function hasCodexCredential(modelRegistry: ExtensionContext["modelRegistry"]): boolean {
+  return modelRegistry.getProviderAuthStatus(CODEX_PROVIDER).configured;
+}
+
+function resolveCodexBaseUrl(modelRegistry: ExtensionContext["modelRegistry"]): string {
+  const codexModel = modelRegistry.getAll().find((entry) => entry.provider === CODEX_PROVIDER);
+  return codexModel?.baseUrl ?? DEFAULT_CODEX_BASE_URL;
 }
 
 export function createCodexImageGenExtension(
@@ -154,20 +151,14 @@ export function createCodexImageGenExtension(
       name: CODEX_IMAGE_GENERATION_TOOL,
       label: "Codex Image Gen",
       description:
-        "Generate or edit images into new files with a selectable GPT Image model through the signed-in OpenAI Codex account; source files are never modified in place. The optional model parameter accepts flare or sunburst; it defaults to Sunburst unless changed with /codex-image-model. Count defaults to 1 and is limited to 25; candidates use the same prompt and requests run concurrently. Each generated image is limited to 20 MiB. Quality defaults to high and accepts low, medium, or high. Size defaults to auto; optionally pass a valid WIDTHxHEIGHT to request target dimensions, which the actual output may not match. Pass reference_images (relative or absolute paths to existing PNG/JPG/WebP files on the local filesystem) to use references the user provided or explicitly identified, or outputs generated for the current request when making a permitted correction; otherwise generation is text-only. Saves to generated-images/ by default, or to an explicitly requested workspace-relative PNG path.",
+        "Generate or edit images into new files with a selectable GPT Image model through the signed-in OpenAI Codex account; source files are never modified in place. Call it only when the user explicitly asks for image generation or editing. Defaults: Sunburst model, quality high, size auto, one image saved under generated-images/.",
       promptSnippet: "Generate or edit images into new files only when explicitly requested by the user.",
       promptGuidelines: [
-        "Only call codex_image_gen when the user explicitly requests image generation or editing; each generated image consumes Codex image-generation quota. Always save a new file instead of modifying the source in place.",
-        "Use count only for multiple candidates from the same prompt: use the user's exact count, up to 25, or 4 if they request multiple without a number. Otherwise omit count (default 1). For different styles, compositions, or design directions, use separate calls with distinct prompts; keep the combined image count at the requested total.",
-        "Use model only when the user explicitly requests Flare or Sunburst; otherwise omit it (default Sunburst, or the choice made with /codex-image-model).",
-        "Write a clear, structured prompt that preserves the user's request: specify the subject/action, scene, composition, visual style, lighting/palette, and requested aspect ratio when relevant. Do not invent unrequested text, logos, props, or story details.",
-        "When the user provides or refers to a local reference image, pass its path through reference_images. In the prompt, identify each input by its 1-based order and purpose (e.g. Image 1: edit target, Image 2: style reference), describe how to combine them, and state the requested changes and details that must remain unchanged. Preserve subject identity when relevant. For a new scene, pose and expression may follow the requested action. For a local edit, change only requested elements and preserve all unrelated details, including pose and expression.",
-        "Use reference_images only with existing files the user provided or explicitly identified, or outputs generated for the current request when making a permitted correction; do not invent paths or select unrelated local images.",
-        "Use quality only when the user explicitly requests a fidelity level: 'low', 'medium', or 'high'. Otherwise omit it (default high).",
-        "Use size only when the user requests a specific resolution or orientation; otherwise omit it (default auto). For explicit dimensions, use a valid WIDTHxHEIGHT with both sides multiples of 16, each side at most 3840, total pixels 655360-8294400, and aspect ratio at most 3:1. Align the prompt's composition with the requested orientation. The standard 1920x1080 is invalid under these constraints; do not claim exact 1080p. Size requests target dimensions, not guaranteed output dimensions; do not report the requested size as the actual size without verifying the saved file.",
-        "After generating, inspect the results against the user's requirements. For clear visual mismatches, allow at most one automatic correction round per user request; correct only nonconforming images and keep acceptable results. Use each affected output as a reference for local corrections and repeat the change/preserve constraints. Do not automatically retry authentication, access, rate-limit, or quota errors. If the result still misses or the correction is ambiguous, show it and ask before further calls; do not retry for subjective minor differences.",
-        "Use output_path only when the user explicitly requests a destination; keep it relative to the working directory and use a .png filename. For multiple images, the plugin adds numbered suffixes. For corrections, choose a fresh PNG filename in the same directory as the requested destination; never reuse an existing output path. Otherwise omit output_path to use generated-images/.",
-        "When linking generated images in the final response, use the exact absolute file:// URL provided in the tool result as the Markdown link target. Use the relative path only as link text or for display; do not link to a relative path.",
+        "Only call codex_image_gen when the user explicitly requests image generation or editing; each generated image consumes Codex quota. Always save a new file instead of modifying the source in place.",
+        "Use count only for multiple candidates from the same prompt: the user's exact count, up to 25, or 4 if they request multiple without a number. Otherwise omit count (default 1). For different styles, compositions, or design directions, use separate calls with distinct prompts; keep the combined image count at the requested total.",
+        "Write a clear, structured prompt: subject and action, scene, composition, visual style, lighting, palette, and any requested aspect ratio. Do not invent unrequested text, logos, props, or story details. When references are used, identify each input by its 1-based order and purpose, describe how to combine them, and state the requested changes and details that must remain unchanged. For a local edit, change only requested elements and preserve all unrelated details, including pose and expression. Use reference_images only with files the user provided or identified, or outputs generated for the current request when making a permitted correction; do not invent paths or select unrelated local images.",
+        "Omit model unless the user asks for Flare or Sunburst, omit quality unless they name a fidelity level, and omit size unless they request a resolution or orientation; treat size as target dimensions, not guaranteed output dimensions, and do not report the requested size as the actual size without verifying the saved file. Pass output_path only for an explicitly requested workspace-relative .png destination. For corrections, choose a fresh PNG filename in the same directory as the requested destination and never reuse an existing output path. Otherwise omit output_path to use generated-images/. Link each result with the exact absolute file:// URL from the tool result.",
+        "Inspect results against the request. For clear visual mismatches, allow at most one automatic correction round per user request: correct only nonconforming images and keep acceptable results. Use each affected output as a reference for local corrections and repeat the change/preserve constraints. Do not automatically retry authentication, access, rate-limit, or quota errors. If the result still misses or the correction is ambiguous, show it and ask before further calls; do not retry for subjective minor differences.",
       ],
       parameters: IMAGE_TOOL_PARAMETERS,
       renderCall(args, theme, context) {
@@ -188,15 +179,31 @@ export function createCodexImageGenExtension(
       async execute(_toolCallId, params, signal, _onUpdate, ctx) {
         const startedAt = performance.now();
         const model = ctx.model;
-        if (!model || !isCodexModel(model)) {
-          throw new Error("codex_image_gen is available only with the openai-codex Responses model");
+        const usesCodexModel = isCodexModel(model);
+        if (!usesCodexModel && !hasCodexCredential(ctx.modelRegistry)) {
+          throw new Error(
+            "codex_image_gen requires a saved OpenAI Codex login; run /login openai-codex",
+          );
         }
 
-        const resolvedAuth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-        if (!resolvedAuth.ok) {
-          throw new Error(`Could not resolve OpenAI Codex authentication: ${resolvedAuth.error}`);
+        let apiKey: string | undefined;
+        let baseUrl: string;
+        let headers: Record<string, string | null> | undefined;
+        if (usesCodexModel && model) {
+          const resolvedAuth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+          if (!resolvedAuth.ok) {
+            throw new Error(`Could not resolve OpenAI Codex authentication: ${resolvedAuth.error}`);
+          }
+          apiKey = resolvedAuth.apiKey;
+          baseUrl = resolvedAuth.baseUrl ?? model.baseUrl ?? resolveCodexBaseUrl(ctx.modelRegistry);
+          headers = resolvedAuth.headers;
+        } else {
+          const resolution = await ctx.modelRegistry.getProviderAuth(CODEX_PROVIDER);
+          apiKey = resolution?.auth.apiKey;
+          baseUrl = resolution?.auth.baseUrl ?? resolveCodexBaseUrl(ctx.modelRegistry);
+          headers = resolution?.auth.headers;
         }
-        if (!resolvedAuth.apiKey) {
+        if (!apiKey) {
           throw new Error("No OpenAI Codex authentication token is available; run /login openai-codex");
         }
 
@@ -209,11 +216,7 @@ export function createCodexImageGenExtension(
           model: params.model ?? selectedImageModel,
           outputPath: params.output_path,
           cwd: ctx.cwd,
-          auth: {
-            apiKey: resolvedAuth.apiKey,
-            baseUrl: resolvedAuth.baseUrl ?? model.baseUrl,
-            headers: resolvedAuth.headers,
-          },
+          auth: { apiKey, baseUrl, headers },
           signal,
           ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
           ...(options.now ? { now: options.now } : {}),
@@ -255,9 +258,6 @@ export function createCodexImageGenExtension(
         };
       },
     });
-
-    pi.on("session_start", (_event, ctx) => syncImageToolAvailability(pi, ctx.model));
-    pi.on("model_select", (event) => syncImageToolAvailability(pi, event.model));
   };
 }
 

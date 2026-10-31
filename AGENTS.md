@@ -8,6 +8,7 @@ Each extension is an independent Pi package with its own `package.json` and depe
 
 - `extensions/<name>/index.ts`: Pi extension entrypoints
 - `skills/<name>/SKILL.md`: Pi skills
+- `.pi/skills/<name>/SKILL.md`: project-scoped skills; `.pi/` is gitignored
 - `themes/`: Pi TUI 主题文件，由全局 `settings.json` 的 `themes` 数组加载
 - `shared/`: code shared across extensions
 - `tests/`: focused tests
@@ -41,6 +42,11 @@ Each extension is an independent Pi package with its own `package.json` and depe
 - 如需说明背景、影响范围、兼容性、迁移步骤或验证方式，使用 commit body 补充，不要把所有细节堆在标题中。
 
 ## Add New Resources
+
+For tool TUI work:
+
+1. Read `.pi/skills/tool-tui-design/SKILL.md` before changing `renderCall`, `renderResult`, `renderShell`, or a tool renderer.
+2. Follow the shared invariants in `.pi/skills/tool-tui-design/references/design.md`; keep each tool's summary specific instead of copying one tool's columns.
 
 For a new extension:
 

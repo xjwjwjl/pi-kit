@@ -4,8 +4,9 @@ Experimental model-callable image generation for Pi sessions using the `openai-c
 
 ## Behavior
 
-- Registers `codex_image_gen` for `openai-codex` / `openai-codex-responses` sessions only.
-- Uses Pi's request-time provider authentication; no API key or token is stored by this extension.
+- Registers `codex_image_gen` as a normal Pi tool for every chat model. It stays active regardless of the active provider, so non-Codex models can call it too; the image request always goes through the signed-in OpenAI Codex account. A Codex model is not required, but `/login openai-codex` is.
+- Uses Pi's request-time `openai-codex` authentication (the saved Codex login, refreshed on demand); no API key or token is stored by this extension.
+- Requires the legacy Codex login: run `/login openai-codex`. The `openai` provider's "Sign in with ChatGPT" credential cannot be used here; OpenAI rejects it for image generation.
 - Sends one prompt to Codex's Images generation endpoint using `gpt-image-2.5-sunburst` by default, `size: auto`, and `quality` defaulting to `high`; decoded output is capped at 20 MiB per image.
 - Accepts `count` from 1 to 25 (default 1). It sends the same prompt in one `n: 1` request per image and starts all requested calls concurrently, then returns all successful images and paths.
 - Accepts `quality` as `low`, `medium`, or `high` (default `high`); the model passes it only when the user asks for a specific fidelity level. Higher quality produces more detail but takes longer and can cost more quota.
@@ -21,6 +22,10 @@ Experimental model-callable image generation for Pi sessions using the `openai-c
 ## Important
 
 Codex's image endpoint is an implementation-specific backend interface, not a stable public API contract. Availability, model support, reference-image support, and quota are controlled by the signed-in OpenAI/Codex account and may change. Each generated image is a separate request and can consume quota; large counts may be rate-limited. The tool instructions limit calls to explicit image-generation or editing requests; use `count` only when the user asks for multiple candidates from the same prompt.
+
+The calling model may be any provider, but image generation and billing always use the Codex account. Tool results include image content; if the active provider/model cannot accept images in tool results, the image may be dropped or the request may fail.
+
+The OpenAI ChatGPT subscription (`openai` provider, "Sign in with ChatGPT") is not usable for image generation: OpenAI answers the Images API with `401 rejected_by_hardened_oauth_boundary` and the Responses `image_generation` tool with `subscription_sharing_unsupported_capability`. Use a separate Codex login for this extension, or an OpenAI platform API key with the Images API.
 
 ## Prompt policy
 
@@ -39,4 +44,4 @@ Codex's image endpoint is an implementation-specific backend interface, not a st
 npm run check
 ```
 
-For a live smoke test, load the Codex extension package and explicitly ask the `openai-codex` model to create an image. This sends a real image-generation request and may consume account quota. Check the generated file under `generated-images/` (or the explicitly requested workspace-relative path) and the tool result summary; inline TUI previews are a future TODO.
+For a live smoke test, load the Codex extension package, make sure `/login openai-codex` has succeeded, and explicitly ask for an image. Switch to a non-Codex model and ask again to confirm the tool stays available there. This sends a real image-generation request and may consume account quota. Check the generated file under `generated-images/` (or the explicitly requested workspace-relative path) and the tool result summary; inline TUI previews are a future TODO.

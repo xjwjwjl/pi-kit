@@ -6,6 +6,15 @@ test("summarizeBashCommand keeps short single-line commands intact", () => {
 	assert.deepEqual(summarizeBashCommand("git status"), { text: "git status", summarized: false });
 });
 
+test("summarizeBashCommand expands display tabs without changing the command or exceeding its budget", () => {
+	const command = "printf\t'column\tvalue'";
+	assert.deepEqual(summarizeBashCommand(command), { text: "printf   'column   value'", summarized: false });
+	assert.equal(command, "printf\t'column\tvalue'");
+	const long = summarizeBashCommand(`printf\t${"column\t".repeat(20)}`);
+	assert.doesNotMatch(long.text, /\t/);
+	assert.ok(long.text.length <= 64);
+});
+
 test("summarizeBashCommand truncates long single-line commands from the middle", () => {
 	const command = `echo ${"x".repeat(160)}`;
 	const summary = summarizeBashCommand(command);

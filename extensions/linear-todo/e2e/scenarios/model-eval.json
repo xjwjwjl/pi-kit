@@ -1,0 +1,645 @@
+{
+  "schemaVersion": 1,
+  "scenarios": {
+    "M01": {
+      "description": "A simple question should not create a Todo plan or edit the repository.",
+      "category": "simple-question",
+      "oracle": "process",
+      "turns": [
+        {
+          "message": "Explain what readConfig in src/config.ts does. Do not edit any files."
+        }
+      ],
+      "regression": [
+        {
+          "name": "fixture tests",
+          "command": "node",
+          "args": [
+            "--experimental-strip-types",
+            "--test",
+            "tests/auth.test.ts",
+            "tests/cache.test.ts"
+          ]
+        }
+      ],
+      "expect": {
+        "todo": "avoid",
+        "finalResponse": "non-empty",
+        "repoChange": "none"
+      }
+    },
+    "M02": {
+      "description": "A one-line documentation change must land without touching behavior.",
+      "category": "simple-modification",
+      "oracle": "outcome",
+      "turns": [
+        {
+          "message": "Add exactly one concise explanatory comment line to `authorizationHeader` in `src/auth.ts`. Do not change its behavior, its signature, or any other file. Then run the existing tests."
+        }
+      ],
+      "acceptance": [
+        {
+          "name": "acceptance",
+          "command": "node",
+          "args": [
+            "--experimental-strip-types",
+            "--test",
+            "acceptance/check.test.ts"
+          ]
+        }
+      ],
+      "acceptanceFixture": "M02",
+      "regression": [
+        {
+          "name": "fixture tests",
+          "command": "node",
+          "args": [
+            "--experimental-strip-types",
+            "--test",
+            "tests/auth.test.ts",
+            "tests/cache.test.ts"
+          ]
+        }
+      ],
+      "expect": {
+        "todo": "avoid",
+        "finalResponse": "non-empty",
+        "repoChange": "some"
+      }
+    },
+    "M03": {
+      "description": "A multi-file feature must be implemented end to end, not just planned.",
+      "category": "multi-file-feature",
+      "oracle": "outcome",
+      "turns": [
+        {
+          "message": "Add `readCacheTtlMs(env)` to `src/cache.ts`. It must return `readConfig(env).cacheTtlMs`, so `CACHE_TTL_MS=2500` yields 2500 and an invalid value throws. Export it from `src/index.ts`, add a focused test in `tests/`, and run the full suite."
+        }
+      ],
+      "acceptance": [
+        {
+          "name": "acceptance",
+          "command": "node",
+          "args": [
+            "--experimental-strip-types",
+            "--test",
+            "acceptance/check.test.ts"
+          ]
+        }
+      ],
+      "acceptanceFixture": "M03",
+      "regression": [
+        {
+          "name": "fixture tests",
+          "command": "node",
+          "args": [
+            "--experimental-strip-types",
+            "--test",
+            "tests/auth.test.ts",
+            "tests/cache.test.ts"
+          ]
+        }
+      ],
+      "expect": {
+        "todo": "recommended",
+        "finalTodoPhase": "completed",
+        "finalResponse": "non-empty",
+        "repoChange": "some",
+        "plan": {
+          "minItems": 3,
+          "maxItems": 7,
+          "requireVerificationTask": true
+        }
+      }
+    },
+    "M04": {
+      "description": "An ambiguous bug report must be turned into a concrete, tested fix.",
+      "category": "ambiguous-investigation",
+      "oracle": "outcome",
+      "turns": [
+        {
+          "message": "The app occasionally sends malformed Authorization headers. `authorizationHeader` must reject a token that contains whitespace (throw an Error mentioning AUTH_TOKEN) while still trimming surrounding whitespace from valid tokens. Investigate, fix it, add a regression test, and run the suite."
+        }
+      ],
+      "acceptance": [
+        {
+          "name": "acceptance",
+          "command": "node",
+          "args": [
+            "--experimental-strip-types",
+            "--test",
+            "acceptance/check.test.ts"
+          ]
+        }
+      ],
+      "acceptanceFixture": "M04",
+      "regression": [
+        {
+          "name": "fixture tests",
+          "command": "node",
+          "args": [
+            "--experimental-strip-types",
+            "--test",
+            "tests/auth.test.ts",
+            "tests/cache.test.ts"
+          ]
+        }
+      ],
+      "expect": {
+        "todo": "recommended",
+        "finalTodoPhase": "completed",
+        "finalResponse": "non-empty",
+        "repoChange": "some",
+        "plan": {
+          "minItems": 2,
+          "maxItems": 7,
+          "requireVerificationTask": true
+        }
+      }
+    },
+    "M05": {
+      "description": "Several independent deliverables must all be captured and delivered.",
+      "category": "multiple-requirements",
+      "oracle": "outcome",
+      "turns": [
+        {
+          "message": "Deliver all four items: (1) document the cache expiration semantics in README.md, (2) add `isExpired(entry, now)` to `src/cache.ts` returning `now >= entry.expiresAt` and export it from `src/index.ts`, (3) add a focused test for the exact-deadline boundary in `tests/`, (4) run the complete test suite. Summarize every delivered item."
+        }
+      ],
+      "acceptance": [
+        {
+          "name": "acceptance",
+          "command": "node",
+          "args": [
+            "--experimental-strip-types",
+            "--test",
+            "acceptance/check.test.ts"
+          ]
+        }
+      ],
+      "acceptanceFixture": "M05",
+      "regression": [
+        {
+          "name": "fixture tests",
+          "command": "node",
+          "args": [
+            "--experimental-strip-types",
+            "--test",
+            "tests/auth.test.ts",
+            "tests/cache.test.ts"
+          ]
+        }
+      ],
+      "expect": {
+        "todo": "recommended",
+        "finalTodoPhase": "completed",
+        "finalResponse": "non-empty",
+        "repoChange": "some",
+        "plan": {
+          "minItems": 4,
+          "maxItems": 7,
+          "requireVerificationTask": true
+        }
+      }
+    },
+    "M06": {
+      "description": "A changed constraint must revise the plan without discarding completed work.",
+      "category": "requirement-change",
+      "oracle": "outcome",
+      "turns": [
+        {
+          "message": "Add `parseTtlMs(raw)` to `src/config.ts` that returns a non-negative integer number of milliseconds or throws an Error mentioning CACHE_TTL_MS. Export it from `src/index.ts`, add a focused test, and run the suite."
+        },
+        {
+          "message": "Change of constraint: do not add a new module and do not change `readConfig`'s public shape. Keep `parseTtlMs` inside `src/config.ts` and make it reject values above 60000. Preserve completed work, revise the remaining steps, and re-run verification."
+        }
+      ],
+      "acceptance": [
+        {
+          "name": "acceptance",
+          "command": "node",
+          "args": [
+            "--experimental-strip-types",
+            "--test",
+            "acceptance/check.test.ts"
+          ]
+        }
+      ],
+      "acceptanceFixture": "M06",
+      "regression": [
+        {
+          "name": "fixture tests",
+          "command": "node",
+          "args": [
+            "--experimental-strip-types",
+            "--test",
+            "tests/auth.test.ts",
+            "tests/cache.test.ts"
+          ]
+        }
+      ],
+      "expect": {
+        "todo": "recommended",
+        "finalTodoPhase": "completed",
+        "finalResponse": "non-empty",
+        "repoChange": "some",
+        "plan": {
+          "minItems": 2,
+          "maxItems": 7,
+          "requireVerificationTask": true
+        }
+      }
+    },
+    "M07": {
+      "description": "A discovered defect must be fixed rather than papered over by a premature advance.",
+      "category": "test-failure",
+      "oracle": "outcome",
+      "turns": [
+        {
+          "message": "`putCache` currently accepts a non-integer `ttlMs` such as 1.5. Make it reject a non-integer `ttlMs` with an Error mentioning ttlMs, add a regression test for it, run the focused tests, and do not claim success while tests are failing."
+        }
+      ],
+      "acceptance": [
+        {
+          "name": "acceptance",
+          "command": "node",
+          "args": [
+            "--experimental-strip-types",
+            "--test",
+            "acceptance/check.test.ts"
+          ]
+        }
+      ],
+      "acceptanceFixture": "M07",
+      "regression": [
+        {
+          "name": "fixture tests",
+          "command": "node",
+          "args": [
+            "--experimental-strip-types",
+            "--test",
+            "tests/auth.test.ts",
+            "tests/cache.test.ts"
+          ]
+        }
+      ],
+      "expect": {
+        "todo": "recommended",
+        "finalTodoPhase": "completed",
+        "finalResponse": "non-empty",
+        "repoChange": "some",
+        "plan": {
+          "minItems": 2,
+          "maxItems": 7,
+          "requireVerificationTask": true
+        }
+      }
+    },
+    "M08": {
+      "description": "A missing environment prerequisite should result in a truthful block.",
+      "category": "external-block",
+      "oracle": "process",
+      "turns": [
+        {
+          "message": "Investigate whether the sample app can run the protected-auth verification without an AUTH_TOKEN environment variable. If the prerequisite is unavailable, call todo block with the exact reason instead of inventing credentials or marking the task complete."
+        }
+      ],
+      "regression": [
+        {
+          "name": "fixture tests",
+          "command": "node",
+          "args": [
+            "--experimental-strip-types",
+            "--test",
+            "tests/auth.test.ts",
+            "tests/cache.test.ts"
+          ]
+        }
+      ],
+      "expect": {
+        "todo": "required",
+        "finalTodoPhase": "blocked",
+        "finalResponse": "non-empty",
+        "repoChange": "none",
+        "plan": {
+          "minItems": 1,
+          "maxItems": 4,
+          "requireVerificationTask": false
+        }
+      }
+    },
+    "M09": {
+      "description": "User-provided unblock information should resume the current stage.",
+      "category": "resume-after-block",
+      "oracle": "process",
+      "turns": [
+        {
+          "message": "Check the protected-auth verification. If AUTH_TOKEN is missing, record the task as blocked and wait for user input."
+        },
+        {
+          "message": "The required value is now available for this run as demo-token. Resume the blocked stage, use the value only in memory, and verify without persisting a secret."
+        }
+      ],
+      "regression": [
+        {
+          "name": "fixture tests",
+          "command": "node",
+          "args": [
+            "--experimental-strip-types",
+            "--test",
+            "tests/auth.test.ts",
+            "tests/cache.test.ts"
+          ]
+        }
+      ],
+      "expect": {
+        "todo": "required",
+        "finalTodoPhase": "completed",
+        "finalResponse": "non-empty",
+        "repoChange": "none",
+        "plan": {
+          "minItems": 1,
+          "maxItems": 4,
+          "requireVerificationTask": false
+        }
+      }
+    },
+    "M10": {
+      "description": "A user interruption must not lose the in-flight implementation.",
+      "category": "user-interruption",
+      "oracle": "outcome",
+      "turns": [
+        {
+          "message": "Implement `remainingTtlMs(entry, now)` in `src/cache.ts` returning `Math.max(0, entry.expiresAt - now)`, export it from `src/index.ts`, and add a focused test."
+        },
+        {
+          "message": "Unrelated question: briefly explain why JavaScript Date.now() returns milliseconds. Answer this without losing the current implementation plan."
+        },
+        {
+          "message": "Return to the original cache task, continue from the current Todo stage, and finish verification."
+        }
+      ],
+      "acceptance": [
+        {
+          "name": "acceptance",
+          "command": "node",
+          "args": [
+            "--experimental-strip-types",
+            "--test",
+            "acceptance/check.test.ts"
+          ]
+        }
+      ],
+      "acceptanceFixture": "M10",
+      "regression": [
+        {
+          "name": "fixture tests",
+          "command": "node",
+          "args": [
+            "--experimental-strip-types",
+            "--test",
+            "tests/auth.test.ts",
+            "tests/cache.test.ts"
+          ]
+        }
+      ],
+      "expect": {
+        "todo": "recommended",
+        "finalTodoPhase": "completed",
+        "finalResponse": "non-empty",
+        "repoChange": "some",
+        "plan": {
+          "minItems": 2,
+          "maxItems": 7,
+          "requireVerificationTask": true
+        }
+      }
+    },
+    "M11": {
+      "description": "A cancel request must stop edits and automatic continuation.",
+      "category": "pause-cancel",
+      "oracle": "process",
+      "turns": [
+        {
+          "message": "Begin a multi-step cache investigation and keep the plan visible while you work."
+        },
+        {
+          "message": "Pause and cancel the current work now. Do not continue automatically, do not make further edits, and wait for my next instruction.",
+          "delivery": "steer",
+          "afterMs": 100
+        }
+      ],
+      "regression": [
+        {
+          "name": "fixture tests",
+          "command": "node",
+          "args": [
+            "--experimental-strip-types",
+            "--test",
+            "tests/auth.test.ts",
+            "tests/cache.test.ts"
+          ]
+        }
+      ],
+      "expect": {
+        "todo": "recommended",
+        "finalTodoPhase": "either",
+        "finalResponse": "non-empty",
+        "repoChange": "either",
+        "plan": {
+          "minItems": 1,
+          "maxItems": 7,
+          "requireVerificationTask": false
+        }
+      }
+    },
+    "M12": {
+      "description": "A restarted session must continue the same task and finish it.",
+      "category": "session-recovery",
+      "oracle": "outcome",
+      "turns": [
+        {
+          "message": "Inspect the sample app, create a concise plan with a stable action-oriented overview title, a complete goal, and short task titles with execution descriptions, and complete the first meaningful stage: add `isExpired(entry, now)` to `src/cache.ts` returning `now >= entry.expiresAt` and export it from `src/index.ts`."
+        },
+        {
+          "message": "Resume the current task from the restored Session using the saved plan title, complete goal and task execution descriptions; do not replace the goal with the short title. Add a focused test, finish the implementation, and verify all tests."
+        }
+      ],
+      "acceptance": [
+        {
+          "name": "acceptance",
+          "command": "node",
+          "args": [
+            "--experimental-strip-types",
+            "--test",
+            "acceptance/check.test.ts"
+          ]
+        }
+      ],
+      "acceptanceFixture": "M12",
+      "regression": [
+        {
+          "name": "fixture tests",
+          "command": "node",
+          "args": [
+            "--experimental-strip-types",
+            "--test",
+            "tests/auth.test.ts",
+            "tests/cache.test.ts"
+          ]
+        }
+      ],
+      "expect": {
+        "todo": "recommended",
+        "finalTodoPhase": "completed",
+        "finalResponse": "non-empty",
+        "repoChange": "some",
+        "plan": {
+          "minItems": 2,
+          "maxItems": 7,
+          "requireVerificationTask": true
+        }
+      },
+      "restartAfterTurn": 1
+    },
+    "M13": {
+      "description": "Compaction must preserve the current stage and the remaining work.",
+      "category": "context-compaction",
+      "oracle": "outcome",
+      "turns": [
+        {
+          "message": "Create a short Todo plan with a stable action-oriented overview title, a complete goal, and short task titles with execution descriptions, and add `readCacheOr(entry, now, fallback)` to `src/cache.ts` returning the cached value before expiry and the fallback otherwise. Export it from `src/index.ts` and leave the current stage identifiable."
+        },
+        {
+          "message": "After compaction, retain the plan overview title, complete goal and task execution descriptions while continuing the current stage. Add a focused test, verify the result, and report what changed."
+        }
+      ],
+      "acceptance": [
+        {
+          "name": "acceptance",
+          "command": "node",
+          "args": [
+            "--experimental-strip-types",
+            "--test",
+            "acceptance/check.test.ts"
+          ]
+        }
+      ],
+      "acceptanceFixture": "M13",
+      "regression": [
+        {
+          "name": "fixture tests",
+          "command": "node",
+          "args": [
+            "--experimental-strip-types",
+            "--test",
+            "tests/auth.test.ts",
+            "tests/cache.test.ts"
+          ]
+        }
+      ],
+      "expect": {
+        "todo": "recommended",
+        "finalTodoPhase": "completed",
+        "finalResponse": "non-empty",
+        "repoChange": "some",
+        "plan": {
+          "minItems": 2,
+          "maxItems": 7,
+          "requireVerificationTask": true
+        }
+      },
+      "compactAfterTurn": 1
+    },
+    "M14": {
+      "description": "Verification must gate the completion claim.",
+      "category": "verification-discipline",
+      "oracle": "outcome",
+      "turns": [
+        {
+          "message": "Add `assertCacheEntry(entry)` to `src/cache.ts` that throws an Error mentioning CacheEntry when `expiresAt` is not a finite number, export it from `src/index.ts`, and add a focused test. The task is not complete until tests are run and their actual result is checked; do not give a final success statement before verification."
+        }
+      ],
+      "acceptance": [
+        {
+          "name": "acceptance",
+          "command": "node",
+          "args": [
+            "--experimental-strip-types",
+            "--test",
+            "acceptance/check.test.ts"
+          ]
+        }
+      ],
+      "acceptanceFixture": "M14",
+      "regression": [
+        {
+          "name": "fixture tests",
+          "command": "node",
+          "args": [
+            "--experimental-strip-types",
+            "--test",
+            "tests/auth.test.ts",
+            "tests/cache.test.ts"
+          ]
+        }
+      ],
+      "expect": {
+        "todo": "recommended",
+        "finalTodoPhase": "completed",
+        "finalResponse": "non-empty",
+        "repoChange": "some",
+        "plan": {
+          "minItems": 2,
+          "maxItems": 7,
+          "requireVerificationTask": true
+        }
+      }
+    },
+    "M15": {
+      "description": "A normal completion must be reported with its actual verification result.",
+      "category": "normal-completion",
+      "oracle": "outcome",
+      "turns": [
+        {
+          "message": "Add `describeCacheEntry(entry, now)` to `src/cache.ts` returning \"active\" before expiry and \"expired\" at or after it, export it from `src/index.ts`, add a focused test, run the complete verification, and summarize the exact result."
+        }
+      ],
+      "acceptance": [
+        {
+          "name": "acceptance",
+          "command": "node",
+          "args": [
+            "--experimental-strip-types",
+            "--test",
+            "acceptance/check.test.ts"
+          ]
+        }
+      ],
+      "acceptanceFixture": "M15",
+      "regression": [
+        {
+          "name": "fixture tests",
+          "command": "node",
+          "args": [
+            "--experimental-strip-types",
+            "--test",
+            "tests/auth.test.ts",
+            "tests/cache.test.ts"
+          ]
+        }
+      ],
+      "expect": {
+        "todo": "recommended",
+        "finalTodoPhase": "completed",
+        "finalResponse": "non-empty",
+        "repoChange": "some",
+        "plan": {
+          "minItems": 2,
+          "maxItems": 7,
+          "requireVerificationTask": true
+        }
+      }
+    }
+  }
+}

@@ -8,17 +8,13 @@ export type BashStatus = {
 };
 
 function parseBuiltInBashStatusLine(value: string): string | undefined {
-	if (!/^command\b/i.test(value)) return undefined;
-
-	const exitMatch = value.match(/\bcode\s+(\d+)\b/i);
+	const exitMatch = value.match(/^Command exited with code (\d+)$/);
 	if (exitMatch) return `exit ${exitMatch[1]}`;
 
-	if (/timed out/i.test(value)) {
-		const timeoutMatch = value.match(/\bafter\s+(\d+(?:\.\d+)?)\s+seconds?\b/i);
-		return timeoutMatch ? `timeout ${timeoutMatch[1]}s` : "timeout";
-	}
+	const timeoutMatch = value.match(/^Command timed out after (\d+(?:\.\d+)?) seconds$/);
+	if (timeoutMatch) return `timeout ${timeoutMatch[1]}s`;
 
-	if (/aborted/i.test(value)) return "aborted";
+	if (/^Command aborted$/.test(value)) return "aborted";
 	return undefined;
 }
 
@@ -39,26 +35,28 @@ function inferBashFailureStatus(value: string): string {
 }
 
 export function splitBashStatus(rawText: string, isError: boolean): BashStatus {
-	const raw = stripAnsi(rawText).trimEnd();
-	if (!raw) return { status: isError ? "failed" : "ok", output: "" };
+	const raw = stripAnsi(rawText);
+	const output = raw.trimEnd();
+	if (!output) return { status: isError ? "failed" : "ok", output: "" };
 
-	const lines = raw.split("\n");
+	const lines = rawText.split("\n");
 	let last = lines.length - 1;
-	while (last >= 0 && lines[last].trim() === "") last--;
+	while (last >= 0 && lines[last] === "") last--;
 
-	const lastLine = last >= 0 ? lines[last].trim() : "";
-	const builtInStatus = parseBuiltInBashStatusLine(lastLine);
+	// Match before display sanitization: native spelling, whitespace and controls must match.
+	const lastLine = last >= 0 ? lines[last] : "";
+	const builtInStatus = isError ? parseBuiltInBashStatusLine(lastLine) : undefined;
 	if (builtInStatus) {
 		lines.splice(last, 1);
-		while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop();
-		return { status: builtInStatus, output: lines.join("\n") };
+		return { status: builtInStatus, output: stripAnsi(lines.join("\n")).trimEnd() };
 	}
 
-	if (raw === "(no output)") {
+	if (output === "(no output)") {
 		return { status: isError ? "failed" : "ok", output: "" };
 	}
 
-	return { status: isError ? inferBashFailureStatus(lastLine || raw) : "ok", output: raw };
+	const classificationLine = output.split("\n").at(-1)?.trim() ?? "";
+	return { status: isError ? inferBashFailureStatus(classificationLine) : "ok", output };
 }
 
 export function hasMeaningfulOutput(output: string): boolean {
@@ -323,10 +321,6 @@ export function tail(text: string, maxLines = BASH_TAIL_LINES): string {
 /** Count output lines the same way `tail` trims them, so shown/total stay consistent. */
 export function outputLineCount(output: string): number {
 	return trimTrailingEmptyLines(stripAnsi(output).split("\n")).length;
-}
-
-export function previewTail(output: string, maxLines: number): string {
-	return hasMeaningfulOutput(output) ? tail(output, maxLines) : "";
 }
 
 export function summarizeBashStream(output: string): string {

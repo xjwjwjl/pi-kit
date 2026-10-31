@@ -1,6 +1,12 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { CompactToolUiOptionsRef } from "./settings/options.js";
-import { effectiveCompactToolUiSettings, hasIgnoredProjectSettings, loadShellPath, resolveCompactToolUiOptions } from "./settings/compact-tool-ui.js";
+import {
+	type CompactToolUiLayers,
+	effectiveCompactToolUiSettings,
+	hasIgnoredProjectSettings,
+	layerCompactToolUiSettings,
+	loadCompactToolUiLayers,
+} from "./settings/compact-tool-ui.js";
 
 function registerLazyCompactToolUiSettingsCommand(pi: ExtensionAPI, optionsRef: CompactToolUiOptionsRef) {
 	pi.registerCommand("compact-tool-ui-settings", {
@@ -18,36 +24,40 @@ async function registerCompactRenderers(pi: ExtensionAPI, cwd: string, optionsRe
 		{ registerCompactWrite },
 		{ registerCompactRead },
 		{ registerCompactEdit },
+		{ registerCompactCodemode },
 	] = await Promise.all([
 		import("./renderers/bash.js"),
 		import("./renderers/write.js"),
 		import("./renderers/read.js"),
 		import("./renderers/edit.js"),
+		import("./renderers/codemode.js"),
 	]);
 
-	let shellPath: string | undefined;
-	try {
-		shellPath = await loadShellPath();
-	} catch {
-		shellPath = undefined;
-	}
-
 	// Renderers read through the ref so the settings command can hot-apply a new options object.
-	registerCompactBash(pi, cwd, () => optionsRef.current.bash, () => optionsRef.current.renderShell, shellPath);
+	registerCompactBash(pi, cwd, () => optionsRef.current.renderShell);
 	registerCompactWrite(pi, cwd, () => optionsRef.current.renderShell);
 	registerCompactRead(pi, cwd, () => optionsRef.current.renderShell);
 	registerCompactEdit(pi, cwd, () => optionsRef.current.edit, () => optionsRef.current.renderShell);
+	registerCompactCodemode(pi, () => optionsRef.current.renderShell);
 }
 
-/**
- * Project-level overrides can only be resolved once pi knows whether the folder is trusted, which
- * happens after extension load. Tool registration has to stay at load time, but the options the
- * renderers read can be refreshed on session_start.
- */
+function reportLoadErrors(layers: CompactToolUiLayers, ctx?: ExtensionContext) {
+	for (const scope of ["global", "project"] as const) {
+		const error = layers.errors?.[scope];
+		if (!error) continue;
+		const message = `Failed to load compact-tool-ui ${scope} settings (${error.path}): ${error.message}`;
+		if (ctx?.hasUI) ctx.ui.notify(message, "error");
+		else console.warn(`[compact-tool-ui] ${message}`);
+	}
+}
+
+/** Project trust is known after extension load; refresh options without re-registering renderers. */
 async function applySessionOptions(optionsRef: CompactToolUiOptionsRef, fallbackCwd: string, ctx: ExtensionContext) {
 	const cwd = ctx.cwd || fallbackCwd;
 	const projectTrusted = ctx.isProjectTrusted();
-	optionsRef.current = await resolveCompactToolUiOptions(cwd, projectTrusted);
+	const layers = await loadCompactToolUiLayers(cwd, projectTrusted);
+	optionsRef.current = effectiveCompactToolUiSettings(layerCompactToolUiSettings(layers));
+	reportLoadErrors(layers, ctx);
 	if (!projectTrusted && ctx.hasUI && (await hasIgnoredProjectSettings(cwd))) {
 		ctx.ui.notify("Ignoring project compact-tool-ui settings: this folder is not trusted", "info");
 	}
@@ -58,7 +68,9 @@ export default async function compactToolUiExtension(pi: ExtensionAPI) {
 	const optionsRef: CompactToolUiOptionsRef = { current: effectiveCompactToolUiSettings({}) };
 
 	try {
-		optionsRef.current = await resolveCompactToolUiOptions(cwd, false);
+		const layers = await loadCompactToolUiLayers(cwd, false);
+		optionsRef.current = effectiveCompactToolUiSettings(layerCompactToolUiSettings(layers));
+		reportLoadErrors(layers);
 	} catch (error) {
 		console.warn("[compact-tool-ui] Failed to load settings:", error);
 	}
@@ -74,8 +86,6 @@ export default async function compactToolUiExtension(pi: ExtensionAPI) {
 	});
 
 	try {
-		// In the installed Pi runtime, a same-name built-in override registered from
-		// session_start is lost after /reload. Register during extension load instead.
 		await registerCompactRenderers(pi, cwd, optionsRef);
 	} catch (error) {
 		console.warn("[compact-tool-ui] Failed to load compact renderers:", error);

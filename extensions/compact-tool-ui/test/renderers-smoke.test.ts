@@ -5,8 +5,10 @@ import { registerCompactBash } from "../renderers/bash.js";
 import { registerCompactEdit } from "../renderers/edit.js";
 import { registerCompactRead } from "../renderers/read.js";
 import { registerCompactWrite } from "../renderers/write.js";
+import { captureRegisteredRenderer as captureRegisteredTool } from "./renderer-fixture.js";
 
 const theme = {
+	bg(_token: string, text: string) { return text; },
 	fg(_token: string, text: string) {
 		return text;
 	},
@@ -17,37 +19,34 @@ const theme = {
 
 await initTheme();
 
-function captureRegisteredTool(register: (pi: any, cwd: string) => void) {
-	let tool: any;
-	register(
-		{
-			registerTool(definition: any) {
-				tool = definition;
-			},
-		},
-		process.cwd(),
-	);
-	assert.ok(tool, "tool should be registered");
-	return tool;
-}
-
 function renderText(component: { render: (width: number) => string[] } | undefined, width = 200): string {
 	return component ? component.render(width).join("\n") : "";
 }
 
-test("compact renderers expose configurable render shell", () => {
+test("compact renderers keep the host shell fixed while existing parts hot-switch their layout", () => {
 	let renderShell: "self" | "default" = "default";
 	for (const register of [
-		(pi: any, cwd: string) => registerCompactBash(pi, cwd, {}, () => renderShell),
+		(pi: any, cwd: string) => registerCompactBash(pi, cwd, () => renderShell),
 		(pi: any, cwd: string) => registerCompactRead(pi, cwd, () => renderShell),
 		(pi: any, cwd: string) => registerCompactWrite(pi, cwd, () => renderShell),
 		(pi: any, cwd: string) => registerCompactEdit(pi, cwd, undefined, () => renderShell),
 	]) {
 		const tool = captureRegisteredTool(register);
-		assert.equal(tool.renderShell, "default");
+		assert.equal(tool.renderShell, "self");
+		assert.equal(Object.getOwnPropertyDescriptor(tool, "renderShell")?.get, undefined);
+		const args = { command: "echo hi", path: "src/a.ts", content: "hello" };
+		const state = {};
+		const call = tool.renderCall(args, theme, { ...toolContext(state, "hot-shell", args, undefined), executionStarted: false });
+		const framed = call.render(80);
+		assert.equal(framed[0], " ".repeat(80));
+		assert.equal(framed.at(-1), " ".repeat(80));
 		renderShell = "self";
 		assert.equal(tool.renderShell, "self");
+		const plain = call.render(80);
+		assert.equal(plain.length, 1);
+		assert.match(plain[0], /^(Bash|Read|Write|Edit) /);
 		renderShell = "default";
+		assert.deepEqual(call.render(80), framed, "existing call reacts without renderer remount");
 	}
 });
 
@@ -60,13 +59,180 @@ function toolContext(state: any, toolCallId: string, args: any, lastComponent: a
 		lastComponent,
 		executionStarted: true,
 		argsComplete: true,
-		isPartial: false,
+		isPartial: true,
 		isError: false,
 		invalidate() {},
 		showImages: false,
 		cwd: process.cwd(),
 	};
 }
+
+function withFakeIntervals(run: (timers: { callbacks: Array<() => void>; handles: any[]; cleared: any[] }) => void) {
+	const originalSetInterval = global.setInterval;
+	const originalClearInterval = global.clearInterval;
+	const timers = { callbacks: [] as Array<() => void>, handles: [] as any[], cleared: [] as any[] };
+	global.setInterval = ((callback: () => void) => {
+		const handle = { id: timers.callbacks.length };
+		timers.callbacks.push(callback);
+		timers.handles.push(handle);
+		return handle;
+	}) as unknown as typeof setInterval;
+	global.clearInterval = ((handle: any) => { timers.cleared.push(handle); }) as unknown as typeof clearInterval;
+	try { run(timers); } finally {
+		global.setInterval = originalSetInterval;
+		global.clearInterval = originalClearInterval;
+	}
+}
+
+test("Bash pending, final, and replayed rows never start timers merely because executionStarted is true", () => {
+	withFakeIntervals(({ callbacks }) => {
+		const tool = captureRegisteredTool(registerCompactBash);
+		const args = { command: "echo replay" };
+		for (const [name, overrides] of [
+			["pending", { executionStarted: false, isPartial: true }],
+			["final", { executionStarted: true, isPartial: false }],
+			["replay", { executionStarted: false, isPartial: false }],
+		] as const) {
+			const state = {};
+			const context = { ...toolContext(state, name, args, undefined), ...overrides };
+			const call = tool.renderCall(args, theme, context);
+			assert.equal(callbacks.length, 0, `${name} call must not start a timer`);
+			if (name !== "pending") {
+				tool.renderResult({ content: [{ type: "text", text: "replayed" }], details: undefined },
+					{ expanded: false, isPartial: false }, theme, { ...context, lastComponent: undefined });
+				assert.doesNotMatch(renderText(call), /\b\d+(?:\.\d+)?(?:ms|s)\b/);
+				assert.equal(callbacks.length, 0);
+			}
+		}
+	});
+});
+
+test("Bash final native duration wins over observed live elapsed and rerender cannot restart its timer", () => {
+	withFakeIntervals(({ callbacks, handles, cleared }) => {
+		const tool = captureRegisteredTool(registerCompactBash);
+		const args = { command: "echo timed" };
+		const state = { compactStartedAt: Date.now() - 9800 };
+		const context = toolContext(state, "native-duration", args, undefined);
+		const call = tool.renderCall(args, theme, context);
+		assert.equal(callbacks.length, 1);
+		tool.renderResult({ content: [{ type: "text", text: "timed" }], details: undefined },
+			{ expanded: false, isPartial: false }, theme, { ...context, durationMs: 2400 });
+		assert.match(renderText(call), /2\.4s/);
+		assert.doesNotMatch(renderText(call), /9\.[0-9]s/);
+		assert.deepEqual(cleared, handles);
+		// Pi retains executionStarted=true for settled calls, including after expansion/remount.
+		for (const expanded of [false, true, false]) {
+			tool.renderCall(args, theme, { ...context, expanded, isPartial: false, lastComponent: call, durationMs: 2400 });
+		}
+		assert.equal(callbacks.length, 1, "settled rerenders cannot restart elapsed timers");
+		assert.deepEqual(cleared, handles);
+	});
+});
+
+test("Bash falls back to observed live elapsed without an execution wrapper or fabricated replay timing", () => {
+	withFakeIntervals(({ callbacks, handles, cleared }) => {
+		const originalNow = Date.now;
+		let now = 100_000;
+		Date.now = () => now;
+		try {
+			const tool = captureRegisteredTool(registerCompactBash);
+			const args = { command: "echo observed" };
+			const state = {};
+			const context = toolContext(state, "observed-live-duration", args, undefined);
+			const call = tool.renderCall(args, theme, context);
+			assert.equal(callbacks.length, 1);
+			now += 3400;
+			tool.renderResult({ content: [{ type: "text", text: "observed" }], details: undefined },
+				{ expanded: false, isPartial: false }, theme, context);
+			assert.match(renderText(call), /3\.4s/);
+			assert.deepEqual(cleared, handles);
+			now += 60_000;
+			const replay = tool.renderCall(args, theme, { ...context, executionStarted: true, isPartial: false, lastComponent: call });
+			assert.match(renderText(replay), /3\.4s/, "settled live duration does not keep increasing");
+			assert.equal(callbacks.length, 1);
+		} finally { Date.now = originalNow; }
+	});
+});
+
+test("Bash errors stop live timers even if the result is still marked partial", () => {
+	withFakeIntervals(({ callbacks, handles, cleared }) => {
+		const tool = captureRegisteredTool(registerCompactBash);
+		const args = { command: "false" };
+		const state = {};
+		const context = toolContext(state, "partial-error-stop", args, undefined);
+		const call = tool.renderCall(args, theme, context);
+		assert.equal(callbacks.length, 1);
+		tool.renderResult({ content: [{ type: "text", text: "failure details" }], details: undefined },
+			{ expanded: false, isPartial: true }, theme, { ...context, isError: true });
+		assert.deepEqual(cleared, handles);
+		assert.match(renderText(call), /failed/);
+	});
+});
+
+test("Bash session_shutdown clears all active rendered timers idempotently", () => {
+	withFakeIntervals(({ callbacks, handles, cleared }) => {
+		const handlers = new Map<string, any[]>();
+		const tool = captureRegisteredTool(registerCompactBash, handlers);
+		let invalidations = 0;
+		for (const toolCallId of ["shutdown-a", "shutdown-b"]) {
+			const args = { command: "sleep 10" };
+			tool.renderCall(args, theme, { ...toolContext({}, toolCallId, args, undefined), invalidate() { invalidations++; } });
+		}
+		assert.equal(callbacks.length, 2);
+		assert.equal(handlers.get("session_shutdown")?.length, 1);
+		for (const shutdown of handlers.get("session_shutdown")!) shutdown();
+		assert.deepEqual(cleared, handles);
+		callbacks.forEach((callback) => callback());
+		assert.equal(invalidations, 0, "late callbacks cannot invalidate disposed rows");
+		for (const shutdown of handlers.get("session_shutdown")!) shutdown();
+		assert.deepEqual(cleared, handles, "shutdown does not clear stale handles again");
+	});
+});
+
+test("Bash collapsed results are always empty across pending, streaming, success and error updates", () => {
+	withFakeIntervals(({ handles, cleared }) => {
+		const tool = captureRegisteredTool(registerCompactBash);
+		for (const isError of [false, true]) {
+			const args = Object.freeze({ command: "fixture-only command" });
+			const state: any = {};
+			const ctx = toolContext(state, `empty-lifecycle-${isError}`, args, undefined);
+			const call = tool.renderCall(args, theme, { ...ctx, executionStarted: false });
+			assert.equal(call.render(80).length, 1);
+			for (const [isPartial, text] of [
+				[true, ""], [true, "short"], [true, "x".repeat(20_000)],
+				[true, Array.from({ length: 100 }, (_, index) => `line ${index}`).join("\n")],
+				[false, `diagnostic\n${isError ? "Command exited with code 7" : "complete"}`],
+			] as const) {
+				const content = Object.freeze([Object.freeze({ type: "text", text })]);
+				const value = Object.freeze({ content, details: undefined });
+				const before = JSON.stringify(value);
+				const result = tool.renderResult(value, { expanded: false, isPartial }, theme,
+					{ ...ctx, isPartial, isError: !isPartial && isError });
+				for (const width of [24, 48, 80, 120]) {
+					assert.deepEqual(result.render(width), [], `${width}: partial=${isPartial}, error=${isError}`);
+					assert.equal(call.render(width).length, 1);
+				}
+				assert.equal(JSON.stringify(value), before, "collapsed rendering cannot mutate output");
+			}
+			assert.equal(state.compactStatus, isError ? "failed" : "success");
+			assert.match(renderText(call), isError ? /exit 7/ : /diagnostic/);
+		}
+		assert.deepEqual(cleared, handles, "both final outcomes stop their live timer");
+	});
+});
+
+test("Bash successful and partial output retains status-like stdout verbatim", () => {
+	const tool = captureRegisteredTool(registerCompactBash);
+	for (const line of ["Command exited with code 7", "Command was aborted", "Command timed out after 3 seconds"]) {
+		for (const [isPartial, isError] of [[false, false], [true, false], [true, true]]) {
+			const args = { command: "printf stdout" };
+			const result = tool.renderResult({ content: [{ type: "text", text: `ordinary output\n${line}\n` }], details: undefined },
+				{ expanded: true, isPartial }, theme,
+				{ ...toolContext({}, `stdout-${line}-${isPartial}-${isError}`, args, undefined, true), isPartial, isError });
+			assert.ok(renderText(result).includes(line), `stdout was lost: ${line}, partial=${isPartial}, error=${isError}`);
+		}
+	}
+});
 
 test("compact bash settles state when a partial run finishes while expanded", () => {
 	const tool = captureRegisteredTool(registerCompactBash);
@@ -77,8 +243,10 @@ test("compact bash settles state when a partial run finishes while expanded", ()
 
 	const originalSetInterval = global.setInterval;
 	const originalClearInterval = global.clearInterval;
-	global.setInterval = ((() => ({ fake: true })) as unknown) as typeof setInterval;
-	global.clearInterval = ((() => undefined) as unknown) as typeof clearInterval;
+	const intervals: any[] = [];
+	const cleared: any[] = [];
+	global.setInterval = ((() => { const interval = { fake: true }; intervals.push(interval); return interval; }) as unknown) as typeof setInterval;
+	global.clearInterval = (((interval: any) => { cleared.push(interval); }) as unknown) as typeof clearInterval;
 
 	try {
 		const call = tool.renderCall(args, theme, {
@@ -88,6 +256,7 @@ test("compact bash settles state when a partial run finishes while expanded", ()
 			args,
 			lastComponent: undefined,
 			executionStarted: true,
+			isPartial: true,
 			isError: false,
 			invalidate() {},
 			showImages: false,
@@ -111,7 +280,8 @@ test("compact bash settles state when a partial run finishes while expanded", ()
 				cwd: process.cwd(),
 			},
 		);
-		assert.ok(state.compactInterval, "partial render should create a refresh interval");
+		assert.equal(intervals.length, 1, "partial render should create a refresh interval");
+		assert.deepEqual(cleared, []);
 
 		tool.renderResult(
 			{ content: [{ type: "text", text: "done" }], details: undefined },
@@ -131,9 +301,9 @@ test("compact bash settles state when a partial run finishes while expanded", ()
 			},
 		);
 
-		assert.equal(state.compactInterval, undefined);
+		assert.deepEqual(cleared, intervals, "final render should stop the live timer");
 		assert.equal(typeof state.compactEndedAt, "number");
-		assert.equal(typeof state.endedAt, "number");
+		assert.equal(typeof state.compactDurationMs, "number");
 		assert.equal(state.compactStatus, "success");
 		assert.equal(state.compactSummary, "done");
 		assert.match(renderText(state.compactCallText), /^Bash /);
@@ -176,7 +346,6 @@ test("compact bash starts a refresh timer before the first partial output", () =
 		});
 
 		assert.equal(intervalCallbacks.length, 1);
-		assert.ok(state.compactInterval);
 		assert.match(renderText(call), /running|1\.[0-9]s/);
 
 		intervalCallbacks[0]?.();
@@ -239,7 +408,7 @@ test("compact bash timer rebinds to the latest invalidate after rerender", () =>
 		intervalCallbacks[0]?.();
 		assert.equal(firstInvalidations, 0);
 		assert.equal(secondInvalidations, 1);
-		assert.ok(state.compactInterval);
+		assert.equal(intervalCallbacks.length, 1, "rerender must not allocate a second timer");
 		assert.deepEqual(cleared, []);
 	} finally {
 		global.setInterval = originalSetInterval;
@@ -288,7 +457,7 @@ test("compact bash reuses the same refresh timer across remount-like state repla
 			},
 		);
 		assert.equal(intervalCallbacks.length, 1);
-		assert.ok(firstState.compactInterval);
+		assert.deepEqual(cleared, []);
 
 		const remountedCall = tool.renderCall(args, theme, {
 			...toolContext(secondState, toolCallId, args, undefined),
@@ -297,7 +466,7 @@ test("compact bash reuses the same refresh timer across remount-like state repla
 			},
 		});
 		assert.equal(intervalCallbacks.length, 1);
-		assert.ok(secondState.compactInterval);
+		assert.deepEqual(cleared, []);
 
 		intervalCallbacks[0]?.();
 		assert.equal(firstInvalidations, 0);
@@ -315,8 +484,8 @@ test("compact bash reuses the same refresh timer across remount-like state repla
 			},
 		);
 
-		assert.equal(secondState.compactInterval, undefined);
 		assert.equal(cleared.length, 1);
+		assert.equal(typeof secondState.compactDurationMs, "number");
 	} finally {
 		global.setInterval = originalSetInterval;
 		global.clearInterval = originalClearInterval;
@@ -411,8 +580,8 @@ test("compact bash collapses failures to the header by default", () => {
 	assert.equal(renderText(result), "");
 });
 
-test("compact bash keeps a failure tail preview when enabled", () => {
-	const tool = captureRegisteredTool((pi, cwd) => registerCompactBash(pi, cwd, { tailPreview: "failed", previewLines: 2 }));
+test("compact bash keeps failed diagnostics out of the collapsed result", () => {
+	const tool = captureRegisteredTool(registerCompactBash);
 	const args = { command: "pnpm test" };
 	const state: any = { compactStartedAt: Date.now() - 1500 };
 	const toolCallId = "bash-failure-preview";
@@ -426,14 +595,11 @@ test("compact bash keeps a failure tail preview when enabled", () => {
 	);
 
 	assert.match(renderText(state.compactCallText), /exit 1/);
-	const text = renderText(result);
-	assert.match(text, /│ line-2/);
-	assert.match(text, /│ line-3/);
-	assert.doesNotMatch(text, /line-1/);
+	assert.deepEqual(result.render(80), []);
 });
 
-test("compact bash stays quiet on success in failed tail preview mode", () => {
-	const tool = captureRegisteredTool((pi, cwd) => registerCompactBash(pi, cwd, { tailPreview: "failed", previewLines: 2 }));
+test("compact bash keeps multiline success output out of the collapsed result", () => {
+	const tool = captureRegisteredTool(registerCompactBash);
 	const args = { command: "printf 'alpha\\nbeta\\ngamma\\n'" };
 	const state: any = {};
 	const toolCallId = "bash-failed-mode-success";
@@ -639,8 +805,8 @@ test("compact bash does not show success output summary for empty output", () =>
 	assert.doesNotMatch(text, /more line|\d+L|truncated/);
 });
 
-test("compact bash shows running tail preview when enabled", () => {
-	const tool = captureRegisteredTool((pi, cwd) => registerCompactBash(pi, cwd, { tailPreview: "running", previewLines: 2 }));
+test("compact bash reports streaming line counts without a collapsed output body", () => {
+	const tool = captureRegisteredTool(registerCompactBash);
 	const args = { command: "npm test" };
 	const state: any = {};
 	const toolCallId = "bash-running-preview-on";
@@ -654,8 +820,7 @@ test("compact bash shows running tail preview when enabled", () => {
 	);
 
 	assert.match(renderText(state.compactCallText), /3L so far/);
-	assert.equal(renderText(result), "  │ b\n  │ c\n  ╰─");
-	assert.doesNotMatch(renderText(result), /^a/m);
+	assert.deepEqual(result.render(80), []);
 });
 
 test("compact bash shows semantic summaries for search output", () => {
@@ -775,8 +940,8 @@ test("compact bash summarizes multiline python heredoc commands", () => {
 	assert.doesNotMatch(text, /print\('hi'\)/);
 });
 
-test("compact bash keeps tail preview after success when enabled", () => {
-	const tool = captureRegisteredTool((pi, cwd) => registerCompactBash(pi, cwd, { tailPreview: "all", previewLines: 2 }));
+test("compact bash keeps settled multiline output available only through expansion", () => {
+	const tool = captureRegisteredTool(registerCompactBash);
 	const args = { command: "printf 'alpha\\nbeta\\ngamma\\n'" };
 	const state: any = {};
 	const toolCallId = "bash-settled-preview";
@@ -789,13 +954,15 @@ test("compact bash keeps tail preview after success when enabled", () => {
 		toolContext(state, toolCallId, args, call),
 	);
 
-	const text = renderText(result);
-	assert.doesNotMatch(text, /alpha/);
-	assert.match(text, /beta/);
-	assert.match(text, /gamma/);
+	assert.deepEqual(result.render(80), []);
+	const expanded = tool.renderResult(
+		{ content: [{ type: "text", text: "alpha\nbeta\ngamma\n" }], details: undefined },
+		{ expanded: true, isPartial: false }, theme, toolContext(state, toolCallId, args, result, true),
+	);
+	assert.match(renderText(expanded), /alpha[\s\S]*beta[\s\S]*gamma/);
 });
 
-test("compact bash hides tail preview after success by default", () => {
+test("compact bash has an empty collapsed success result", () => {
 	const tool = captureRegisteredTool(registerCompactBash);
 	const args = { command: "printf 'alpha\\nbeta\\n'" };
 	const state: any = {};
@@ -812,8 +979,8 @@ test("compact bash hides tail preview after success by default", () => {
 	assert.equal(renderText(result), "");
 });
 
-test("compact bash hides running tail preview when disabled", () => {
-	const tool = captureRegisteredTool((pi, cwd) => registerCompactBash(pi, cwd, { tailPreview: "off" }));
+test("compact bash has an empty collapsed streaming result", () => {
+	const tool = captureRegisteredTool(registerCompactBash);
 	const args = { command: "npm test" };
 	const state: any = {};
 	const toolCallId = "bash-running-preview-off";

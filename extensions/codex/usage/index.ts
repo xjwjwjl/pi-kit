@@ -3,7 +3,9 @@ import { QuotaController } from "./src/quota-controller.ts";
 import { selectQuotaWindows, inferWindowRange } from "./src/quota.ts";
 import { emptyScanQuality, emptyStats, scanSessionsInRanges } from "./src/session-scanner.ts";
 import { formatLoadingNotice, formatReport } from "./src/format.ts";
-import { extractEmailFromJWT, fetchUsage, readCodexCredential } from "./src/usage-api.ts";
+import { extractEmailFromJWT, readCodexCredential } from "./src/codex-credential.ts";
+import { fetchUsage } from "./src/usage-api.ts";
+import { createCodexQuotaCommand } from "./src/reset-command.ts";
 import type { ScanQuality, UsageResult, UsageViewData } from "./src/types.ts";
 
 export { formatReport } from "./src/format.ts";
@@ -24,10 +26,6 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 	const controller = new QuotaController();
 
 	pi.events.on("openai-codex:credential-changed", () => {
-		controller.handleCredentialChanged();
-	});
-
-	pi.events.on("openai-codex:reset-credit-consumed", () => {
 		controller.handleCredentialChanged();
 	});
 
@@ -63,6 +61,12 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 		},
 	});
 
+	pi.registerCommand("codex-reset-credit", {
+		description: "View or consume ChatGPT/Codex reset credits",
+		handler: createCodexQuotaCommand({
+			onReset: () => controller.handleCredentialChanged(),
+		}),
+	});
 }
 
 async function buildReport(

@@ -1,141 +1,86 @@
 # compact-tool-ui
 
-这是一个用于讨论和实现 pi tools UI 展示优化的扩展工作目录。
+为 Pi 的 `bash` / `read` / `write` / `edit` 与顶层 `codemode` 提供紧凑行和展开详情轨道（detail rail）。五个工具均通过 `pi.registerToolRenderer()` 定制展示，不注册工具、不包装执行，也不改变工具激活集合、模型收到的结果或会话存储。
 
-当前状态：**MVP v0 与 Expanded v1（`bash` / `read` / `write` / `edit` detail rail）已实现**，并包含 Expanded Bash 原始命令展示、ANSI-safe 换行与 truncation 细节增强。`index.ts` 仅在 TUI session 中覆盖内置 `bash` / `write` / `read` / `edit` 的 renderer，执行逻辑仍委托原始内置 tool；并使用 `renderShell: "self"` 去掉默认 Box/cell 背景与内边距，降低视觉噪音。
+## 使用
 
-## 目标
+目标宿主与开发依赖为 **Pi 1.3.0**，需要 `registerToolRenderer` API。这是独立 Pi package，通过 `package.json` 的 `pi.extensions` 加载；Pi core / TUI 使用宿主提供的 peer dependencies，Bash 展示不依赖外部 shell parser。
 
-优化 pi 内置 tools 在 TUI 中的展示方式，使其：
+首次开发或依赖更新后安装本扩展的检查依赖，再从仓库根目录临时加载（依赖与 lockfile 不同步时重新运行 `npm ci`）：
 
-1. 默认更紧凑，减少滚屏噪音。
-2. 状态更清晰，便于快速判断 tool 正在做什么、是否成功、是否失败。
-3. 失败和截断场景保留足够诊断信息。
-4. 详细内容通过 expand 查看，而不是默认铺满会话。
+```bash
+(cd extensions/compact-tool-ui && npm ci)
+pi -e ./extensions/compact-tool-ui
+```
 
-## 文档
+开发验证：在 `extensions/compact-tool-ui` 运行 `npm run check`（类型检查与测试）。
 
-- [docs/compact-tool-ui-design.md](docs/compact-tool-ui-design.md)：当前讨论沉淀的设计草案。
+也可将本目录的绝对路径加入个人 Pi `settings.json` 的 `extensions` 数组。仅排查本扩展的四个文件 / Shell 工具时可用 `pi --no-extensions -e ./extensions/compact-tool-ui`；该选项也会禁用内置 Codemode 扩展，不能据此检查 Codemode 展示。本扩展不负责启用 Codemode。
 
-## 后续实现方向
+## 当前展示
 
-MVP v0 优先从最容易造成噪音的内置工具开始：
+| 工具 | 折叠态 | 展开态 |
+| --- | --- | --- |
+| `bash` | 所有状态只有一条 header：命令摘要、输出语义摘要或失败类别、运行中 timeout、可用耗时与截断标记；没有正文输出预览 | 原始命令与当前可用输出、截断信息、完整输出路径 |
+| `read` | 路径、可选范围；仅截断、用户 limit 提前结束或图片等情况补 metadata，不显示正文 | 文件正文、高亮、真实行号、continuation / 截断 footer；图片由宿主展示 |
+| `write` | 路径、行数与 UTF-8 大小，不显示正文 | 写入参数中的内容；失败时先显示错误，再显示 attempted content |
+| `edit` | 路径和 diff stat；默认 64 行以内 diff 内联，超限仅 header | 完整可用 diff；失败时显示原始错误 |
+| `codemode` | 一条父行，统计实际调用摘要中的工具名和次数，分开表达脚本与子调用状态 | 调用摘要、JavaScript、脚本输出 / 错误、图片摘要及可用的完整输出路径 |
 
-1. `bash`：成功只显示命令摘要、输出摘要和耗时，耗时统一放在 metadata 最后且低于 1s 不展示；多行 / Python heredoc / 长命令默认压缩成一行；`timeout` 只在运行中显示在 collapsed metadata 中，命令结束后移除（`timeout` / `aborted` 结果仍由 result summary 表达）；内容行数 ≤ 2 的普通命令直接显示首行内容（如 `bash echo hi · hi`），行数 ≥ 3 用 `NL` 计数（如 `50L`），计数只算非空行，输出被内置限制截断时追加 `truncated` 标记；`rg/find/ls` 等常见命令输出会显示 `matches` / `paths` / `entries` 语义摘要，空结果显示 `no matches` / `no paths` / `empty`，`git diff` / `git status --short` 空结果显示 `no changes` / `clean`；失败只显示一行分类摘要（`test failed` / `tsc errors` / `command not found` / `timeout` / `exit <code>`），完整错误靠展开，`bash.tailPreview` 设为 `failed` / `all` 后才追加最后 N 行；running 显示已输出行数（`NL so far`）和耗时。
-2. `write`：成功只显示路径、行数和大小（`write src/generated.ts · 214L · 6.8 KB`），展开后看写入内容。
-3. `read`：普通文本成功只显示路径和可选行号范围；截断时显示 `2000/9000L`、用户 `limit` 提前结束时显示 `4900L more`，图片显示 mime；展开后看文件内容。
-4. `edit`：64 行以内 diff 默认 inline 展示，大 diff 只显示路径和 diff stat，展开后看完整 diff；失败时显示精简错误。
-
-Expanded v1：展开 `bash` / `read` / `write` / `edit` 时使用统一 detail rail、完整命令/内容/diff、行号、高亮、streaming tail、截断与 continuation footer；Bash 命令保留原始文本，仅进行 ANSI-safe 视觉换行。
-
-后续再扩展到：
-
-- `grep`
-- `find`
-- `ls`
-
-## 扩展规范说明
-
-本目录按 pi package 规则提供 `package.json` 中的 `pi.extensions` manifest，因此可以作为目录扩展加载。运行时导入的 pi 包声明在 `peerDependencies`，避免把 pi core / TUI 作为普通依赖打包；Bash 展示不依赖额外运行时 parser。
+- 长命令和文件路径采用约 64 字符预算的中间省略；路径优先保留头部目录和末尾文件名。终端实际宽度仍由组件测宽处理。
+- `read` / `write` / `edit` 失败时只保留一行 compact reason，不增加下一行 hint；完整诊断靠展开。
+- 展开 / 收起沿用宿主 `app.tools.expand` 快捷键，提示按当前键位生成。
+- Bash 展开运行中最多保留最后 28 个逻辑行 / 28 个视觉行，结束后展示完整当前可用输出，不恢复工具已截掉的内容；无可信来源的历史耗时不编造，低于 1s 不显示。
+- 展开命令保留原始结构，只在显示层清理控制序列、将 Tab 展开为 3 个空格并视觉换行；带 guide / 视觉换行的文本不保证可直接复制回 Shell。
 
 ## 设置
 
-通过命令打开全局设置 UI：
+在 TUI 中运行 `/compact-tool-ui-settings`，只有两个配置项：
 
-```text
-/compact-tool-ui-settings
-```
+| 设置 | 默认值 | 含义 |
+| --- | --- | --- |
+| `renderShell` | `"self"` | 无外框，但仍按宿主 `outputPad` 缩进；`"default"` 为 header 与 result 共用一个 Box，额外带状态背景与上下留白 |
+| `edit.inlineDiffMaxLines` | `64` | 内联 diff 的总逻辑行阈值（不是仅增删行数）；`0` 不限，`-1` 为 `never`，从不内联 |
 
-可配置项只有 4 个：
-
-- `Tool render shell`：`self` 保持当前无外框 compact 行；`default` 使用 pi 原本 boxed shell / padding / 背景，更接近展开后的原生外观。
-- `Bash tail preview`：`off`（默认）/ `running` / `failed` / `all`，控制折叠态是否在命令行下方贴出输出尾部。`failed` 是“成功保持安静、出错才铺开”。
-- `Bash preview lines`：尾部预览行数，默认 `2`。
-- `Edit inline diff max lines`：`never` / `0` / `16` / `32` / `64`（默认）/ `128`。`never` 关闭内联 diff，`0` 不限制行数。
-
-配置分为两层，读取时 `全局 ← 项目` **逐字段**覆盖，缺字段则继承下一层：
-
-- 全局：Pi 当前 agent 目录（默认 `~/.pi/agent`，可由 `PI_CODING_AGENT_DIR` 覆盖）中的 `settings.json`。
-- 项目：`<cwd>/.pi/settings.json`（目录名跟随 pi 的 `CONFIG_DIR_NAME`）。
+面板提供 `never` / `0` / `16` / `32` / `64` / `128` 预设，也保留手写的非预设值。JSON 中有限数值向下取整，负数统一为 `-1`。
 
 ```json
 {
   "compactToolUi": {
     "renderShell": "self",
-    "bash": {
-      "tailPreview": "running",
-      "previewLines": 2
-    },
-    "edit": {
-      "inlineDiffMaxLines": 64
-    }
+    "edit": { "inlineDiffMaxLines": 64 }
   }
 }
 ```
 
-```json
-// <cwd>/.pi/settings.json —— 只写想覆盖的字段
-{
-  "compactToolUi": {
-    "bash": { "tailPreview": "failed" }
-  }
-}
-```
+配置按 **内置默认值 ← 全局 ← 项目** 逐字段覆盖，缺字段继承：
 
-`renderShell` 默认值是 `self`，`bash.tailPreview` 默认值是 `off`。`edit.inlineDiffMaxLines` 在 JSON 里用 `-1` 表示 `never`（设置 UI 会显示成 `never`）。
+- 全局：当前 agent 目录的 `settings.json`，默认 `~/.pi/agent/settings.json`，目录可由 `PI_CODING_AGENT_DIR` 覆盖。
+- 项目：`<cwd>/.pi/settings.json`（目录名跟随 Pi 的 `CONFIG_DIR_NAME`），可以只写 `{"compactToolUi":{"edit":{"inlineDiffMaxLines":32}}}` 来覆盖单个字段。
 
-面板的 `Settings scope` 行决定编辑哪一层；在项目层把某个值选成 `inherit`（全局层为 `unset`）会从该文件删掉这个键，从而回到下层或内置默认值。所有行都是循环取值：`Enter`/`Space` 或 `←`/`→` 换一档，环上的 `inherit`/`unset` 就是回退动作。写入只动 `compactToolUi` 里本扩展拥有的 4 个键，同文件的其他 pi 设置和其他扩展的键不会被动；写盘失败会回滚面板显示的值并弹错误提示。
+项目层只在 `ctx.isProjectTrusted()` 为真时读取为有效值。未信任时忽略该层并提示，面板仅允许全局层；扩展加载先读全局，`session_start` 再叠加可信项目值。支持带 UTF-8 BOM 的文件；读取失败按层提示路径和原因，坏层在面板中只读，不阻断正常层，修复文件后重开面板恢复编辑。
 
-面板内的按键（不做模糊搜索，五行不值得，而且搜索输入行会吃掉下面这些键）：
+面板编辑的是 `Settings scope` 所选层的原值；行说明另显示 `Effective` 生效值、`source` 来源（global / project / built-in）、待保存状态和项目覆盖提示。项目层选 `inherit`、全局层选 `unset` 会删除该层键以恢复继承。生效值只采用已读取或成功提交的值，不提前应用排队中的编辑。
 
 | 按键 | 行为 |
 | --- | --- |
-| `↑` `↓` | 移动光标 |
-| `←` `→` | 改当前行的值（后退/前进一档），`Settings scope` 行即切换写入层 |
-| `Enter` `Space` | 取下一档 |
-| `Tab` | 在 `global` 与 `project` 之间切换写入层 |
-| `Backspace` `Delete` | 清掉当前行在**当前层**的键（等于选 `inherit` / `unset`） |
-| `Esc` | 关闭面板（已落盘的改动不因 Esc 回滚） |
+| `↑` `↓` | 移动光标（遵循宿主选择键位） |
+| `←` `→` | 前后循环取值；scope 行切换层 |
+| `Enter` `Space` | 下一档，包含 `inherit` / `unset` 回退档 |
+| `Tab` | 在可信项目中切换 global / project 层 |
+| `Backspace` `Delete` | 清掉当前行在当前层的键 |
+| `Esc` | 关闭面板，不撤销已保存的改动 |
 
-项目层受 pi 的 project trust 门禁：未信任的文件夹里 `.pi/settings.json` 的 `compactToolUi` 不会被读取，会出现一行提示说明被忽略。扩展加载时先按全局值渲染，`session_start` 后才叠上项目层，`/compact-tool-ui-settings` 保存后立即生效。
+面板不做模糊搜索。切换 scope 不创建文件；值成功落盘后立即热应用，已有行也可切换布局且保持展开 / 收起正常。宿主实际 `renderShell` 始终为 `self`，同名配置只控制共享展示组件。
 
-> 0.1.0 之前的 `bash.runningTailPreview` / `successfulTailPreview` / `failedTailPreview` / `successfulOutputSummary` / `settledTailPreview` 已移除，会被忽略；成功输出摘要现在恒开，用 `bash.tailPreview` 表达预览时机，这些旧键会在下一次保存时被清掉。
+保存使用与宿主兼容的文件锁，锁内重读最新文件，只 patch 本批实际编辑的字段；同时清理所选层旧 Bash 键，保留其他字段与未知键。成功后同步该层最新值，保存期间的新编辑继续排队；失败只回滚失败层未保存的编辑，不丢弃另一层的待办。采用临时文件原子替换，Windows 锁冲突有限重试；失败不降级为原地覆写。面板不监听其他窗口的文件变化，重开 / reload 或下次保存时再读取最新值。
 
-实现上遵循内置 tool override 约束：
+## 限制与边界
 
-- `bash` / `write` / `read` / `edit` 在扩展加载时通过同名 `pi.registerTool()` 覆盖内置 renderer。当前 Pi 运行时中，将同名覆盖延后到 `session_start` 会在 `/reload` 后丢失，因此此处预注册。
-- `execute` 始终委托原始内置 tool definition，不改变 tool 执行语义。
-- 通过 `...original` 保留内置 schema、description、prompt metadata 和 result shape。
-- collapsed 视图使用 compact renderer；expanded 的 `bash` / `read` 使用统一 detail rail，`write` / `edit` 保留原始 renderer 作为兼容路径。
-- `read` / `write` / `edit` 失败时只保留一行 compact error reason，不额外显示 hint；完整错误靠展开。
-- `bash` 失败时 collapsed 只保留一行分类摘要，不再默认贴出错误尾部；需要时用 `bash.tailPreview: "failed"`（或 `"all"`）恢复 tail 预览。
-- 默认 `renderShell: "self"` 去掉默认 Box/cell 背景与内边距；可在设置里切到 `default`，让 tool 行使用 pi 原本外层 shell。
-- settings 命令只在 TUI 中调用 `ctx.ui.custom()`；print / JSON / RPC 等非 TUI 模式不会打开自定义组件，也不会覆盖内置工具。
+- 不改变宿主 `shellPath` / `shellCommandPrefix`、图片缩放、工具 schema / description / exposure，或 access-control、sandbox、remote execution/filesystem、audit 扩展的执行定义。其他扩展也注册同名 renderer 时，展示优先级遵循 Pi resolver 链。
+- Codemode 的 `details.calls` 只有可能被截断的参数预览、状态、耗时、错误与可选费用，不含子工具完整输出或 Edit diff；本扩展不采集嵌套事件、不新增子结果存储，也不静态解析脚本猜调用。
+- 原始图片只由宿主按图片设置和终端能力渲染。print / JSON / RPC 等非 TUI 模式不会打开设置面板，也不因本扩展替换工具执行。
+- 独立 `grep` / `find` / `ls` renderer 尚未实现；Bash 中识别这些命令的摘要不等于支持同名工具。
+- 迁移：旧 Bash 预览键即使启用也不生效，成功输出摘要恒开。加载从不写配置；仅面板显式保存时清理所选层旧键，不自动修改已安装副本。旧键清单见[兼容说明](docs/compact-tool-ui-design.md#兼容说明)。
 
-## 运行方式
-
-这是一个独立的 Pi package。首次使用或依赖更新后，先安装本扩展用于类型检查和测试的开发依赖：
-
-```bash
-cd extensions/compact-tool-ui
-npm ci
-cd ../..
-```
-
-然后可以用临时扩展方式测试：
-
-```bash
-pi -e ./extensions/compact-tool-ui
-```
-
-如果本地 `node_modules` 尚未和 `package-lock.json` 同步，重新执行上面的 `npm ci` 即可。Expanded Bash 始终保留原始命令文本，不依赖外部 shell parser。
-
-在 TUI 中，如果已有其他覆盖内置 `read` / `bash` / `write` / `edit` 的扩展，仍可能发生 tool name conflict。尤其是 access-control、sandbox、remote execution/filesystem、audit 类扩展也通过同名 tool override 改写执行语义时，请优先单独加载本扩展，或确保这类安全/远程扩展在本扩展之后加载并成为最终 override。
-
-当前仓库里已有 `extensions/collapse-read` 时，可以先用 `--no-extensions` 只加载本扩展测试：
-
-```bash
-pi --no-extensions -e ./extensions/compact-tool-ui
-```
-
-如果需要项目级自动加载，可以后续迁移或链接到 `.pi/extensions/compact-tool-ui/`。
+完整展示规则、组件边界和验收约束见 [compact-tool-ui-design.md](docs/compact-tool-ui-design.md)。
