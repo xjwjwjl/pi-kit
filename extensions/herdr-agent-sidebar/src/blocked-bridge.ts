@@ -6,6 +6,12 @@ export type HerdrBlockedSignal =
 export class AskUserBlockedBridge {
   private readonly activeToolCalls = new Set<string>();
 
+  reset(): HerdrBlockedSignal | undefined {
+    if (this.activeToolCalls.size === 0) return undefined;
+    this.activeToolCalls.clear();
+    return { active: false };
+  }
+
   onToolStart(toolName: string, toolCallId: string): HerdrBlockedSignal | undefined {
     if (toolName !== "ask_user") return undefined;
 

@@ -21,3 +21,19 @@ test("nested ask_user calls only clear blocked after the final prompt ends", () 
   assert.equal(bridge.onToolEnd("ask_user", "q1"), undefined);
   assert.deepEqual(bridge.onToolEnd("ask_user", "q2"), { active: false });
 });
+
+test("reset clears active calls and emits one balancing signal", () => {
+  const bridge = new AskUserBlockedBridge();
+  bridge.onToolStart("ask_user", "q1");
+  bridge.onToolStart("ask_user", "q2");
+  assert.deepEqual(bridge.reset(), { active: false });
+  assert.equal(bridge.reset(), undefined);
+  assert.equal(bridge.onToolEnd("ask_user", "q1"), undefined);
+  assert.deepEqual(bridge.onToolStart("ask_user", "q3"), { active: true, label: "reply needed" });
+  assert.equal(bridge.onToolEnd("ask_user", "q2"), undefined);
+  assert.deepEqual(bridge.onToolEnd("ask_user", "q3"), { active: false });
+});
+
+test("resetting an idle bridge does not publish an unmatched unblocked signal", () => {
+  assert.equal(new AskUserBlockedBridge().reset(), undefined);
+});
